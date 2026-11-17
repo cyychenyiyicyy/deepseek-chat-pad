@@ -56,9 +56,10 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const importingHistory = useChatStore((state) => state.importingHistory)
   const isMobile = useIsMobile()
   const search = useSettings((state) => state.search)
-  // 联网搜索与附件上传都是 DeepSeek 的服务端能力，自定义模型下不可用
   const activeModel = useModelState((state) => state.active)
   const isDeepseek = activeModel.providerId === 'deepseek'
+  // 联网搜索由 DeepSeek 的 /v1/tools/search 执行，与对话模型无关，只要有 Key 就能开
+  const hasDeepseekKey = Boolean(useSettings((state) => state.apiKey))
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const togglesRef = useRef<HTMLDivElement>(null)
@@ -228,19 +229,19 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
               <span className={styles.toggleLabel}>{t('thinkingSwitch')}</span>
             </button>
           </Tooltip>
-          <Tooltip content={isDeepseek ? t('deactivatedSearchTooltip') : t('modelSearchUnsupported')}>
+          <Tooltip content={hasDeepseekKey ? t('deactivatedSearchTooltip') : t('modelDeepseekKeyMissing')}>
             <button
               type="button"
               className={clsx(
                 styles.toggle,
-                search && isDeepseek && styles.selected,
-                !isDeepseek && styles.toggleDim
+                search && hasDeepseekKey && styles.selected,
+                !hasDeepseekKey && styles.toggleDim
               )}
               aria-label={t('search')}
-              aria-pressed={search && isDeepseek}
+              aria-pressed={search && hasDeepseekKey}
               onClick={() => {
-                if (!isDeepseek) {
-                  showToast({ key: 'modelSearchUnsupported', type: 'error' })
+                if (!hasDeepseekKey) {
+                  showToast({ key: 'modelDeepseekKeyMissing', type: 'error' })
                   return
                 }
                 setSearch(!search)

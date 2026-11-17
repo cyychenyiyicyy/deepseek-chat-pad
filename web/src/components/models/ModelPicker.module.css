@@ -168,3 +168,25 @@
     background-color: var(--dsw-alias-interactive-bg-hover);
   }
 }
+
+.groupCount {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.itemProvider {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+
+.itemProvider + .itemMeta {
+  margin-left: 4px;
+}

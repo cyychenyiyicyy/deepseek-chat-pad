@@ -11,7 +11,6 @@ import { IconButton } from '../base/IconButton.js'
 import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
 import { openSettings } from '../settings/settingsDialogState.js'
-import { ModelSettings } from '../models/ModelSettings.js'
 import { closeMobileSider, useMobileSider } from './mobileSiderState.js'
 import { SessionItem } from './SessionItem.js'
 import styles from './Sider.module.css'
@@ -26,7 +25,6 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   const activeId = useChatStore((state) => state.activeId)
   const [now, setNow] = useState(Date.now)
   const [keyword, setKeyword] = useState('')
-  const [modelSettings, setModelSettings] = useState(false)
   const [deleting, setDeleting] = useState<SessionSummary | null>(null)
   const [deletePending, setDeletePending] = useState(false)
 
@@ -124,7 +122,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
       </div>
 
       <div className={styles.bottom}>
-        <button type="button" className={styles.settings} onClick={() => setModelSettings(true)}>
+        <button type="button" className={styles.settings} onClick={() => openSettings('models')}>
           <span className={styles.settingsIcon}>
             <IconSettingsOutline16 />
           </span>
@@ -138,7 +136,6 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
         </button>
       </div>
 
-      {modelSettings ? <ModelSettings onClose={() => setModelSettings(false)} /> : null}
 
       {deleting ? (
         <Modal

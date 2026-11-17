@@ -192,8 +192,8 @@ async function main() {
   await mkdir(outDir, { recursive: true })
   const coreJson = JSON.stringify(catalog)
   const dirJson = JSON.stringify(directory)
+  // 只产出 JSON：页面按需 fetch，避免启动时解析一个近 400KB 的脚本
   await writeFile(path.join(outDir, 'catalog.json'), coreJson)
-  await writeFile(path.join(outDir, 'catalog.js'), `window.__MODEL_CATALOG__=${coreJson};window.__PROVIDER_DIR__=${dirJson};`)
   await writeFile(path.join(outDir, 'providers.json'), dirJson)
 
   const kb = (n) => `${(n / 1024).toFixed(1)} KB`

@@ -173,7 +173,7 @@ export async function* streamMessage(
   }
 
   if (!supportsStreamResponse()) {
-    yield* toMessageEvents(readServerSentEventsXhr(prepareRequest(url, init), signal))
+    yield* toMessageEvents(readServerSentEventsXhr(await prepareRequest(url, init), signal))
     return
   }
 

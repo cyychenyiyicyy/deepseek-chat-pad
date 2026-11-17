@@ -6,9 +6,9 @@ import { IconCheckOutline16, IconChevronDownOutline14, IconSettingsOutline16 } f
 import { useTranslate } from '../../i18n/index.js'
 import { ensureCatalog, resolveActiveModel } from '../../services/models/resolve.js'
 import { setActiveModel, useModelState, DEEPSEEK_MODELS, type ModelEntry } from '../../services/models/store.js'
+import { openSettings } from '../settings/settingsDialogState.js'
 import type { ProviderMeta } from '../../services/models/catalog.js'
 import { formatContext } from '../../services/models/catalog.js'
-import { ModelSettings } from './ModelSettings.js'
 import styles from './ModelPicker.module.css'
 
 /** 上下文窗口显示成 128K / 1M 这样的短记法 */
@@ -23,7 +23,6 @@ type Group = { key: string; name: string; providerId: string; models: ModelEntry
 export const ModelPicker = () => {
   const t = useTranslate()
   const [open, setOpen] = useState(false)
-  const [settingsOpen, setSettingsOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [catalog, setCatalog] = useState<ProviderMeta[]>([])
   const { providers, active } = useModelState()
@@ -46,6 +45,15 @@ export const ModelPicker = () => {
     }
     return [deepseek, ...providers.map((p) => ({ key: p.id, name: p.name, providerId: p.id, models: p.models }))]
   }, [providers, catalog])
+
+  /** 同一个模型 id 出现在多家厂商时，行内标出厂商，避免看起来像重复项 */
+  const duplicates = useMemo(() => {
+    const counter = new Map<string, number>()
+    for (const group of groups) {
+      for (const model of group.models) counter.set(model.id, (counter.get(model.id) ?? 0) + 1)
+    }
+    return counter
+  }, [groups])
 
   const keyword = query.trim().toLowerCase()
   const filtered = useMemo(
@@ -88,7 +96,7 @@ export const ModelPicker = () => {
         </span>
       </button>
 
-      {open && !settingsOpen
+      {open
         ? createPortal(
             <div
               ref={floatingRef}
@@ -112,7 +120,10 @@ export const ModelPicker = () => {
                 ) : (
                   filtered.map((group) => (
                     <div key={group.key} className={styles.group}>
-                      <div className={styles.groupName}>{group.name}</div>
+                      <div className={styles.groupName}>
+                        {group.name}
+                        <span className={styles.groupCount}>{group.models.length}</span>
+                      </div>
                       {group.models.map((model) => {
                         const selected =
                           group.providerId === active.providerId && model.id === active.modelId
@@ -128,6 +139,9 @@ export const ModelPicker = () => {
                             }}
                           >
                             <span className={styles.itemName}>{model.name}</span>
+                            {(duplicates.get(model.id) ?? 0) > 1 ? (
+                              <span className={styles.itemProvider}>{group.name}</span>
+                            ) : null}
                             {model.meta?.ctx ? (
                               <span className={styles.itemMeta}>
                                 {formatContext(model.meta.ctx)} {t('modelContextSuffix')}
@@ -146,7 +160,7 @@ export const ModelPicker = () => {
                 className={styles.manage}
                 onClick={() => {
                   setOpen(false)
-                  setSettingsOpen(true)
+                  openSettings('models')
                 }}
               >
                 <IconSettingsOutline16 />
@@ -157,7 +171,6 @@ export const ModelPicker = () => {
           )
         : null}
 
-      {settingsOpen ? <ModelSettings onClose={() => setSettingsOpen(false)} /> : null}
     </>
   )
 }

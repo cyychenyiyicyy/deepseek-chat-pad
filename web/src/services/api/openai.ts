@@ -83,7 +83,7 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
 
   // 老 WebView 没有 fetch 流式响应，改走 XHR 增量通道
   if (!supportsStreamResponse()) {
-    yield* translate(readServerSentEventsXhr(prepareRequest(url, init), signal), model)
+    yield* translate(readServerSentEventsXhr(await prepareRequest(url, init), signal), model)
     return
   }
 

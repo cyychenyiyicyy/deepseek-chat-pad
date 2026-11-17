@@ -1,19 +1,25 @@
 import clsx from 'clsx'
 import { useTranslate } from '../../i18n/index.js'
-import { IconMenuOutline20, IconNewChatOutline20, IconStopFill16 } from '../base/icons.js'
+import {
+  IconDarkOutline16,
+  IconLightOutline16,
+  IconMenuOutline20,
+  IconNewChatOutline20,
+} from '../base/icons.js'
 import { IconButton } from '../base/IconButton.js'
 import { newChat } from '../../services/chat/store.js'
-import { stopReadAloud } from '../../services/speech/readAloud.js'
-import { setSiderCollapsed, useSettings } from '../../services/settings.js'
+import { setSiderCollapsed, setThemePreference, useSettings } from '../../services/settings.js'
+import { useTheme } from '../../app/theme.js'
 import styles from './TabletHeader.module.css'
 
 /**
- * 平板 / 桌面顶栏：左侧菜单按钮控制侧栏开合（带动效），右侧是停止朗读与新对话。
- * 与官方平板端一致：按钮常驻，标题居中偏左。
+ * 平板 / 桌面顶栏：左侧菜单按钮控制侧栏开合（带动效），
+ * 右侧是深浅色切换与新对话。
  */
 export const TabletHeader = ({ title, compact = false }: { title?: string; compact?: boolean }) => {
   const t = useTranslate()
   const collapsed = useSettings((state) => state.siderCollapsed)
+  const theme = useTheme()
 
   return (
     <div className={clsx(styles.header, compact && styles.compact)}>
@@ -30,10 +36,10 @@ export const TabletHeader = ({ title, compact = false }: { title?: string; compa
         <IconButton
           size="m"
           tone="primary"
-          icon={<IconStopFill16 />}
-          tooltip={t('stopReadingAloud')}
-          aria-label={t('stopReadingAloud')}
-          onClick={stopReadAloud}
+          icon={theme === 'dark' ? <IconLightOutline16 /> : <IconDarkOutline16 />}
+          tooltip={theme === 'dark' ? t('themeToLight') : t('themeToDark')}
+          aria-label={theme === 'dark' ? t('themeToLight') : t('themeToDark')}
+          onClick={() => setThemePreference(theme === 'dark' ? 'light' : 'dark')}
         />
         <IconButton
           size="m"

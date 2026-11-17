@@ -1,5 +1,13 @@
 import { streamMessage } from '../api/client.js'
 import { streamOpenAI, type OpenAIMessage } from '../api/openai.js'
+import {
+  deepseekFetch,
+  deepseekSearch,
+  extractUrls,
+  formatFetchContext,
+  formatSearchContext,
+} from '../api/tools.js'
+import type { SearchResult } from '../api/tools.js'
 import type { CreateMessageRequest, MessageParam, MessageStreamEvent } from '../api/types.js'
 import { useSettings } from '../settings.js'
 import { chatUrl, findModelMeta, loadCoreProviders, type ModelMeta, type ProviderMeta } from './catalog.js'
@@ -53,7 +61,8 @@ export const resolveActiveModel = (catalog: ProviderMeta[] = []): ResolvedModel 
 
   if (!custom) {
     const model =
-      deepseek.models.find((m) => m.id === active.modelId) ?? deepseek.models[0] ?? { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash' }
+      deepseek.models.find((m) => m.id === active.modelId) ??
+      deepseek.models[0] ?? { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash' }
     return {
       provider: deepseek,
       model,
@@ -75,53 +84,175 @@ export const resolveActiveModel = (catalog: ProviderMeta[] = []): ResolvedModel 
   }
 }
 
+/** 本轮最后一条用户消息的纯文本 */
+const lastUserText = (body: CreateMessageRequest): string => {
+  for (let i = body.messages.length - 1; i >= 0; i -= 1) {
+    const param = body.messages[i]
+    if (param.role !== 'user') continue
+    if (typeof param.content === 'string') return param.content
+    return param.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n')
+  }
+  return ''
+}
+
 /** 把本应用的 Messages 结构降级成 OpenAI 兼容的纯文本消息 */
-const toOpenAIMessages = (body: CreateMessageRequest): OpenAIMessage[] => {
+const toOpenAIMessages = (body: CreateMessageRequest, extraContext = ''): OpenAIMessage[] => {
   const messages: OpenAIMessage[] = [{ role: 'system', content: body.system }]
-  for (const param of body.messages as MessageParam[]) {
-    if (param.role === 'latest_reminder') continue
+  const list = body.messages as MessageParam[]
+  // 额外上下文拼到最后一条用户消息后面
+  const lastUserIndex = (() => {
+    for (let i = list.length - 1; i >= 0; i -= 1) if (list[i].role === 'user') return i
+    return -1
+  })()
+
+  list.forEach((param, index) => {
+    if (param.role === 'latest_reminder') return
     if (param.role === 'user') {
+      let text: string
       if (typeof param.content === 'string') {
-        messages.push({ role: 'user', content: param.content })
-        continue
+        text = param.content
+      } else {
+        text = param.content
+          .map((block) => {
+            if (block.type === 'text') return block.text
+            // 自定义厂商下附件不参与请求（UI 已提示），给出可见占位，避免内容凭空消失
+            return block.type === 'image' ? '［附件：图片］' : '［附件：文档］'
+          })
+          .join('\n')
       }
-      const parts = param.content
-        .map((block) => {
-          if (block.type === 'text') return block.text
-          // 自定义厂商下附件不参与请求（UI 已限制），这里给出可见占位，避免内容凭空消失
-          return block.type === 'image' ? '［附件：图片］' : '［附件：文档］'
-        })
-        .join('\n')
-      messages.push({ role: 'user', content: parts })
-      continue
+      if (index === lastUserIndex && extraContext) {
+        text = `${text}\n\n${extraContext}`
+      }
+      messages.push({ role: 'user', content: text })
+      return
     }
     const text = param.content
       .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
       .map((block) => block.text)
       .join('')
     if (text) messages.push({ role: 'assistant', content: text })
+  })
+
+  if (lastUserIndex === -1 && extraContext) {
+    messages.push({ role: 'user', content: extraContext })
   }
   return messages
 }
 
 /** 用首条提问生成会话标题，替代 DeepSeek 服务端的 title 扩展 */
 const deriveTitle = (body: CreateMessageRequest): string => {
-  for (let i = body.messages.length - 1; i >= 0; i -= 1) {
-    const param = body.messages[i]
-    if (param.role !== 'user') continue
-    const text =
-      typeof param.content === 'string'
-        ? param.content
-        : param.content.map((b) => (b.type === 'text' ? b.text : '')).join(' ')
-    const clean = text.replace(/\s+/g, ' ').trim()
-    if (clean) return clean.slice(0, 24)
+  const clean = lastUserText(body).replace(/\s+/g, ' ').trim()
+  return clean.slice(0, 24)
+}
+
+const randomHex = (bytes: number) =>
+  Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('')
+
+/**
+ * 自定义模型下的服务端工具替代方案。
+ *
+ * DeepSeek 的 deepseek_web_search / deepseek_read_url 只在它自己的服务端跑，
+ * 换成别家模型时改由客户端调用 DeepSeek 的 /v1/tools/search 与 /v1/tools/fetch 取回资料，
+ * 再把这批资料拼进用户消息。返回的第二个值是给模型看的上下文。
+ */
+const collectDeepseekTools = async (
+  body: CreateMessageRequest,
+  apiKey: string,
+  signal: AbortSignal
+): Promise<{
+  context: string
+  calls: { id: string; query: string; results: SearchResult[] }[]
+  pages: { url: string; title: string; content: string }[]
+}> => {
+  const wantsSearch = body.tools.some((tool) => tool.type === 'deepseek_web_search')
+  const wantsRead = body.tools.some((tool) => tool.type === 'deepseek_read_url')
+  const question = lastUserText(body).trim()
+  const calls: { id: string; query: string; results: SearchResult[] }[] = []
+  const pages: { url: string; title: string; content: string }[] = []
+  const contexts: string[] = []
+
+  if (!apiKey) return { context: '', calls, pages }
+
+  if (wantsSearch && question) {
+    try {
+      const results = await deepseekSearch(apiKey, question.slice(0, 128), { count: 8, signal })
+      if (results.length > 0) {
+        const id = `srvtoolu_s_00_${randomHex(16)}`
+        calls.push({ id, query: question.slice(0, 128), results })
+        contexts.push(formatSearchContext(question.slice(0, 128), results))
+      }
+    } catch {
+      // 搜索失败不阻断对话，模型照常回答
+    }
   }
-  return ''
+
+  if (wantsRead && question) {
+    const urls = extractUrls(question, 3)
+    for (const url of urls) {
+      try {
+        const page = await deepseekFetch(apiKey, url, signal)
+        pages.push({ url, title: page.title, content: page.content })
+      } catch {
+        // 单个链接失败忽略
+      }
+    }
+    if (pages.length > 0) contexts.push(formatFetchContext(pages))
+  }
+
+  return { context: contexts.join('\n\n'), calls, pages }
+}
+
+/** 搜索结果转成界面认识的服务端工具块内容 */
+const toWebSearchContent = (results: SearchResult[]) =>
+  results.map((item) => ({
+    type: 'web_search_result' as const,
+    title: item.title,
+    url: item.url,
+    snippet: item.snippet,
+    site_name: item.site_name,
+    site_icon: item.site_icon,
+    encrypted_content: '',
+    page_age: item.date,
+  }))
+
+/** 把搜索过程画成与 DeepSeek 一致的工具块，让界面照常显示来源卡片 */
+function* searchBlocks(
+  calls: { id: string; query: string; results: SearchResult[] }[]
+): Generator<MessageStreamEvent> {
+  let index = 0
+  for (const call of calls) {
+    yield {
+      type: 'content_block_start',
+      index,
+      content_block: {
+        type: 'server_tool_use',
+        id: call.id,
+        name: 'deepseek_web_search',
+        input: { action: 'search', queries: [call.query] },
+        caller: { type: 'direct' },
+        kind: 'search',
+      },
+    }
+    yield { type: 'content_block_stop', index }
+    index += 1
+    yield {
+      type: 'content_block_start',
+      index,
+      content_block: {
+        type: 'web_search_tool_result',
+        tool_use_id: call.id,
+        content: toWebSearchContent(call.results),
+        kind: 'search',
+      },
+    }
+    yield { type: 'content_block_stop', index }
+    index += 1
+  }
 }
 
 /**
  * 发送对话请求，按当前选择的厂商走不同协议，对外统一产出 Messages 事件流。
- * 切换到自定义模型时，深度思考只在模型支持的情况下开启。
+ * 自定义模型下，联网搜索与读链接改由 DeepSeek 的底层工具接口代劳。
  */
 export async function* streamChat(
   body: CreateMessageRequest,
@@ -139,20 +270,16 @@ export async function* streamChat(
     throw new Error('当前模型还没有填写 API Key')
   }
 
+  const settings = useSettings.getState()
   const thinking = body.thinking.type === 'enabled' && Boolean(resolved.meta?.reason)
-  const messages = toOpenAIMessages(body)
-  // DeepSeek 的服务端工具（联网搜索 / 读链接）不能发给第三方端点，否则直接 400
-  void body.tools
 
-  const stream = streamOpenAI({
-    apiKey: resolved.apiKey,
-    url: resolved.url,
-    model: resolved.model.id,
-    messages,
-    thinking,
-    noTemperature: Boolean(resolved.meta?.noTemp),
-    signal,
-  })
+  // DeepSeek 的两个工具接口与对话模型无关，先用它们把资料取齐
+  const { context, calls } = await collectDeepseekTools(body, settings.apiKey ?? '', signal)
+  if (calls.length > 0) {
+    yield* searchBlocks(calls)
+  }
+
+  const messages = toOpenAIMessages(body, context)
 
   // 自定义厂商没有服务端标题，先补一条带标题的 message_delta，让会话列表有名字
   if (body.title?.enabled) {
@@ -165,5 +292,13 @@ export async function* streamChat(
     }
   }
 
-  yield* stream
+  yield* streamOpenAI({
+    apiKey: resolved.apiKey,
+    url: resolved.url,
+    model: resolved.model.id,
+    messages,
+    thinking,
+    noTemperature: Boolean(resolved.meta?.noTemp),
+    signal,
+  })
 }

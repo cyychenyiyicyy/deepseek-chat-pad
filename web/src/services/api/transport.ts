@@ -14,16 +14,40 @@ type NativeBridge = { __DS_NATIVE__?: { version?: string }; __DS_PROXY__?: strin
 
 const bridge = () => window as unknown as NativeBridge
 
-/** 原生壳会在 User-Agent 里追加这个标记；也可以用全局变量显式声明 */
+/** 原生壳会在 User-Agent 里追加这个标记 */
 const NATIVE_UA = 'DeepSeekTablet/'
 
-/** 是否运行在 Android 壳里 */
-export const isNativeShell = (): boolean =>
-  Boolean(bridge().__DS_NATIVE__) || (typeof navigator !== 'undefined' && navigator.userAgent.includes(NATIVE_UA))
+let shellProbe: Promise<boolean> | null = null
 
-/** 壳提供的代理路径；未运行在壳里时返回 null */
+/**
+ * 判断是否运行在 Android 壳里。
+ *
+ * 早先只看 User-Agent，一旦 UA 定制没生效，请求就会直接打到目标站点并被 CORS 拦死
+ * （表现为「请求根本发不出去」）。所以改成主动探测同源的 `/__ds_health`：
+ * 本地壳一定会在 127.0.0.1 上提供这个端点，普通浏览器里则会 404 / 连接失败。
+ */
+const detectShell = (): Promise<boolean> => {
+  shellProbe ??= (async () => {
+    if (bridge().__DS_NATIVE__) return true
+    if (typeof navigator !== 'undefined' && navigator.userAgent.includes(NATIVE_UA)) return true
+    try {
+      const res = await fetch(new URL('__ds_health', document.baseURI).href, { cache: 'no-store' })
+      if (!res.ok) return false
+      const body = (await res.json()) as { ok?: boolean }
+      return body.ok === true
+    } catch {
+      return false
+    }
+  })()
+  return shellProbe
+}
+
+/** 同步读取已探明的结果；未探测时按「不在壳里」处理 */
+export const isNativeShellSync = (): boolean => Boolean(bridge().__DS_NATIVE__)
+
+/** 已探测到的壳地址；未探测返回 null（异步接口用这个） */
 const proxyPath = (): string | null => {
-  if (!isNativeShell()) return null
+  if (!isNativeShellSync()) return null
   return bridge().__DS_PROXY__ ?? '/__ds_proxy'
 }
 
@@ -46,7 +70,7 @@ export type PreparedRequest = {
 }
 
 /** 把一次 API 调用折叠成实际要发出的请求（fetch 与 XHR 两条通道共用） */
-export const prepareRequest = (url: string, init: RequestInit = {}): PreparedRequest => {
+export const prepareRequest = async (url: string, init: RequestInit = {}): Promise<PreparedRequest> => {
   const headers = new Headers(init.headers ?? {})
   const method = (init.method ?? 'GET').toUpperCase()
   const body = (init.body as BodyInit | null | undefined) ?? null
@@ -55,7 +79,8 @@ export const prepareRequest = (url: string, init: RequestInit = {}): PreparedReq
     plain[key] = value
   })
 
-  const proxy = proxyPath()
+  const inShell = await detectShell()
+  const proxy = inShell ? proxyPath() ?? '/__ds_proxy' : null
   if (!proxy) {
     return { url, method, headers: plain, body, proxied: false }
   }
@@ -81,8 +106,8 @@ export const prepareRequest = (url: string, init: RequestInit = {}): PreparedReq
  * 带 API Key 的请求统一走这里。
  * 原生壳内会改写成同源的 POST /__ds_proxy，目标地址和鉴权头放在自定义头里。
  */
-export const apiFetch = (url: string, init: RequestInit = {}): Promise<Response> => {
-  const prepared = prepareRequest(url, init)
+export const apiFetch = async (url: string, init: RequestInit = {}): Promise<Response> => {
+  const prepared = await prepareRequest(url, init)
   return fetch(prepared.url, {
     method: prepared.method,
     headers: prepared.headers,
@@ -93,7 +118,3 @@ export const apiFetch = (url: string, init: RequestInit = {}): Promise<Response>
     credentials: prepared.proxied ? 'omit' : 'same-origin',
   })
 }
-
-/** GET 便捷写法 */
-export const apiGet = (url: string, headers: Record<string, string> = {}) =>
-  apiFetch(url, { method: 'GET', headers })

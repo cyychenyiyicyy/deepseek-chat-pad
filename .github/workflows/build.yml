@@ -76,7 +76,7 @@ jobs:
           apk=android/app/build/outputs/apk/debug/app-debug.apk
           echo "== APK 内 assets/www =="
           unzip -l "$apk" | grep 'assets/www/' | wc -l
-          for f in assets/www/index.html assets/www/catalog/catalog.js assets/www/catalog/providers.json; do
+          for f in assets/www/index.html assets/www/catalog/catalog.json assets/www/catalog/providers.json; do
             unzip -l "$apk" "$f" >/dev/null || { echo "缺少 $f"; exit 1; }
             echo "OK  $f"
           done

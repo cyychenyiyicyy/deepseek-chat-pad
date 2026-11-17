@@ -68,7 +68,11 @@ export const fetchEndpointModels = async (
   return ids.map((id) => ({ id, name: id }))
 }
 
-/** 用本地目录给模型补元信息；目录里没有的按端点给的名字展示 */
+/**
+ * 用本地目录给模型补元信息。
+ * 优先认「同一家厂商」的元数据，其次认 Base URL 匹配到的厂商，最后才按模型名全局兜底——
+ * 多家厂商暴露同名模型时（如 openrouter 与 deepinfra 都有 deepseek-chat），前两级能保证不串。
+ */
 export const enrichModels = (
   providerId: string,
   api: string,
@@ -81,7 +85,9 @@ export const enrichModels = (
   const matched = matchProvider(api, list)
   return models.map((m) => {
     const meta: ModelMeta | null =
-      findModelMeta(list, providerId, m.id) ?? (matched ? findModelMeta(list, matched.id, m.id) : null)
+      findModelMeta(list, providerId, m.id, { strict: true }) ??
+      (matched ? findModelMeta(list, matched.id, m.id, { strict: true }) : null) ??
+      findModelMeta(list, providerId, m.id)
     return meta ? { id: m.id, name: meta.name || m.name, meta } : { id: m.id, name: m.name }
   })
 }

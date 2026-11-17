@@ -62,6 +62,8 @@ public final class MainActivity extends AppCompatActivity {
     private static final String LOOPBACK_HOST = "127.0.0.1";
 
     private static final int COLOR_BACKGROUND = 0xFF0F1115;
+    /** 浅色主题时的窗口底色，与网页 --dsw-alias-bg-base 对齐 */
+    private static final int COLOR_BACKGROUND_LIGHT = 0xFFFFFFFF;
     private static final int COLOR_TEXT = 0xFFE7E9EC;
 
     private static final long ACTIVITY_RESTART_DELAY_MS = 600L;
@@ -109,18 +111,61 @@ public final class MainActivity extends AppCompatActivity {
         window.setStatusBarColor(Color.TRANSPARENT);
         window.setNavigationBarColor(Color.TRANSPARENT);
         window.setNavigationBarDividerColor(Color.TRANSPARENT);
-        // 深色主题 → 系统栏图标用浅色
-        WindowInsetsControllerCompat controller =
-                WindowCompat.getInsetsController(window, window.getDecorView());
-        if (controller != null) {
-            controller.setAppearanceLightStatusBars(false);
-            controller.setAppearanceLightNavigationBars(false);
-        }
+        applySystemBarAppearance(true);
         WindowManager.LayoutParams attributes = window.getAttributes();
         attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         window.setAttributes(attributes);
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+    }
+
+    /**
+     * 让系统栏图标跟随网页主题：深色页面用浅色图标，浅色页面用深色图标。
+     * 同时把窗口/WebView 底色一起换掉，避免切到浅色时加载过程闪一下黑。
+     */
+    private void applySystemBarAppearance(boolean dark) {
+        Window window = getWindow();
+        WindowInsetsControllerCompat controller =
+                WindowCompat.getInsetsController(window, window.getDecorView());
+        if (controller != null) {
+            controller.setAppearanceLightStatusBars(!dark);
+            controller.setAppearanceLightNavigationBars(!dark);
+        }
+        int background = dark ? COLOR_BACKGROUND : COLOR_BACKGROUND_LIGHT;
+        window.setBackgroundDrawable(new ColorDrawable(background));
+        if (rootLayout != null) {
+            rootLayout.setBackgroundColor(background);
+        }
+        if (webView != null) {
+            webView.setBackgroundColor(background);
+        }
+    }
+
+    /** 网页通过 window.DSNative.setDark(...) 通知原生切换系统栏 */
+    public class ThemeBridge {
+        @android.webkit.JavascriptInterface
+        public void setDark(final boolean dark) {
+            runOnUiThread(() -> applySystemBarAppearance(dark));
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (webView != null) {
+            // 页面进入后台后停掉定时器与合成，后台 CPU / 内存占用明显下降
+            webView.onPause();
+            webView.pauseTimers();
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (webView != null) {
+            webView.resumeTimers();
+            webView.onResume();
+        }
     }
 
     private void buildContentView() {
@@ -207,6 +252,12 @@ public final class MainActivity extends AppCompatActivity {
             settings.setAlgorithmicDarkeningAllowed(false);
         }
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
+
+        // 不可见时把渲染进程降到最低优先级，是「后台内存高」最有效的一处开关
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, true);
+        }
+        webView.addJavascriptInterface(new ThemeBridge(), "DSNative");
 
         webView.setWebViewClient(new ShellWebViewClient());
         webView.setWebChromeClient(new ShellWebChromeClient());

@@ -25,7 +25,10 @@ export const useTheme = (): Theme => {
 const syncPageBackground = () => {
   const backgroundColor = getComputedStyle(document.body).backgroundColor
   document.documentElement.style.backgroundColor = backgroundColor
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', backgroundColor)
+  // 有两个 theme-color（浅色/深色各一条），一起更新
+  document.querySelectorAll('meta[name="theme-color"]').forEach((meta) => {
+    meta.setAttribute('content', backgroundColor)
+  })
 }
 
 /** 同步页面主题、根画布背景和支持 theme-color 的浏览器栏。 */
@@ -41,6 +44,13 @@ const applyTheme = (theme: Theme) => {
     body.removeAttribute('data-ds-dark-theme')
   }
   document.documentElement.style.colorScheme = theme
+  // 通知 Android 壳切换系统栏图标；浏览器里没有这个对象，静默跳过
+  const nativeBridge = (window as { DSNative?: { setDark?: (dark: boolean) => void } }).DSNative
+  try {
+    nativeBridge?.setDark?.(theme === 'dark')
+  } catch {
+    // 原生调用失败不影响页面主题
+  }
   // 首次背景色同步在样式表加载完成后执行，适配 WebKit 的 defer 脚本执行顺序。
   if (document.readyState === 'complete') {
     syncPageBackground()

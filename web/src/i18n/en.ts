@@ -14,7 +14,7 @@ export const en = {
     'Chats or attachments have not been saved locally. Retry before closing this page.',
   sessionDeleteFailed: 'Unable to delete this chat. Please try again.',
   settings: 'Settings',
-  appName: 'API usage demo',
+  appName: 'DeepSeek Tablet',
   deleteSessionModalContentTitle: 'Delete chat?',
   deleteSessionWithFilesDescription:
     'This chat and its uploaded files will be permanently deleted and cannot be recovered. Delete this chat?',
@@ -98,6 +98,7 @@ export const en = {
   settingsLocationCity: 'Select city',
   settingsLocationRegion: 'Select country or region',
   settingDialogAsideGeneralOptionLabel: 'General',
+  settingDialogAsideModelsOptionLabel: 'Model services',
   settingDialogAsideDataOptionLabel: 'Data',
   avatarMenuSettingsDialogThemeItemLabel: 'Theme',
   avatarMenuSettingsDialogThemeSelectLightOption: 'Light',
@@ -228,4 +229,6 @@ export const en = {
   siderPinned: 'Pinned',
   siderModelEntry: 'Models',
   stopReadingAloud: 'Stop reading',
+  themeToDark: 'Switch to dark',
+  themeToLight: 'Switch to light',
 } satisfies Record<keyof typeof zh, string>

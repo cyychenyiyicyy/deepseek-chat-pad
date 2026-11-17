@@ -11,7 +11,7 @@ export const zh = {
   sessionSaveFailed: '对话或附件尚未保存到本机，关闭页面可能丢失，请重试',
   sessionDeleteFailed: '删除对话失败，请重试',
   settings: '设置',
-  appName: 'API 使用 demo',
+  appName: 'DeepSeek 平板',
   deleteSessionModalContentTitle: '永久删除对话',
   deleteSessionWithFilesDescription: '删除后，该对话及其中上传的文件将不可恢复。确认删除吗？',
   cancel: '取消',
@@ -93,6 +93,7 @@ export const zh = {
   settingsLocationCity: '请选择市',
   settingsLocationRegion: '请选择国家或地区',
   settingDialogAsideGeneralOptionLabel: '通用设置',
+  settingDialogAsideModelsOptionLabel: '模型服务',
   settingDialogAsideDataOptionLabel: '数据管理',
   avatarMenuSettingsDialogThemeItemLabel: '主题',
   avatarMenuSettingsDialogThemeSelectLightOption: '浅色',
@@ -218,4 +219,6 @@ export const zh = {
   siderPinned: '置顶',
   siderModelEntry: '模型',
   stopReadingAloud: '停止朗读',
+  themeToDark: '切换到深色',
+  themeToLight: '切换到浅色',
 } as const

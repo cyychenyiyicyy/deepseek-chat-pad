@@ -143,14 +143,20 @@ export const formatContext = (tokens: number | null | undefined): string => {
   return String(tokens)
 }
 
-/** 在本地目录里查某个模型的元信息 */
-export const findModelMeta = (  providers: ProviderMeta[],
+/**
+ * 在本地目录里查某个模型的元信息。
+ * strict 为 true 时只认指定厂商，用于「多家厂商有同名模型」时避免张冠李戴。
+ */
+export const findModelMeta = (
+  providers: ProviderMeta[],
   providerId: string,
-  modelId: string
+  modelId: string,
+  options: { strict?: boolean } = {}
 ): ModelMeta | null => {
   const provider = providers.find((p) => p.id === providerId)
   const model = provider?.models?.find((m) => m.id === modelId)
   if (model) return model
+  if (options.strict) return null
   // 用户手里的模型名常带厂商前缀（如 openrouter 的 "deepseek/deepseek-chat"）
   const tail = modelId.includes('/') ? modelId.slice(modelId.lastIndexOf('/') + 1) : ''
   if (!tail) return null
