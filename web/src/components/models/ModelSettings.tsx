@@ -178,7 +178,7 @@ export const ModelSettings = ({ onClose }: { onClose: () => void }) => {
               size="s"
               onClick={() => {
                 onClose()
-                openSettings('general')
+                openSettings('data')
               }}
             >
               {t('settings')}

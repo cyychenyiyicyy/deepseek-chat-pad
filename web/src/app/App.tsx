@@ -16,6 +16,7 @@ import { SessionView } from '../components/session/SessionView.js'
 import { MobileHeader } from '../components/session/MobileHeader.js'
 import { Welcome } from '../components/session/Welcome.js'
 import { ensureApiKey } from '../components/settings/settingsDialogState.js'
+import { hasAnyCredential } from '../services/models/ready.js'
 import { SettingsDialog } from '../components/settings/SettingsDialog.js'
 import { Toast } from '../components/base/Toast.js'
 import { showToast } from '../components/base/toastState.js'
@@ -83,8 +84,10 @@ export const App = () => {
 
   useEffect(() => {
     void initChat()
-    // 首次打开先在设置里输入 API Key
-    ensureApiKey()
+    // 首次打开：完全没有凭据时才强制进设置，已配置自定义端点的人不必再填 DeepSeek Key
+    if (!hasAnyCredential()) {
+      ensureApiKey()
+    }
   }, [])
 
   return (
