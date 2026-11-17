@@ -69,6 +69,19 @@ jobs:
         working-directory: android
         run: gradle assembleDebug --no-daemon --stacktrace
 
+      # 构建绿不等于装上能用：确认 Web 产物真的进了 APK
+      - name: 校验 APK 内的前端产物
+        run: |
+          set -euo pipefail
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          echo "== APK 内 assets/www =="
+          unzip -l "$apk" | grep 'assets/www/' | wc -l
+          for f in assets/www/index.html assets/www/catalog/catalog.js assets/www/catalog/providers.json; do
+            unzip -l "$apk" "$f" >/dev/null || { echo "缺少 $f"; exit 1; }
+            echo "OK  $f"
+          done
+          unzip -p "$apk" assets/www/index.html | head -c 400; echo
+
       - name: 写出构建信息
         run: |
           set -euo pipefail

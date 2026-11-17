@@ -25,7 +25,8 @@ import okhttp3.OkHttpClient;
  * 只监听 127.0.0.1 的极简 HTTP/1.1 服务器。
  *
  * <ul>
- *   <li>端口由系统分配（new ServerSocket(0, ...)），拿到实际端口再交给 WebView</li>
+ *   <li>端口固定为 {@link #PREFERRED_PORT}，保证页面 origin 稳定（localStorage / IndexedDB 按 origin 隔离），
+ *       只有端口被占用时才退回系统分配</li>
  *   <li>静态资源走 {@link AssetHandler}，/__ds_proxy 走 {@link ProxyHandler}</li>
  *   <li>每个连接一个小循环支持 keep-alive，最多 256 个请求</li>
  *   <li>工作线程全部是 daemon，Activity 退出时不会把进程挂住</li>
@@ -36,6 +37,8 @@ public final class LocalServer {
     private static final String TAG = "DsLocalServer";
     private static final String HOST = "127.0.0.1";
     private static final int BACKLOG = 64;
+    /** 固定端口：变一个号，WebView 的本地存储就换了一套，等于清空历史 */
+    private static final int PREFERRED_PORT = 18888;
     /** 空闲 keep-alive 连接的读超时；也是读请求行的超时。 */
     private static final int IDLE_TIMEOUT_MS = 15_000;
     private static final int MAX_REQUESTS_PER_CONNECTION = 256;
@@ -66,14 +69,26 @@ public final class LocalServer {
     /**
      * 绑定回环地址并开始 accept。
      *
-     * @return 系统实际分配到的端口
+     * <p>端口优先用固定值：WebView 的 localStorage 和 IndexedDB 按 origin（含端口）隔离，
+     * 端口一变历史对话就全丢了。所以先抢固定端口，抢不到（极少数端口占用）才退回系统分配，
+     * 那种情况下本次会话数据仍在，只是下次启动读不到。
+     *
+     * @return 实际使用的端口
      */
     public synchronized int start() throws IOException {
         if (running.get() && serverSocket != null) {
             return port;
         }
-        // 端口 0 = 交给系统挑一个空闲端口；第三个参数保证只监听回环
-        ServerSocket socket = new ServerSocket(0, BACKLOG, InetAddress.getByName(HOST));
+        ServerSocket socket = null;
+        try {
+            socket = new ServerSocket(PREFERRED_PORT, BACKLOG, InetAddress.getByName(HOST));
+        } catch (IOException preferredTaken) {
+            Log.w(TAG, "port " + PREFERRED_PORT + " unavailable, falling back to an ephemeral port");
+        }
+        if (socket == null) {
+            // 端口 0 = 交给系统挑一个空闲端口；第三个参数保证只监听回环
+            socket = new ServerSocket(0, BACKLOG, InetAddress.getByName(HOST));
+        }
         serverSocket = socket;
         port = socket.getLocalPort();
         running.set(true);
