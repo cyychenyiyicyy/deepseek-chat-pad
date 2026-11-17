@@ -102,8 +102,20 @@ const installObject = () => {
   }
 }
 
+const installAbortSignal = () => {
+  if (typeof AbortSignal === 'undefined') return
+  const proto = AbortSignal.prototype as unknown as Record<string, unknown>
+  // Chrome 100：发送前会用 signal.throwIfAborted()，缺了同样会让整条发送链路抛错
+  define(proto, 'throwIfAborted', function throwIfAborted(this: AbortSignal) {
+    if (!this.aborted) return
+    if (this.reason !== undefined) throw this.reason
+    throw new DOMException('Aborted', 'AbortError')
+  })
+}
+
 installArray()
 installString()
 installObject()
+installAbortSignal()
 
 export {}
