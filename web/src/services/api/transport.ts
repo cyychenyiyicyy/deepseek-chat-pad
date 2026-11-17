@@ -35,36 +35,62 @@ const encodeHeader = (value: string): string => {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
+/** 已决定路由的请求：原生壳里是「同源代理 + X-DS-* 头」，浏览器里就是原始请求 */
+export type PreparedRequest = {
+  url: string
+  method: string
+  headers: Record<string, string>
+  body: BodyInit | null
+  /** 是否被改写成代理请求 */
+  proxied: boolean
+}
+
+/** 把一次 API 调用折叠成实际要发出的请求（fetch 与 XHR 两条通道共用） */
+export const prepareRequest = (url: string, init: RequestInit = {}): PreparedRequest => {
+  const headers = new Headers(init.headers ?? {})
+  const method = (init.method ?? 'GET').toUpperCase()
+  const body = (init.body as BodyInit | null | undefined) ?? null
+  const plain: Record<string, string> = {}
+  headers.forEach((value, key) => {
+    plain[key] = value
+  })
+
+  const proxy = proxyPath()
+  if (!proxy) {
+    return { url, method, headers: plain, body, proxied: false }
+  }
+
+  // 只保留需要透传的头；Content-Length 等由原生侧重新计算
+  delete plain['host']
+  delete plain['content-length']
+
+  return {
+    url: proxy,
+    method: 'POST',
+    headers: {
+      'X-DS-Target': encodeHeader(url),
+      'X-DS-Method': method,
+      'X-DS-Headers': encodeHeader(JSON.stringify(plain)),
+    },
+    body,
+    proxied: true,
+  }
+}
+
 /**
  * 带 API Key 的请求统一走这里。
  * 原生壳内会改写成同源的 POST /__ds_proxy，目标地址和鉴权头放在自定义头里。
  */
 export const apiFetch = (url: string, init: RequestInit = {}): Promise<Response> => {
-  const proxy = proxyPath()
-  if (!proxy) return fetch(url, init)
-
-  const headers = new Headers(init.headers ?? {})
-  const forwarded: Record<string, string> = {}
-  headers.forEach((value, key) => {
-    forwarded[key] = value
-  })
-  // 只保留需要透传的头；Content-Type 交给壳按原样转发
-  const method = (init.method ?? 'GET').toUpperCase()
-  delete forwarded['host']
-  delete forwarded['content-length']
-
-  return fetch(proxy, {
-    method: 'POST',
-    headers: {
-      'X-DS-Target': encodeHeader(url),
-      'X-DS-Method': method,
-      'X-DS-Headers': encodeHeader(JSON.stringify(forwarded)),
-    },
-    body: init.body ?? null,
+  const prepared = prepareRequest(url, init)
+  return fetch(prepared.url, {
+    method: prepared.method,
+    headers: prepared.headers,
+    body: prepared.body,
     signal: init.signal ?? null,
     // 不缓存，SSE 与上传都必须拿到实时响应
     cache: 'no-store',
-    credentials: 'omit',
+    credentials: prepared.proxied ? 'omit' : 'same-origin',
   })
 }
 

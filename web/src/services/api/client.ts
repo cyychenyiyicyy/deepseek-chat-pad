@@ -1,7 +1,8 @@
-import { translate, type TranslationMessage } from '../../i18n/index.js'
+import { ApiError, type ApiErrorKind } from './error.js'
 import { readMessageEvent } from './parseEvent.js'
-import { readServerSentEvents } from './sse.js'
-import { apiFetch } from './transport.js'
+import { readServerSentEvents, type ServerSentEvent } from './sse.js'
+import { readServerSentEventsXhr, supportsStreamResponse } from './sse-xhr.js'
+import { apiFetch, prepareRequest } from './transport.js'
 import type {
   ApiErrorBody,
   CreateMessageRequest,
@@ -10,38 +11,15 @@ import type {
   MessageStreamEvent,
 } from './types.js'
 
+export { ApiError }
+export type { ApiErrorKind }
+
 /** 构建期 API 地址，默认 https://api.deepseek.com；本地开发支持开发服务器代理 */
 export const API_ORIGIN = __API_ORIGIN__
 /** Anthropic 兼容接口的前缀 */
 const ANTHROPIC_BASE_URL = `${API_ORIGIN}/anthropic/v1`
 /** 引用 Files API 上传的图片、调用 Anthropic 兼容 Files API 时必须携带 */
 const FILES_BETA = 'files-api-2025-04-14'
-
-export type ApiErrorKind =
-  /** 非 2xx 响应 */
-  | 'http'
-  /** 流中返回的错误帧（如等待生成超时），随后连接关闭 */
-  | 'stream'
-  /** 请求没有到达服务端（断网、跨域被拦截等） */
-  | 'network'
-  /** 流在 message_stop 之前结束 */
-  | 'interrupted'
-  /** 响应不符合协议（如非 SSE 响应） */
-  | 'protocol'
-
-export class ApiError extends Error {
-  readonly localMessage?: TranslationMessage
-
-  constructor(
-    readonly kind: ApiErrorKind,
-    message: string | TranslationMessage,
-    readonly status?: number
-  ) {
-    super(typeof message === 'string' ? message : translate(message.key, message.params))
-    this.name = 'ApiError'
-    this.localMessage = typeof message === 'string' ? undefined : message
-  }
-}
 
 const isErrorBody = (value: unknown): value is ApiErrorBody =>
   typeof value === 'object' &&
@@ -139,30 +117,11 @@ const hasFile = (body: CreateMessageRequest) =>
       message.content.some((block) => block.type === 'image' || block.type === 'document')
   )
 
-/**
- * POST /anthropic/v1/messages（stream: true），逐个产出流式事件，收到 message_stop 时结束。
- * ping、保活注释与无法解析的内容不产出；中止请求时抛出 signal 的 AbortError。
- */
-export async function* streamMessage(
-  apiKey: string,
-  body: CreateMessageRequest,
-  signal: AbortSignal
+/** 把 SSE 事件翻译成应用内部的 Messages 事件 */
+async function* toMessageEvents(
+  events: AsyncIterable<ServerSentEvent>
 ): AsyncGenerator<MessageStreamEvent> {
-  const response = await request(`${ANTHROPIC_BASE_URL}/messages`, {
-    method: 'POST',
-    headers: {
-      ...anthropicHeaders(apiKey, hasFile(body)),
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-    },
-    body: JSON.stringify({ ...body, stream: true }),
-    signal,
-  })
-  const contentType = response.headers.get('Content-Type') ?? ''
-  if (!response.body || !contentType.includes('text/event-stream')) {
-    throw await readErrorResponse(response, 'protocol', '')
-  }
-  for await (const { event: eventName, data } of readServerSentEvents(response.body, signal)) {
+  for await (const { event: eventName, data } of events) {
     let payload: unknown
     try {
       payload = JSON.parse(data)
@@ -188,4 +147,40 @@ export async function* streamMessage(
   }
   // 服务端没有提供错误内容时保持为空，不推测断流原因。
   throw new ApiError('interrupted', '')
+}
+
+/**
+ * POST /anthropic/v1/messages（stream: true），逐个产出流式事件，收到 message_stop 时结束。
+ * ping、保活注释与无法解析的内容不产出；中止请求时抛出 signal 的 AbortError。
+ *
+ * 老 WebView（不支持 fetch 流式响应）自动改走 XHR 增量通道，产出的仍然是同一套事件。
+ */
+export async function* streamMessage(
+  apiKey: string,
+  body: CreateMessageRequest,
+  signal: AbortSignal
+): AsyncGenerator<MessageStreamEvent> {
+  const url = `${ANTHROPIC_BASE_URL}/messages`
+  const init: RequestInit = {
+    method: 'POST',
+    headers: {
+      ...anthropicHeaders(apiKey, hasFile(body)),
+      'Content-Type': 'application/json',
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify({ ...body, stream: true }),
+    signal,
+  }
+
+  if (!supportsStreamResponse()) {
+    yield* toMessageEvents(readServerSentEventsXhr(prepareRequest(url, init), signal))
+    return
+  }
+
+  const response = await request(url, init)
+  const contentType = response.headers.get('Content-Type') ?? ''
+  if (!response.body || !contentType.includes('text/event-stream')) {
+    throw await readErrorResponse(response, 'protocol', '')
+  }
+  yield* toMessageEvents(readServerSentEvents(response.body, signal))
 }

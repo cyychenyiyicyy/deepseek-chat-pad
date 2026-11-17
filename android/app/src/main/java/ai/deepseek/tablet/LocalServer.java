@@ -93,7 +93,9 @@ public final class LocalServer {
         port = socket.getLocalPort();
         running.set(true);
         int assignedPort = port;
-        acceptThread = new Thread(() -> acceptLoop(socket), "ds-http-accept");
+        // lambda 只能捕获 effectively final，这里固定一份
+        final ServerSocket bound = socket;
+        acceptThread = new Thread(() -> acceptLoop(bound), "ds-http-accept");
         acceptThread.setDaemon(true);
         acceptThread.start();
         Log.i(TAG, "listening on " + HOST + ":" + assignedPort);

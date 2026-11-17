@@ -1,6 +1,7 @@
-import { ApiError } from './client.js'
-import { apiFetch } from './transport.js'
-import { readServerSentEvents } from './sse.js'
+import { ApiError } from './error.js'
+import { apiFetch, prepareRequest } from './transport.js'
+import { readServerSentEvents, type ServerSentEvent } from './sse.js'
+import { readServerSentEventsXhr, supportsStreamResponse } from './sse-xhr.js'
 import type { MessageStreamEvent, StopReason } from './types.js'
 
 /** 发给 OpenAI 兼容端点的消息；内容可以是纯文本或文本 + 图片 */
@@ -33,9 +34,7 @@ const STOP_REASON: Record<string, StopReason> = {
 }
 
 const randomHex = (bytes: number) =>
-  Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) =>
-    b.toString(16).padStart(2, '0')
-  ).join('')
+  Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('')
 
 type Chunk = {
   id?: string
@@ -71,7 +70,7 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
   if (thinking) payload.thinking = { type: 'enabled' }
   if (noTemperature) delete payload.temperature
 
-  const response = await apiFetch(url, {
+  const init: RequestInit = {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -80,8 +79,15 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
     },
     body: JSON.stringify(payload),
     signal,
-  })
+  }
 
+  // 老 WebView 没有 fetch 流式响应，改走 XHR 增量通道
+  if (!supportsStreamResponse()) {
+    yield* translate(readServerSentEventsXhr(prepareRequest(url, init), signal), model)
+    return
+  }
+
+  const response = await apiFetch(url, init)
   if (!response.ok) {
     const text = await response.text().catch(() => '')
     let message = text || response.statusText
@@ -93,11 +99,17 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
     }
     throw new ApiError('http', message, response.status)
   }
-
   if (!response.body) {
     throw new ApiError('protocol', '当前 WebView 不支持流式响应，请更新系统 WebView')
   }
+  yield* translate(readServerSentEvents(response.body, signal), model)
+}
 
+/** 把 OpenAI 的分片翻译成内部事件；两条传输通道共用这一段 */
+async function* translate(
+  events: AsyncIterable<ServerSentEvent>,
+  model: string
+): AsyncGenerator<MessageStreamEvent> {
   const messageId = randomHex(16)
   let started = false
   let blockIndex = 0
@@ -138,7 +150,7 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
     }
   }
 
-  for await (const { data } of readServerSentEvents(response.body, signal)) {
+  for await (const { data } of events) {
     if (data === '[DONE]') break
     let chunk: Chunk
     try {
