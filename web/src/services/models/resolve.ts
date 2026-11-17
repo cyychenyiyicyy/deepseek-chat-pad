@@ -84,6 +84,25 @@ export const resolveActiveModel = (catalog: ProviderMeta[] = []): ResolvedModel 
   }
 }
 
+/**
+ * 部分厂商要求客户端携带稳定会话标识。
+ * OpenCode（opencode.ai）用它做路由优化与 prompt 缓存，缺了会返回
+ * 「Request is missing x-opencode-session and cannot be routed efficiently」。
+ */
+const providerHeaders = (url: string, sessionId?: string): Record<string, string> => {
+  const headers: Record<string, string> = {}
+  try {
+    const host = new URL(url).host
+    if (host.includes('opencode.ai')) {
+      // 同一个会话始终用同一个 id，刷新页面后仍然稳定
+      headers['x-opencode-session'] = sessionId ?? 'deepseek-tablet-default'
+    }
+  } catch {
+    // URL 非法时不做任何附加
+  }
+  return headers
+}
+
 /** 本轮最后一条用户消息的纯文本 */
 const lastUserText = (body: CreateMessageRequest): string => {
   for (let i = body.messages.length - 1; i >= 0; i -= 1) {
@@ -295,6 +314,7 @@ export async function* streamChat(
   yield* streamOpenAI({
     apiKey: resolved.apiKey,
     url: resolved.url,
+    extraHeaders: providerHeaders(resolved.url, body.clientSessionId),
     model: resolved.model.id,
     messages,
     thinking,

@@ -85,6 +85,14 @@ WebView ──GET /static/*──▶ LocalServer ──▶ assets/www/*
   取回资料再注入上下文，界面照常显示来源卡片
 - **多 provider 同名模型**：元信息按 provider 优先匹配，选择器按 provider 分组并标注来源
 
+## v1.2 变更（第二轮反馈）
+
+- **修掉「发不出消息」**：上游用了 `toReversed`（Chrome 110）与 `throwIfAborted`（Chrome 100），
+  老 WebView 缺这两个方法就在发送前抛错。新增 `web/src/polyfills.ts` 兜底，并让错误显示真实原因而不是一律「上传失败」
+- **模型选择器**改为居中弹层，点击不再把焦点交给输入框（之前会弹软键盘）
+- **状态栏避让**：WebView 顶部按状态栏高度留白（Android 上 `env(safe-area-inset-*)` 恒为 0）
+- **应用图标**换成鲸鱼 logo
+
 ## 已知限制
 
 - **联网搜索、文件上传、读链接仍是 DeepSeek 独有能力**。选中自定义模型时这两个开关会置灰，

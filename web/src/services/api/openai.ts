@@ -23,6 +23,8 @@ export type OpenAIStreamOptions = {
   thinking?: boolean
   /** 不接受该参数的模型（models.dev 的 temperature: false） */
   noTemperature?: boolean
+  /** 厂商要求的额外请求头，例如 OpenCode 的 x-opencode-session */
+  extraHeaders?: Record<string, string>
   signal: AbortSignal
 }
 
@@ -59,7 +61,7 @@ type Chunk = {
  * 渲染、续写、导出、历史回放都不用改。
  */
 export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerator<MessageStreamEvent> {
-  const { apiKey, url, model, messages, thinking, noTemperature, signal } = options
+  const { apiKey, url, model, messages, thinking, noTemperature, extraHeaders, signal } = options
   const payload: Record<string, unknown> = {
     model,
     messages,
@@ -76,6 +78,7 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
       Accept: 'text/event-stream',
+      ...(extraHeaders ?? {}),
     },
     body: JSON.stringify(payload),
     signal,

@@ -67,7 +67,8 @@ jobs:
 
       - name: 编译 debug APK
         working-directory: android
-        run: gradle assembleDebug --no-daemon --stacktrace
+        # versionCode 取 run number：保证每次构建严格递增，能覆盖安装并保留数据
+        run: gradle assembleDebug --no-daemon --stacktrace -PversionCode=${{ github.run_number }}
 
       # 构建绿不等于装上能用：确认 Web 产物真的进了 APK
       - name: 校验 APK 内的前端产物

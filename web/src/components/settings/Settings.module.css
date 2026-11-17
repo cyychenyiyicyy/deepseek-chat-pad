@@ -440,3 +440,24 @@
     max-width: 100%;
   }
 }
+
+/* ---------- 界面缩放 ---------- */
+.scaleControl {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.scaleRange {
+  width: 168px;
+  accent-color: var(--dsw-alias-button-primary-fill);
+  cursor: pointer;
+}
+
+.scaleValue {
+  min-width: 42px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-secondary);
+  text-align: right;
+}

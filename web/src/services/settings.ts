@@ -17,6 +17,8 @@ type Settings = {
   thinking: boolean
   search: boolean
   siderCollapsed: boolean
+  /** 整体界面缩放，1 为原始大小 */
+  uiScale: number
 }
 
 const KEYS = {
@@ -28,6 +30,7 @@ const KEYS = {
   thinking: 'chat-demo:thinking',
   search: 'chat-demo:search',
   siderCollapsed: 'chat-demo:sider-collapsed',
+  uiScale: 'chat-demo:ui-scale',
 } as const
 
 const read = (key: string) => {
@@ -87,6 +90,15 @@ const initialThemePreference = (): ThemePreference => {
 /** 未保存过时使用服务端默认音色 stella（海星） */
 const initialTtsVoice = (): TtsVoice => (read(KEYS.ttsVoice) === 'tide' ? 'tide' : 'stella')
 
+/** 缩放在 0.8–1.3 之间，超出范围按边界处理 */
+export const SCALE_MIN = 0.8
+export const SCALE_MAX = 1.3
+
+const clampScale = (value: number) =>
+  Number.isFinite(value) ? Math.min(SCALE_MAX, Math.max(SCALE_MIN, value)) : 1
+
+const initialUiScale = (): number => clampScale(Number(read(KEYS.uiScale) ?? '1'))
+
 export const useSettings = create<Settings>(() => ({
   apiKey: read(KEYS.apiKey),
   locale: initialLocale(),
@@ -96,6 +108,7 @@ export const useSettings = create<Settings>(() => ({
   thinking: read(KEYS.thinking) === 'true',
   search: read(KEYS.search) === 'true',
   siderCollapsed: read(KEYS.siderCollapsed) === 'true',
+  uiScale: initialUiScale(),
 }))
 
 export const setLocale = (locale: Locale) => {
@@ -132,6 +145,12 @@ export const setThinking = (thinking: boolean) => {
 export const setSearch = (search: boolean) => {
   write(KEYS.search, String(search))
   useSettings.setState({ search })
+}
+
+export const setUiScale = (uiScale: number) => {
+  const next = clampScale(uiScale)
+  write(KEYS.uiScale, String(next))
+  useSettings.setState({ uiScale: next })
 }
 
 export const setSiderCollapsed = (siderCollapsed: boolean) => {

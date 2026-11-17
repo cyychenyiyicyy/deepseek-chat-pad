@@ -1000,6 +1000,7 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
         const events = streamChat(
           {
             model: initial.model ?? MODEL,
+            clientSessionId: sessionId,
             system: SYSTEM_PROMPT,
             messages,
             thinking: { type: initial.thinking ? 'enabled' : 'disabled' },

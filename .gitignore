@@ -13,6 +13,8 @@ android/app/src/main/assets/www/*
 !android/app/src/main/assets/www/.gitkeep
 *.apk
 *.keystore
+# 例外：固定签名密钥必须入库，否则每次 CI 生成的签名都不同，无法覆盖安装
+!android/keystore/release.p12
 
 # 工具链与临时目录
 tmp/

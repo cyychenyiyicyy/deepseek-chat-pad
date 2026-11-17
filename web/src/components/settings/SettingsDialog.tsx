@@ -23,7 +23,10 @@ import {
   isChineseBrowser,
   setLocale,
   setLocation,
+  SCALE_MAX,
+  SCALE_MIN,
   setThemePreference,
+  setUiScale,
   useSettings,
   type ThemePreference,
 } from '../../services/settings.js'
@@ -99,6 +102,7 @@ const SettingsContent = () => {
           {section === 'general' ? (
             <>
               <ThemeSetting />
+              <ScaleSetting />
               <LocaleSetting />
               <LocationSetting />
             </>
@@ -289,6 +293,37 @@ const LocaleSetting = () => {
           ]}
           onChange={setLocale}
         />
+      }
+    />
+  )
+}
+
+/** 整体界面缩放：滑杆 80%–130%，拖动即生效 */
+const ScaleSetting = () => {
+  const t = useTranslate()
+  const uiScale = useSettings((state) => state.uiScale)
+  return (
+    <SettingCell
+      label={t('settingsUiScale')}
+      description={t('settingsUiScaleHint')}
+      status={null}
+      action={
+        <div className={styles.scaleControl}>
+          <input
+            className={styles.scaleRange}
+            type="range"
+            min={Math.round(SCALE_MIN * 100)}
+            max={Math.round(SCALE_MAX * 100)}
+            step={5}
+            value={Math.round(uiScale * 100)}
+            aria-label={t('settingsUiScale')}
+            onChange={(event) => setUiScale(Number(event.target.value) / 100)}
+          />
+          <span className={styles.scaleValue}>{Math.round(uiScale * 100)}%</span>
+          <Button variant="outlined" size="s" onClick={() => setUiScale(1)}>
+            {t('settingsUiScaleReset')}
+          </Button>
+        </div>
       }
     />
   )

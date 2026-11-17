@@ -7,23 +7,47 @@ android {
     namespace 'ai.deepseek.tablet'
     compileSdk 34
 
+    /**
+     * 固定签名。
+     *
+     * 仓库里带了一份自签密钥（android/keystore/release.p12）。每次构建都用它，
+     * 新包才能直接覆盖安装并保留数据；CI 每次随机生成调试签名的话，
+     * 用户就必须「卸载 → 重装」，本地存储（对话、API Key）会一起清空。
+     */
+    signingConfigs {
+        release {
+            storeFile file('../keystore/release.p12')
+            storeType 'PKCS12'
+            storePassword 'deepseek-tablet-2026'
+            keyAlias 'deepseek-tablet'
+            keyPassword 'deepseek-tablet-2026'
+            // 关闭 v1 签名，v2/v3 足够且包更小
+            enableV1Signing false
+            enableV2Signing true
+            enableV3Signing true
+        }
+    }
+
     defaultConfig {
         applicationId 'ai.deepseek.tablet'
         minSdk 28
         targetSdk 34
-        versionCode 3
-        versionName '1.2.0'
+        // CI 用 -PversionCode=<run number> 传入，保证每次构建严格递增，能覆盖安装
+        versionCode (project.findProperty('versionCode') ?: 3) as Integer
+        versionName (project.findProperty('versionName') ?: '1.3.0')
     }
 
     buildTypes {
         debug {
             minifyEnabled false
+            // 与 release 同一把钥匙：调试包也能直接覆盖安装到已装好的版本上
+            signingConfig signingConfigs.release
         }
         release {
-            // 先保证能跑：不开混淆；CI 里用 debug 签名，产物可直接安装
+            // 先保证能跑：不开混淆；与 debug 共用仓库里的固定自签密钥
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
         }
     }
 
