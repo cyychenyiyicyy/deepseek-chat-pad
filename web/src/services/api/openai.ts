@@ -1,0 +1,225 @@
+import { ApiError } from './client.js'
+import { apiFetch } from './transport.js'
+import { readServerSentEvents } from './sse.js'
+import type { MessageStreamEvent, StopReason } from './types.js'
+
+/** 发给 OpenAI 兼容端点的消息；内容可以是纯文本或文本 + 图片 */
+export type OpenAIContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+
+export type OpenAIMessage =
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string | OpenAIContentPart[] }
+  | { role: 'assistant'; content: string }
+
+export type OpenAIStreamOptions = {
+  apiKey: string
+  url: string
+  model: string
+  messages: OpenAIMessage[]
+  /** 开启思考；仅对支持该参数的端点发送 */
+  thinking?: boolean
+  /** 不接受该参数的模型（models.dev 的 temperature: false） */
+  noTemperature?: boolean
+  signal: AbortSignal
+}
+
+const STOP_REASON: Record<string, StopReason> = {
+  stop: 'end_turn',
+  length: 'max_tokens',
+  content_filter: 'refusal',
+  tool_calls: 'tool_use',
+}
+
+const randomHex = (bytes: number) =>
+  Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) =>
+    b.toString(16).padStart(2, '0')
+  ).join('')
+
+type Chunk = {
+  id?: string
+  model?: string
+  choices?: {
+    delta?: { content?: string | null; reasoning_content?: string | null }
+    finish_reason?: string | null
+  }[]
+  usage?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    prompt_cache_hit_tokens?: number
+    prompt_cache_miss_tokens?: number
+  }
+  error?: { message?: string }
+}
+
+/**
+ * 把 OpenAI 兼容端点的 SSE 流翻译成应用内部的 Messages 事件序列。
+ *
+ * UI 与持久化只认识 thinking / text / server_tool_use 这几类块，翻译成同一套事件后，
+ * 渲染、续写、导出、历史回放都不用改。
+ */
+export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerator<MessageStreamEvent> {
+  const { apiKey, url, model, messages, thinking, noTemperature, signal } = options
+  const payload: Record<string, unknown> = {
+    model,
+    messages,
+    stream: true,
+    stream_options: { include_usage: true },
+  }
+  // 思考开关是 DeepSeek 的扩展字段；其他厂商收到未知字段可能直接 400，因此只在开启时附带
+  if (thinking) payload.thinking = { type: 'enabled' }
+  if (noTemperature) delete payload.temperature
+
+  const response = await apiFetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify(payload),
+    signal,
+  })
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    let message = text || response.statusText
+    try {
+      const parsed = JSON.parse(text) as { error?: { message?: string } }
+      if (parsed.error?.message) message = parsed.error.message
+    } catch {
+      /* 非 JSON 错误体直接展示原文 */
+    }
+    throw new ApiError('http', message, response.status)
+  }
+
+  if (!response.body) {
+    throw new ApiError('protocol', '当前 WebView 不支持流式响应，请更新系统 WebView')
+  }
+
+  const messageId = randomHex(16)
+  let started = false
+  let blockIndex = 0
+  /** 当前打开的块：null 表示没有，text / thinking 表示类型 */
+  let open: 'text' | 'thinking' | null = null
+  let finishReason: string | null = null
+  let usage:
+    | {
+        input_tokens: number
+        cache_read_input_tokens: number
+        cache_creation_input_tokens: number
+        output_tokens: number
+      }
+    | undefined
+
+  const head = (): MessageStreamEvent => ({
+    type: 'message_start',
+    message: { id: messageId, model, usage: undefined },
+  })
+
+  const closeOpen = function* (): Generator<MessageStreamEvent> {
+    if (open) {
+      yield { type: 'content_block_stop', index: blockIndex }
+      blockIndex += 1
+      open = null
+    }
+  }
+
+  const openBlock = function* (kind: 'text' | 'thinking'): Generator<MessageStreamEvent> {
+    open = kind
+    yield {
+      type: 'content_block_start',
+      index: blockIndex,
+      content_block:
+        kind === 'text'
+          ? { type: 'text', text: '' }
+          : { type: 'thinking', thinking: '', signature: '' },
+    }
+  }
+
+  for await (const { data } of readServerSentEvents(response.body, signal)) {
+    if (data === '[DONE]') break
+    let chunk: Chunk
+    try {
+      chunk = JSON.parse(data) as Chunk
+    } catch {
+      continue
+    }
+    if (chunk.error?.message) {
+      throw new ApiError('stream', chunk.error.message)
+    }
+    if (!started) {
+      started = true
+      yield head()
+    }
+    if (chunk.usage) {
+      usage = {
+        input_tokens: chunk.usage.prompt_cache_miss_tokens ?? chunk.usage.prompt_tokens ?? 0,
+        cache_read_input_tokens: chunk.usage.prompt_cache_hit_tokens ?? 0,
+        cache_creation_input_tokens: 0,
+        output_tokens: chunk.usage.completion_tokens ?? 0,
+      }
+    }
+
+    const choice = chunk.choices?.[0]
+    if (!choice) continue
+    const delta = choice.delta ?? {}
+
+    // 思考增量与正文增量分别落在不同的块里，切换时先收尾上一块
+    if (delta.reasoning_content) {
+      if (open !== 'thinking') {
+        yield* closeOpen()
+        yield* openBlock('thinking')
+      }
+      yield {
+        type: 'content_block_delta',
+        index: blockIndex,
+        delta: { type: 'thinking_delta', thinking: delta.reasoning_content },
+      }
+    }
+    if (delta.content) {
+      if (open !== 'text') {
+        yield* closeOpen()
+        yield* openBlock('text')
+      }
+      yield {
+        type: 'content_block_delta',
+        index: blockIndex,
+        delta: { type: 'text_delta', text: delta.content },
+      }
+    }
+    if (choice.finish_reason) finishReason = choice.finish_reason
+  }
+
+  if (!started) {
+    // 空响应：给前端一个空回复，避免一直转圈
+    yield head()
+  }
+  yield* closeOpen()
+  yield {
+    type: 'message_delta',
+    delta: { stop_reason: STOP_REASON[finishReason ?? ''] ?? 'end_turn', stop_sequence: null },
+    ...(usage ? { usage } : {}),
+  }
+  yield { type: 'message_stop' }
+}
+
+/** 拉取 OpenAI 兼容端点的模型列表 */
+export const listOpenAIModels = async (
+  url: string,
+  apiKey: string,
+  signal?: AbortSignal
+): Promise<string[]> => {
+  const res = await apiFetch(url, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+    signal,
+  })
+  if (!res.ok) {
+    throw new ApiError('http', (await res.text().catch(() => '')) || res.statusText, res.status)
+  }
+  const body = (await res.json()) as { data?: { id?: string }[] }
+  const ids = (body.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id))
+  return ids.sort((a, b) => a.localeCompare(b))
+}

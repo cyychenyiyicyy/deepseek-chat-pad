@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      深色主题 + 无 ActionBar。
+      状态栏/导航栏透明（页面延伸到状态栏下面），浅色图标（windowLightStatusBar=false）。
+      真正的 inset 由 LocalServer 提供的页面自己按 viewport-fit 处理，原生侧只兜 IME。
+    -->
+    <style name="Theme.DeepSeekTablet" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:colorBackground">@color/window_background</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionModeOverlay">true</item>
+
+        <item name="colorPrimary">@color/brand_primary</item>
+        <item name="colorPrimaryDark">@color/window_background</item>
+        <item name="colorAccent">@color/brand_primary</item>
+    </style>
+</resources>

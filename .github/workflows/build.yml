@@ -1,0 +1,108 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一个分支上的新提交直接顶掉上一次仍在跑的构建
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: 安装前端依赖
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查
+        working-directory: web
+        run: pnpm run type
+
+      - name: 构建前端
+        working-directory: web
+        run: npx rspack build -c rspack.config.ts
+        env:
+          NODE_ENV: production
+
+      - name: 把产物放进 Android assets
+        run: |
+          set -euo pipefail
+          rm -rf android/app/src/main/assets/www
+          mkdir -p android/app/src/main/assets/www
+          cp -r web/dist/. android/app/src/main/assets/www/
+          # 产物没到位时构建仍然会成功、但装上打开是空白页，这里提前拦住
+          test -f android/app/src/main/assets/www/index.html
+          echo "www 文件数: $(find android/app/src/main/assets/www -type f | wc -l)"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 仓库里不放 gradle-wrapper.jar，直接用 setup-gradle 提供 gradle 命令
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: 编译 debug APK
+        working-directory: android
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: 写出构建信息
+        run: |
+          set -euo pipefail
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          ls -lh "$apk"
+          {
+            echo "### APK 构建完成"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 提交 | \`$GITHUB_SHA\` |"
+            echo "| 运行号 | $GITHUB_RUN_NUMBER |"
+            echo "| 大小 | $(du -h "$apk" | cut -f1) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-tablet-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 90
+
+      # main 分支上再发一个 release，方便直接下载安装，不用登录下载 artifact
+      - name: 发布 preview release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: build-${{ github.run_number }}
+          prerelease: true
+          generate_release_notes: false
+          body: |
+            自动构建（提交 `${{ github.sha }}`）。
+
+            安装：下载 `deepseek-tablet-*.apk` 后直接安装，需要允许「未知来源」。
+          files: android/app/build/outputs/apk/debug/app-debug.apk

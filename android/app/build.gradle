@@ -1,0 +1,68 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    // AGP 8 起用 namespace 取代 AndroidManifest 里的 package 属性
+    namespace 'ai.deepseek.tablet'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'ai.deepseek.tablet'
+        minSdk 28
+        targetSdk 34
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            // 先保证能跑：不开混淆；CI 里用 debug 签名，产物可直接安装
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    // AGP 8 默认关闭 BuildConfig，代码里要用 BuildConfig.VERSION_NAME，必须显式打开
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        resources {
+            excludes += [
+                    'META-INF/DEPENDENCIES',
+                    'META-INF/LICENSE',
+                    'META-INF/LICENSE.txt',
+                    'META-INF/NOTICE',
+                    'META-INF/NOTICE.txt',
+                    'META-INF/AL2.0',
+                    'META-INF/LGPL2.1',
+                    'META-INF/INDEX.LIST'
+            ]
+        }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.core:core:1.13.1'
+    implementation 'androidx.activity:activity:1.9.0'
+    implementation 'androidx.annotation:annotation:1.8.0'
+    // 共享 OkHttpClient（内部是 Kotlin 写的，kotlin-stdlib 会随 POM 自动带进来，无需 Kotlin 插件）
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}

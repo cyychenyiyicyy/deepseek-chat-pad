@@ -1,0 +1,2 @@
+# CI 会把 Web 产物（rspack dist）复制到这里。
+# 这个占位文件保证目录存在：assets/www 为空时 App 会显示原生错误页而不是白屏。

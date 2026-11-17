@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 页面底色，和 Web 端深色主题一致；WebView 启动时也用它，避免白屏闪一下 -->
+    <color name="window_background">#FF0F1115</color>
+    <color name="webview_background">#FF0F1115</color>
+    <color name="text_primary">#FFE7E9EC</color>
+    <color name="brand_primary">#FF4D6BFE</color>
+    <color name="status_bar_scrim">#00000000</color>
+</resources>

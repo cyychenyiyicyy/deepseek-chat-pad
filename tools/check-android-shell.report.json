@@ -1,0 +1,46 @@
+{
+  "generatedAt": "2026-11-17T12:32:03.759Z",
+  "root": "C:\\Users\\Administrator\\Desktop\\harness workspace\\projects\\deepseek-tablet\\android",
+  "summary": {
+    "pass": 7,
+    "fail": 0,
+    "info": 0
+  },
+  "checks": [
+    {
+      "level": "PASS",
+      "name": "java.structure",
+      "detail": "5 个 Java 文件括号/字面量全部配平"
+    },
+    {
+      "level": "PASS",
+      "name": "java.imports",
+      "detail": "import 全部被正文使用"
+    },
+    {
+      "level": "PASS",
+      "name": "res.references",
+      "detail": "8 个 XML 的资源引用全部有定义"
+    },
+    {
+      "level": "PASS",
+      "name": "xml.wellformed",
+      "detail": "8 个 XML 标签全部配平"
+    },
+    {
+      "level": "PASS",
+      "name": "gradle.dsl",
+      "detail": "AGP 8.4 / compileSdk 34 / minSdk 28 / Java 17 / buildConfig 均就位"
+    },
+    {
+      "level": "PASS",
+      "name": "manifest.security",
+      "detail": "仅 INTERNET/ACCESS_NETWORK_STATE，明文只放行回环"
+    },
+    {
+      "level": "PASS",
+      "name": "features",
+      "detail": "26 项需求断言全部命中"
+    }
+  ]
+}

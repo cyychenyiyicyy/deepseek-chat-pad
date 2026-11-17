@@ -1,0 +1,10 @@
+# 构建产物 / 本地环境，不要进版本库
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
