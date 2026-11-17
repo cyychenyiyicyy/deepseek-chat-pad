@@ -70,6 +70,14 @@ jobs:
         # versionCode 取 run number：保证每次构建严格递增，能覆盖安装并保留数据
         run: gradle assembleDebug --no-daemon --stacktrace -PversionCode=${{ github.run_number }}
 
+      - name: 校验签名指纹
+        run: |
+          set -euo pipefail
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          signer=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -r | head -1)
+          "$signer" verify --print-certs "$apk" | grep -i 'SHA-256 digest' | head -2
+          echo "固定签名指纹应为 06:53:B1:43:97:23:49:C0:32:C9:24:6A:F4:C8:B9:67:A5:CC:4F:BE:2C:11:1F:1E:C2:D7:B2:3D:E6:65:7D:F1"
+
       # 构建绿不等于装上能用：确认 Web 产物真的进了 APK
       - name: 校验 APK 内的前端产物
         run: |
