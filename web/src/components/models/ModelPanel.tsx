@@ -4,7 +4,6 @@ import { Button } from '../base/Button.js'
 import { IconBrowseOutline16, IconRefreshOutline16, IconTrashOutline16 } from '../base/icons.js'
 import { useTranslate } from '../../i18n/index.js'
 import { useSettings } from '../../services/settings.js'
-import { openSettings } from '../settings/settingsDialogState.js'
 import {
   formatContext,
   loadCoreProviders,
@@ -39,7 +38,7 @@ const maskKey = (key: string) => (key.length <= 8 ? '••••' : `•••�
  * 再用内置目录（必要时 models.dev）补全上下文、价格、是否支持思考等元信息。
  * 同一家厂商可以有多个端点，同一个模型也可以分属不同厂商，列表按厂商分别展示。
  */
-export const ModelPanel = () => {
+export const ModelPanel = ({ onOpenSection }: { onOpenSection?: (section: 'data') => void }) => {
   const t = useTranslate()
   const { providers } = useModelState()
   const deepseekKey = useSettings((state) => state.apiKey)
@@ -205,7 +204,7 @@ export const ModelPanel = () => {
         </div>
         <div className={styles.cardSub}>deepseek-flash · deepseek-v4-pro</div>
         <div className={styles.cardActions}>
-          <Button variant="outlined" size="s" onClick={() => openSettings('data')}>
+          <Button variant="outlined" size="s" onClick={() => onOpenSection?.('data')}>
             {t('settings')}
           </Button>
         </div>

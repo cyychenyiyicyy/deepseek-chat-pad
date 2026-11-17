@@ -103,7 +103,7 @@ const SettingsContent = () => {
               <LocationSetting />
             </>
           ) : section === 'models' ? (
-            <ModelPanel />
+            <ModelPanel onOpenSection={(next) => setSection(next)} />
           ) : (
             <>
               <ApiKeyField editor={apiKeyEditor} />
