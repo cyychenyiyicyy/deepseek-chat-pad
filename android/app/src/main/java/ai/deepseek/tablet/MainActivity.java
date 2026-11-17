@@ -207,13 +207,15 @@ public final class MainActivity extends AppCompatActivity {
         });
         rootLayout.addView(errorView);
 
-        // 顶部保持 0：页面顶到状态栏下面，由网页按 viewport-fit 自己排版。
-        // 底部兜住键盘与导航栏（WebView 里 env(safe-area-inset-*) 在 Android 上恒为 0）。
+        // Android WebView 里 env(safe-area-inset-*) 恒为 0，网页没法自己避让系统栏，
+        // 所以顶部按状态栏高度让出空间（否则顶栏会和状态栏叠在一起），
+        // 底部兜住键盘与导航栏。
         ViewCompat.setOnApplyWindowInsetsListener(rootLayout, (view, windowInsets) -> {
             Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
             Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
+            int top = bars.top;
             int bottom = Math.max(bars.bottom, ime.bottom);
-            view.setPadding(0, 0, 0, bottom);
+            view.setPadding(0, top, 0, bottom);
             return windowInsets;
         });
 

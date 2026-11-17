@@ -1,24 +1,49 @@
-import clsx from 'clsx'
 import { useEffect, useMemo, useState } from 'react'
-import { createPortal } from 'react-dom'
-import { useAnchoredPosition, useDismiss } from '../base/anchored.js'
 import { IconCheckOutline16, IconChevronDownOutline14, IconSettingsOutline16 } from '../base/icons.js'
+import { Modal } from '../base/Modal.js'
+import { Button } from '../base/Button.js'
 import { useTranslate } from '../../i18n/index.js'
 import { ensureCatalog, resolveActiveModel } from '../../services/models/resolve.js'
-import { setActiveModel, useModelState, DEEPSEEK_MODELS, type ModelEntry } from '../../services/models/store.js'
+import {
+  setActiveModel,
+  useModelState,
+  DEEPSEEK_MODELS,
+  type ModelEntry,
+  type ProviderConfig,
+} from '../../services/models/store.js'
+import { formatContext, type ProviderMeta } from '../../services/models/catalog.js'
 import { openSettings } from '../settings/settingsDialogState.js'
-import type { ProviderMeta } from '../../services/models/catalog.js'
-import { formatContext } from '../../services/models/catalog.js'
 import styles from './ModelPicker.module.css'
-
-/** 上下文窗口显示成 128K / 1M 这样的短记法 */
-export { formatContext }
 
 type Group = { key: string; name: string; providerId: string; models: ModelEntry[] }
 
+/** DeepSeek 的两个内置模型补上目录元信息 */
+const deepseekGroup = (catalog: ProviderMeta[]): Group => {
+  const meta = catalog.find((p) => p.id === 'deepseek')?.models ?? []
+  return {
+    key: 'deepseek',
+    name: 'DeepSeek',
+    providerId: 'deepseek',
+    models: DEEPSEEK_MODELS.map((entry) => {
+      const hit = meta.find((m) => m.id === entry.id)
+      return hit ? { ...entry, meta: hit, name: hit.name || entry.name } : entry
+    }),
+  }
+}
+
+const providerGroup = (provider: ProviderConfig): Group => ({
+  key: provider.id,
+  name: provider.name,
+  providerId: provider.id,
+  models: provider.models,
+})
+
 /**
- * 输入框里的模型选择器：显示当前模型名，点开按厂商分组列出全部模型，支持搜索。
- * 与侧栏、设置页共用同一份模型配置。
+ * 输入框里的模型选择器。
+ *
+ * 点开是一个居中的弹层（不是贴着按钮的浮层）——平板上的浮层定位容易受软键盘与
+ * 视觉视口影响，点开却没反应；居中弹层只要点开就一定在视野里。
+ * 列表按 provider 分组，同名模型会标出所属厂商。
  */
 export const ModelPicker = () => {
   const t = useTranslate()
@@ -33,20 +58,12 @@ export const ModelPicker = () => {
 
   const current = useMemo(() => resolveActiveModel(catalog), [catalog, active, providers])
 
-  const groups: Group[] = useMemo(() => {
-    const deepseek: Group = {
-      key: 'deepseek',
-      name: 'DeepSeek',
-      providerId: 'deepseek',
-      models: DEEPSEEK_MODELS.map((entry) => {
-        const meta = catalog.find((p) => p.id === 'deepseek')?.models?.find((m) => m.id === entry.id)
-        return meta ? { ...entry, meta, name: meta.name || entry.name } : entry
-      }),
-    }
-    return [deepseek, ...providers.map((p) => ({ key: p.id, name: p.name, providerId: p.id, models: p.models }))]
-  }, [providers, catalog])
+  const groups = useMemo(
+    () => [deepseekGroup(catalog), ...providers.map(providerGroup)],
+    [providers, catalog]
+  )
 
-  /** 同一个模型 id 出现在多家厂商时，行内标出厂商，避免看起来像重复项 */
+  /** 同一个模型 id 出现在多家厂商时，行内标出厂商 */
   const duplicates = useMemo(() => {
     const counter = new Map<string, number>()
     for (const group of groups) {
@@ -71,24 +88,20 @@ export const ModelPicker = () => {
     [groups, keyword]
   )
 
-  const { anchorRef, floatingRef, position } = useAnchoredPosition<HTMLButtonElement, HTMLDivElement>(open, {
-    align: 'start',
-    offset: 8,
-    maxHeight: 460,
-    minSpace: 220,
-  })
-  useDismiss(open, [anchorRef, floatingRef], () => setOpen(false), { captureEscape: true })
-
   return (
     <>
       <button
-        ref={anchorRef}
         type="button"
-        className={clsx(styles.trigger, open && styles.open)}
-        aria-haspopup="listbox"
-        aria-expanded={open}
+        className={styles.trigger}
+        aria-haspopup="dialog"
         aria-label={t('modelSelectTitle')}
-        onClick={() => setOpen((value) => !value)}
+        // 阻止默认行为，避免点击时把焦点交给输入框、连带弹出软键盘
+        onMouseDown={(event) => event.preventDefault()}
+        onPointerDown={(event) => event.preventDefault()}
+        onClick={() => {
+          setQuery('')
+          setOpen(true)
+        }}
       >
         <span className={styles.name}>{current.model.name}</span>
         <span className={styles.arrow}>
@@ -96,68 +109,17 @@ export const ModelPicker = () => {
         </span>
       </button>
 
-      {open
-        ? createPortal(
-            <div
-              ref={floatingRef}
-              className={styles.panel}
-              style={position ?? undefined}
-              role="listbox"
-              aria-label={t('modelSelectTitle')}
-            >
-              <div className={styles.searchRow}>
-                <input
-                  className={styles.search}
-                  placeholder={t('modelSearchPlaceholder')}
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  autoFocus
-                />
-              </div>
-              <div className={styles.list}>
-                {filtered.length === 0 ? (
-                  <div className={styles.empty}>{keyword ? t('modelNoMatch') : t('modelNoModels')}</div>
-                ) : (
-                  filtered.map((group) => (
-                    <div key={group.key} className={styles.group}>
-                      <div className={styles.groupName}>
-                        {group.name}
-                        <span className={styles.groupCount}>{group.models.length}</span>
-                      </div>
-                      {group.models.map((model) => {
-                        const selected =
-                          group.providerId === active.providerId && model.id === active.modelId
-                        return (
-                          <div
-                            key={`${group.providerId}:${model.id}`}
-                            role="option"
-                            aria-selected={selected}
-                            className={clsx(styles.item, selected && styles.itemActive)}
-                            onClick={() => {
-                              setActiveModel(group.providerId, model.id)
-                              setOpen(false)
-                            }}
-                          >
-                            <span className={styles.itemName}>{model.name}</span>
-                            {(duplicates.get(model.id) ?? 0) > 1 ? (
-                              <span className={styles.itemProvider}>{group.name}</span>
-                            ) : null}
-                            {model.meta?.ctx ? (
-                              <span className={styles.itemMeta}>
-                                {formatContext(model.meta.ctx)} {t('modelContextSuffix')}
-                              </span>
-                            ) : null}
-                            {selected ? <IconCheckOutline16 /> : null}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  ))
-                )}
-              </div>
-              <button
-                type="button"
-                className={styles.manage}
+      {open ? (
+        <Modal
+          title={t('modelSelectTitle')}
+          closable
+          className={styles.dialog}
+          onClose={() => setOpen(false)}
+          footer={
+            <div className={styles.footer}>
+              <Button
+                variant="outlined"
+                size="m"
                 onClick={() => {
                   setOpen(false)
                   openSettings('models')
@@ -165,12 +127,61 @@ export const ModelPicker = () => {
               >
                 <IconSettingsOutline16 />
                 {t('modelManage')}
-              </button>
-            </div>,
-            document.body
-          )
-        : null}
-
+              </Button>
+            </div>
+          }
+        >
+          <div className={styles.dialogBody}>
+            <input
+              className={styles.search}
+              placeholder={t('modelSearchPlaceholder')}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <div className={styles.list} role="listbox" aria-label={t('modelSelectTitle')}>
+              {filtered.length === 0 ? (
+                <div className={styles.empty}>{keyword ? t('modelNoMatch') : t('modelNoModels')}</div>
+              ) : (
+                filtered.map((group) => (
+                  <div key={group.key} className={styles.group}>
+                    <div className={styles.groupName}>
+                      {group.name}
+                      <span className={styles.groupCount}>{group.models.length}</span>
+                    </div>
+                    {group.models.map((model) => {
+                      const selected =
+                        group.providerId === active.providerId && model.id === active.modelId
+                      return (
+                        <div
+                          key={`${group.providerId}:${model.id}`}
+                          role="option"
+                          aria-selected={selected}
+                          className={styles.item}
+                          onClick={() => {
+                            setActiveModel(group.providerId, model.id)
+                            setOpen(false)
+                          }}
+                        >
+                          <span className={styles.itemName}>{model.name}</span>
+                          {(duplicates.get(model.id) ?? 0) > 1 ? (
+                            <span className={styles.itemProvider}>{group.name}</span>
+                          ) : null}
+                          {model.meta?.ctx ? (
+                            <span className={styles.itemMeta}>
+                              {formatContext(model.meta.ctx)} {t('modelContextSuffix')}
+                            </span>
+                          ) : null}
+                          {selected ? <IconCheckOutline16 /> : null}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </Modal>
+      ) : null}
     </>
   )
 }

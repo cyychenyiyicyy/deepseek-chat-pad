@@ -1,3 +1,5 @@
+// 必须排在最前：补齐老 WebView 缺失的内置方法，否则后面的模块一用到就抛错
+import './polyfills.js'
 import { createRoot } from 'react-dom/client'
 import { App } from './app/App.js'
 import { setupTheme } from './app/theme.js'

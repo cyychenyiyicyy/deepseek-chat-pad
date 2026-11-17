@@ -1039,12 +1039,25 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           break
         }
         if (preparing) {
-          reply = settleReply(reply, 'error', Date.now(), {
-            kind: 'upload',
-            message: '',
-            localMessage: describeUploadError(error),
-            retryable: isRetryableApiError(error),
-          })
+          // 本轮根本没有附件时，异常更可能是运行期错误（老 WebView 缺 API 等），
+          // 这时若仍标成「上传失败」，会把排查方向带偏，所以按真实原因归类。
+          const hasAttachment = request.question.files.length > 0
+          reply = settleReply(
+            reply,
+            'error',
+            Date.now(),
+            hasAttachment
+              ? {
+                  kind: 'upload',
+                  message: '',
+                  localMessage: describeUploadError(error),
+                  retryable: isRetryableApiError(error),
+                }
+              : {
+                  kind: 'protocol',
+                  message: error instanceof Error ? error.message : String(error),
+                }
+          )
           break
         }
         // 附件失效：重新补传后重发。收到过内容块（含丢弃的客户端工具）后不自动重发。
