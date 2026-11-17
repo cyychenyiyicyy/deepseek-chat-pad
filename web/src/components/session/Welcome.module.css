@@ -2,6 +2,8 @@
   position: absolute;
   inset: 0;
   display: flex;
+  /* 平板顶栏与内容上下排列；手机端原本也是这一方向 */
+  flex-direction: column;
 }
 
 .welcome {
