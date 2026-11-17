@@ -80,7 +80,7 @@ export const MessageFile = ({
     // 上传中：本地原件已在 IndexedDB，先垫在蒙层下显示，避免只有一块灰色占位
     if (uploading) {
       return (
-        <div className={clsx(styles.image, styles.imageThumb)} title={file.name}>
+        <div className={clsx(styles.image, styles.imageThumb)}>
           {preview}
           <div className={styles.overlay}>
             <span className={styles.spinner} />
@@ -100,7 +100,6 @@ export const MessageFile = ({
       return (
         <div
           className={clsx(styles.image, styles.imageThumb)}
-          title={errorText}
           aria-label={errorText}
         >
           {preview ?? (
@@ -141,7 +140,6 @@ export const MessageFile = ({
         href={url}
         target="_blank"
         rel="noreferrer"
-        title={file.name}
       >
         {preview}
       </a>

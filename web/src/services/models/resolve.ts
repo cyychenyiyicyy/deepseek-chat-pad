@@ -1,12 +1,6 @@
-import { streamMessage } from '../api/client.js'
-import { streamOpenAI, type OpenAIMessage } from '../api/openai.js'
-import {
-  deepseekFetch,
-  deepseekSearch,
-  extractUrls,
-  formatFetchContext,
-  formatSearchContext,
-} from '../api/tools.js'
+import { ApiError, streamMessage } from '../api/client.js'
+import { streamOpenAI, type OpenAIMessage, type OpenAITool, type OpenAIToolCall } from '../api/openai.js'
+import { deepseekFetch, deepseekSearch, extractUrls, formatFetchContext, formatSearchContext } from '../api/tools.js'
 import type { SearchResult } from '../api/tools.js'
 import type { CreateMessageRequest, MessageParam, MessageStreamEvent } from '../api/types.js'
 import { useSettings } from '../settings.js'
@@ -84,25 +78,6 @@ export const resolveActiveModel = (catalog: ProviderMeta[] = []): ResolvedModel 
   }
 }
 
-/**
- * 部分厂商要求客户端携带稳定会话标识。
- * OpenCode（opencode.ai）用它做路由优化与 prompt 缓存，缺了会返回
- * 「Request is missing x-opencode-session and cannot be routed efficiently」。
- */
-const providerHeaders = (url: string, sessionId?: string): Record<string, string> => {
-  const headers: Record<string, string> = {}
-  try {
-    const host = new URL(url).host
-    if (host.includes('opencode.ai')) {
-      // 同一个会话始终用同一个 id，刷新页面后仍然稳定
-      headers['x-opencode-session'] = sessionId ?? 'deepseek-tablet-default'
-    }
-  } catch {
-    // URL 非法时不做任何附加
-  }
-  return headers
-}
-
 /** 本轮最后一条用户消息的纯文本 */
 const lastUserText = (body: CreateMessageRequest): string => {
   for (let i = body.messages.length - 1; i >= 0; i -= 1) {
@@ -118,7 +93,6 @@ const lastUserText = (body: CreateMessageRequest): string => {
 const toOpenAIMessages = (body: CreateMessageRequest, extraContext = ''): OpenAIMessage[] => {
   const messages: OpenAIMessage[] = [{ role: 'system', content: body.system }]
   const list = body.messages as MessageParam[]
-  // 额外上下文拼到最后一条用户消息后面
   const lastUserIndex = (() => {
     for (let i = list.length - 1; i >= 0; i -= 1) if (list[i].role === 'user') return i
     return -1
@@ -164,64 +138,64 @@ const deriveTitle = (body: CreateMessageRequest): string => {
   return clean.slice(0, 24)
 }
 
+/**
+ * 部分厂商要求客户端携带稳定会话标识。
+ * OpenCode（opencode.ai）用它做路由优化与 prompt 缓存，缺了会返回
+ * 「Request is missing x-opencode-session and cannot be routed efficiently」。
+ */
+const providerHeaders = (url: string, sessionId?: string): Record<string, string> => {
+  const headers: Record<string, string> = {}
+  try {
+    const host = new URL(url).host
+    if (host.includes('opencode.ai')) {
+      headers['x-opencode-session'] = sessionId ?? 'deepseek-tablet-default'
+    }
+  } catch {
+    // URL 非法时不做任何附加
+  }
+  return headers
+}
+
+/**
+ * 联网搜索改成「模型自己决定要不要搜」。
+ *
+ * DeepSeek 官方接口是由服务端工具完成的；换成第三方模型时，这里把搜索声明成
+ * 一个 function tool 交给模型判断：只有它认为需要最新信息时才调用，
+ * 然后客户端再调 DeepSeek 的 /v1/tools/search 取结果、回灌给模型续答。
+ * 这样开着开关问「什么是闭包」不会白搜一轮。
+ */
+const SEARCH_TOOL: OpenAITool = {
+  type: 'function',
+  function: {
+    name: 'deepseek_web_search',
+    description:
+      '联网搜索。仅当问题需要实时或最新信息时调用，例如：新闻、当前价格、天气、最新版本/发布、今天发生的事、需要核实的事实。常识与稳定知识不要调用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: '搜索关键词，简洁明确，可含 site: 等运算符' },
+      },
+      required: ['query'],
+    },
+  },
+}
+
+const readQuery = (args: string): string => {
+  try {
+    const parsed = JSON.parse(args) as { query?: string }
+    return (parsed.query ?? '').trim().slice(0, 128)
+  } catch {
+    return args.trim().slice(0, 128)
+  }
+}
+
+/** 端点不认识 tools 参数时（400/422），退化成不搜索重发一次 */
+const isUnsupportedTools = (error: unknown): boolean =>
+  error instanceof ApiError && (error.status === 400 || error.status === 422 || error.status === 404)
+
 const randomHex = (bytes: number) =>
   Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('')
 
-/**
- * 自定义模型下的服务端工具替代方案。
- *
- * DeepSeek 的 deepseek_web_search / deepseek_read_url 只在它自己的服务端跑，
- * 换成别家模型时改由客户端调用 DeepSeek 的 /v1/tools/search 与 /v1/tools/fetch 取回资料，
- * 再把这批资料拼进用户消息。返回的第二个值是给模型看的上下文。
- */
-const collectDeepseekTools = async (
-  body: CreateMessageRequest,
-  apiKey: string,
-  signal: AbortSignal
-): Promise<{
-  context: string
-  calls: { id: string; query: string; results: SearchResult[] }[]
-  pages: { url: string; title: string; content: string }[]
-}> => {
-  const wantsSearch = body.tools.some((tool) => tool.type === 'deepseek_web_search')
-  const wantsRead = body.tools.some((tool) => tool.type === 'deepseek_read_url')
-  const question = lastUserText(body).trim()
-  const calls: { id: string; query: string; results: SearchResult[] }[] = []
-  const pages: { url: string; title: string; content: string }[] = []
-  const contexts: string[] = []
-
-  if (!apiKey) return { context: '', calls, pages }
-
-  if (wantsSearch && question) {
-    try {
-      const results = await deepseekSearch(apiKey, question.slice(0, 128), { count: 8, signal })
-      if (results.length > 0) {
-        const id = `srvtoolu_s_00_${randomHex(16)}`
-        calls.push({ id, query: question.slice(0, 128), results })
-        contexts.push(formatSearchContext(question.slice(0, 128), results))
-      }
-    } catch {
-      // 搜索失败不阻断对话，模型照常回答
-    }
-  }
-
-  if (wantsRead && question) {
-    const urls = extractUrls(question, 3)
-    for (const url of urls) {
-      try {
-        const page = await deepseekFetch(apiKey, url, signal)
-        pages.push({ url, title: page.title, content: page.content })
-      } catch {
-        // 单个链接失败忽略
-      }
-    }
-    if (pages.length > 0) contexts.push(formatFetchContext(pages))
-  }
-
-  return { context: contexts.join('\n\n'), calls, pages }
-}
-
-/** 搜索结果转成界面认识的服务端工具块内容 */
 const toWebSearchContent = (results: SearchResult[]) =>
   results.map((item) => ({
     type: 'web_search_result' as const,
@@ -270,8 +244,34 @@ function* searchBlocks(
 }
 
 /**
+ * 用户消息里出现链接时，先用 DeepSeek 的 /v1/tools/fetch 把正文抓回来。
+ * 只在含链接时触发，不会每次都请求。
+ */
+const collectLinkContext = async (
+  body: CreateMessageRequest,
+  apiKey: string,
+  signal: AbortSignal
+): Promise<string> => {
+  if (!apiKey) return ''
+  const question = lastUserText(body)
+  const urls = extractUrls(question, 3)
+  if (urls.length === 0) return ''
+
+  const pages: { url: string; title: string; content: string }[] = []
+  for (const url of urls) {
+    try {
+      const page = await deepseekFetch(apiKey, url, signal)
+      pages.push({ url, title: page.title, content: page.content })
+    } catch {
+      // 单个链接失败忽略，模型照常回答
+    }
+  }
+  return formatFetchContext(pages)
+}
+
+/**
  * 发送对话请求，按当前选择的厂商走不同协议，对外统一产出 Messages 事件流。
- * 自定义模型下，联网搜索与读链接改由 DeepSeek 的底层工具接口代劳。
+ * 自定义模型下：链接由客户端抓取，联网搜索交给模型通过工具自行决定。
  */
 export async function* streamChat(
   body: CreateMessageRequest,
@@ -292,13 +292,8 @@ export async function* streamChat(
   const settings = useSettings.getState()
   const thinking = body.thinking.type === 'enabled' && Boolean(resolved.meta?.reason)
 
-  // DeepSeek 的两个工具接口与对话模型无关，先用它们把资料取齐
-  const { context, calls } = await collectDeepseekTools(body, settings.apiKey ?? '', signal)
-  if (calls.length > 0) {
-    yield* searchBlocks(calls)
-  }
-
-  const messages = toOpenAIMessages(body, context)
+  const linkContext = await collectLinkContext(body, settings.apiKey ?? '', signal)
+  const messages = toOpenAIMessages(body, linkContext)
 
   // 自定义厂商没有服务端标题，先补一条带标题的 message_delta，让会话列表有名字
   if (body.title?.enabled) {
@@ -311,14 +306,70 @@ export async function* streamChat(
     }
   }
 
-  yield* streamOpenAI({
+  const options = {
     apiKey: resolved.apiKey,
     url: resolved.url,
-    extraHeaders: providerHeaders(resolved.url, body.clientSessionId),
     model: resolved.model.id,
-    messages,
     thinking,
     noTemperature: Boolean(resolved.meta?.noTemp),
+    extraHeaders: providerHeaders(resolved.url, body.clientSessionId),
     signal,
+  }
+
+  const wantsSearch = body.tools.some((tool) => tool.type === 'deepseek_web_search')
+  const deepseekKey = settings.apiKey ?? ''
+  // 目录里没收录的模型也试一次：不认识 tools 会退化成不搜索
+  const canUseTools = Boolean(resolved.meta?.tool) || !resolved.meta
+
+  if (!wantsSearch || !deepseekKey || !canUseTools) {
+    yield* streamOpenAI({ ...options, messages })
+    return
+  }
+
+  // 第一轮：带上搜索工具，由模型决定用不用
+  const calls: OpenAIToolCall[] = []
+  try {
+    yield* streamOpenAI({ ...options, messages, tools: [SEARCH_TOOL], toolCallsOut: calls })
+  } catch (error) {
+    if (isUnsupportedTools(error) && calls.length === 0) {
+      // 端点不支持工具调用：直接不搜索重发
+      yield* streamOpenAI({ ...options, messages })
+      return
+    }
+    throw error
+  }
+
+  const searchCall = calls.find((call) => call.name === 'deepseek_web_search')
+  // 模型判断不需要搜索，第一轮已经给出完整回答
+  if (!searchCall) return
+
+  const query = readQuery(searchCall.arguments) || lastUserText(body).slice(0, 128)
+  const results = await deepseekSearch(deepseekKey, query, { count: 8, signal })
+  if (results.length === 0) return
+
+  // 让界面照常显示「搜索了哪些来源」
+  yield* searchBlocks([{ id: searchCall.id || `call_${randomHex(6)}`, query, results }])
+
+  messages.push({
+    role: 'assistant',
+    content: null,
+    tool_calls: calls.map((call) => ({
+      id: call.id,
+      type: 'function' as const,
+      function: { name: call.name, arguments: call.arguments },
+    })),
   })
+  for (const call of calls) {
+    messages.push({
+      role: 'tool',
+      tool_call_id: call.id,
+      content:
+        call === searchCall
+          ? formatSearchContext(query, results)
+          : '（该工具未在本轮执行）',
+    })
+  }
+
+  // 第二轮：不再声明工具，避免无限调用
+  yield* streamOpenAI({ ...options, messages })
 }

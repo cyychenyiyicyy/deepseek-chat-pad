@@ -51,13 +51,6 @@ export const FileCard = ({
         status === 'error' && (onRemove || onRetry) && styles.failed,
         onClick && styles.clickable
       )}
-      title={
-        status === 'error'
-          ? onRetry
-            ? t('uploadRetry', { message: description })
-            : description
-          : name
-      }
       onClick={onClick}
     >
       <div className={clsx(styles.icon, status === 'error' && onRetry && styles.retry)}>{icon}</div>

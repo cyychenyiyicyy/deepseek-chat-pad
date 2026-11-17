@@ -9,10 +9,22 @@ export type OpenAIContentPart =
   | { type: 'text'; text: string }
   | { type: 'image_url'; image_url: { url: string } }
 
+export type OpenAITool = {
+  type: 'function'
+  function: { name: string; description: string; parameters: Record<string, unknown> }
+}
+
+export type OpenAIToolCall = { id: string; name: string; arguments: string }
+
 export type OpenAIMessage =
   | { role: 'system'; content: string }
   | { role: 'user'; content: string | OpenAIContentPart[] }
-  | { role: 'assistant'; content: string }
+  | {
+      role: 'assistant'
+      content: string | null
+      tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[]
+    }
+  | { role: 'tool'; tool_call_id: string; content: string }
 
 export type OpenAIStreamOptions = {
   apiKey: string
@@ -25,6 +37,10 @@ export type OpenAIStreamOptions = {
   noTemperature?: boolean
   /** 厂商要求的额外请求头，例如 OpenCode 的 x-opencode-session */
   extraHeaders?: Record<string, string>
+  /** 声明给模型的工具；模型自行决定是否调用 */
+  tools?: OpenAITool[]
+  /** 收集本轮模型发起的工具调用（不产出给界面） */
+  toolCallsOut?: OpenAIToolCall[]
   signal: AbortSignal
 }
 
@@ -42,7 +58,15 @@ type Chunk = {
   id?: string
   model?: string
   choices?: {
-    delta?: { content?: string | null; reasoning_content?: string | null }
+    delta?: {
+      content?: string | null
+      reasoning_content?: string | null
+      tool_calls?: {
+        index?: number
+        id?: string
+        function?: { name?: string; arguments?: string }
+      }[]
+    }
     finish_reason?: string | null
   }[]
   usage?: {
@@ -61,7 +85,8 @@ type Chunk = {
  * 渲染、续写、导出、历史回放都不用改。
  */
 export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerator<MessageStreamEvent> {
-  const { apiKey, url, model, messages, thinking, noTemperature, extraHeaders, signal } = options
+  const { apiKey, url, model, messages, thinking, noTemperature, extraHeaders, tools, toolCallsOut, signal } =
+    options
   const payload: Record<string, unknown> = {
     model,
     messages,
@@ -71,6 +96,11 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
   // 思考开关是 DeepSeek 的扩展字段；其他厂商收到未知字段可能直接 400，因此只在开启时附带
   if (thinking) payload.thinking = { type: 'enabled' }
   if (noTemperature) delete payload.temperature
+  if (tools && tools.length > 0) {
+    payload.tools = tools
+    // 交给模型自己决定是否调用，不强制
+    payload.tool_choice = 'auto'
+  }
 
   const init: RequestInit = {
     method: 'POST',
@@ -86,7 +116,7 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
 
   // 老 WebView 没有 fetch 流式响应，改走 XHR 增量通道
   if (!supportsStreamResponse()) {
-    yield* translate(readServerSentEventsXhr(await prepareRequest(url, init), signal), model)
+    yield* translate(readServerSentEventsXhr(await prepareRequest(url, init), signal), model, toolCallsOut)
     return
   }
 
@@ -105,14 +135,17 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
   if (!response.body) {
     throw new ApiError('protocol', '当前 WebView 不支持流式响应，请更新系统 WebView')
   }
-  yield* translate(readServerSentEvents(response.body, signal), model)
+  yield* translate(readServerSentEvents(response.body, signal), model, toolCallsOut)
 }
 
 /** 把 OpenAI 的分片翻译成内部事件；两条传输通道共用这一段 */
 async function* translate(
   events: AsyncIterable<ServerSentEvent>,
-  model: string
+  model: string,
+  toolCallsOut?: OpenAIToolCall[]
 ): AsyncGenerator<MessageStreamEvent> {
+  /** 模型可能边想边发多个工具调用，按 index 累积 */
+  const pendingTools = new Map<number, OpenAIToolCall>()
   const messageId = randomHex(16)
   let started = false
   let blockIndex = 0
@@ -181,6 +214,17 @@ async function* translate(
     if (!choice) continue
     const delta = choice.delta ?? {}
 
+    if (delta.tool_calls) {
+      for (const part of delta.tool_calls) {
+        const index = part.index ?? 0
+        const current = pendingTools.get(index) ?? { id: '', name: '', arguments: '' }
+        if (part.id) current.id = part.id
+        if (part.function?.name && !current.name) current.name = part.function.name
+        if (part.function?.arguments) current.arguments += part.function.arguments
+        pendingTools.set(index, current)
+      }
+    }
+
     // 思考增量与正文增量分别落在不同的块里，切换时先收尾上一块
     if (delta.reasoning_content) {
       if (open !== 'thinking') {
@@ -205,6 +249,14 @@ async function* translate(
       }
     }
     if (choice.finish_reason) finishReason = choice.finish_reason
+  }
+
+  if (toolCallsOut && pendingTools.size > 0) {
+    for (const call of [...pendingTools.values()]) {
+      // 部分端点不回 id，补一个本地的，供后续 tool 消息引用
+      if (!call.id) call.id = `call_${randomHex(6)}`
+      toolCallsOut.push(call)
+    }
   }
 
   if (!started) {

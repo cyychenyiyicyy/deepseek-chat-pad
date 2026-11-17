@@ -63,7 +63,6 @@ export const BalanceChip = () => {
     <button
       type="button"
       className={clsx(styles.chip, insufficient && styles.danger)}
-      title={t('balanceRefresh')}
       onClick={() => void load(true)}
     >
       <span className={styles.dot} aria-hidden />

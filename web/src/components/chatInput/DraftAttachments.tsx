@@ -60,7 +60,6 @@ const AttachmentItem = ({
   return item.previewUrl ? (
     <div
       className={clsx(styles.attachment, failed && styles.attachmentFailed)}
-      title={error ?? item.file.name}
     >
       <img src={item.previewUrl} alt={item.file.name} />
       {status === 'uploading' ? <div className={styles.uploading} /> : null}
