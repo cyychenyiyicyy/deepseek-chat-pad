@@ -7,6 +7,7 @@ import { toLocalSession } from './toLocal.js'
 import {
   ArchiveError,
   isZipFile,
+  type ArchiveSource,
   readArchive,
   readEntry,
   skipEntry,
@@ -55,7 +56,7 @@ const readJson = async (entry: ArchiveEntry): Promise<unknown> => {
  * 校验失败时保留正在生成的回答和现有暂存数据。
  */
 export type ImportProgress = {
-  phase: 'check' | 'sessions' | 'files' | 'finish'
+  phase: 'reading' | 'check' | 'sessions' | 'files' | 'finish'
   /** 已解析的会话数 */
   sessions: number
   /** 已保存的图片数 */
@@ -63,7 +64,7 @@ export type ImportProgress = {
 }
 
 export const checkArchiveFormat = async (
-  file: File,
+  file: File | ArchiveSource,
   onProgress?: (progress: ImportProgress) => void
 ): Promise<void> => {
   onProgress?.({ phase: 'check', sessions: 0, files: 0 })
@@ -91,7 +92,7 @@ export const checkArchiveFormat = async (
  * 写入导入暂存存储；调用方负责先清空暂存，成功后替换正式数据，失败时清理暂存。
  */
 export const importArchive = async (
-  file: File,
+  file: File | ArchiveSource,
   onProgress?: (progress: ImportProgress) => void
 ): Promise<void> => {
   if (!(await isZipFile(file))) {

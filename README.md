@@ -119,6 +119,13 @@ WebView ──GET /static/*──▶ LocalServer ──▶ assets/www/*
 - **历史导入修复**：原生选择器改用 SAF（`ACTION_OPEN_DOCUMENT`），去掉 `accept` 的 MIME 过滤
 - **导入可观测**：显示进度、确认弹窗显示文件名与大小、失败时给出具体原因（含实际导出格式版本号）
 
+## v1.4.2 变更
+
+- **版本号规范**：`android/version.properties` 是唯一来源，release 用 `v1.4.2` 这样的正式版本号，
+  设置页显示当前版本；旧 `build-N` 发布已清理
+- **修复后台自启**：WebView 渲染进程在后台被回收时，原本会 `startActivity` 重启自己
+  （应用就自己跳回前台）。现在后台只记录待重建，回到前台才重建
+
 ## 已知限制
 
 - **联网搜索、文件上传、读链接仍是 DeepSeek 独有能力**。选中自定义模型时这两个开关会置灰，

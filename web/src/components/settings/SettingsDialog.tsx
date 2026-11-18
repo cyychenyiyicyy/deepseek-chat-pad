@@ -531,6 +531,21 @@ const useHistoryImport = () => {
   }
 }
 
+/** 按导入阶段显示对应进度：读文件 / 检查 / 解析对话 / 处理附件 */
+const importProgressText = (
+  t: ReturnType<typeof useTranslate>,
+  progress: ImportProgress | null
+): string => {
+  if (!progress) return t('historyImportChecking')
+  if (progress.phase === 'reading') return t('historyImportReadingFile')
+  if (progress.phase === 'check') return t('historyImportChecking')
+  // 会话与附件在归档里的先后顺序不固定，谁在动就报谁
+  if (progress.sessions === 0 && progress.files > 0) {
+    return t('historyImportProgressFiles', { count: progress.files })
+  }
+  return t('historyImportProgress', { count: progress.sessions })
+}
+
 /** 导入 = 覆盖：用选中文件替换本地全部会话与附件。 */
 const ImportHistory = ({
   historyImport,
@@ -545,11 +560,7 @@ const ImportHistory = ({
   return (
     <SettingCell
       label={t('historyImport')}
-      description={
-        historyImport.busy
-          ? t('historyImportProgress', { count: historyImport.progress?.sessions ?? 0 })
-          : t('historyImportDescription')
-      }
+      description={historyImport.busy ? importProgressText(t, historyImport.progress) : t('historyImportDescription')}
       status={historyImport.busy ? null : historyImport.status}
       action={
         historyImport.busy ? (
