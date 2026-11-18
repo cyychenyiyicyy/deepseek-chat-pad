@@ -79,6 +79,16 @@ NODE_ENV=production npx rspack build -c rspack.config.ts
 node tools/build-catalog.mjs
 ```
 
+## v1.6.0 变更：分体式更新
+
+- Release 同时发布 `app-debug.apk` 与 `web-v<版本>.zip`
+- 应用内「设置 → 通用 → 检查更新」：只更新网页包（不重装，刷新即生效）或下载 APK（带进度）
+- 原生接口 `/__ds_update/state|release|apply-web|download-apk|install-apk`，
+  网页包解压到 `filesDir/web`，`AssetHandler` 优先从那里提供静态资源
+- 启动时静默检查一次更新
+- 滑条加大并新增 −/+ 步进按钮；修掉拖动时浮窗被滚动事件关闭的问题
+- 应用名改为 **DeepSeek Chat Pad**
+
 ## 已知限制
 
 - 联网搜索 / 文件上传 / URL 阅读由 DeepSeek 的服务端能力提供，自定义模型下走客户端代取；
