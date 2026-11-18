@@ -16,6 +16,8 @@ export type ModelMeta = {
   tool?: 1
   /** 思考开关类型：toggle（开关） / effort（档位） */
   ropt?: string[]
+  /** 档位允许的取值，例如 ['low','high','max'] */
+  effort?: string[]
   /** 不接受 temperature */
   noTemp?: 1
   /** [输入, 输出] 价格，美元 / 百万 token */

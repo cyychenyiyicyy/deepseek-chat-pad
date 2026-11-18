@@ -5,6 +5,7 @@ import type { SearchResult } from '../api/tools.js'
 import type { CreateMessageRequest, MessageParam, MessageStreamEvent } from '../api/types.js'
 import { useSettings } from '../settings.js'
 import { chatUrl, findModelMeta, loadCoreProviders, type ModelMeta, type ProviderMeta } from './catalog.js'
+import { deepseekEffort, isExplicitEffort } from './effort.js'
 import { DEEPSEEK_MODELS, useModelState, type ModelEntry, type ProviderConfig } from './store.js'
 
 /** 当前生效的厂商 + 模型 + 鉴权 */
@@ -281,7 +282,27 @@ export async function* streamChat(
   const resolved = resolveActiveModel(catalog)
 
   if (resolved.isDeepseek) {
-    yield* streamMessage(resolved.apiKey, { ...body, model: resolved.model.id }, signal)
+    // DeepSeek 的 Anthropic 兼容格式用 output_config.effort 控制思考强度
+    const effort = useSettings.getState().thinkingEffort
+    const withEffort = {
+      ...body,
+      model: resolved.model.id,
+      ...(isExplicitEffort(effort) ? { output_config: { effort: deepseekEffort(effort) } } : {}),
+    }
+    let produced = false
+    try {
+      for await (const event of streamMessage(resolved.apiKey, withEffort, signal)) {
+        produced = true
+        yield event
+      }
+    } catch (error) {
+      // 万一服务端不认 output_config（4xx 且尚未产出内容），退回不带档位的请求
+      if (!produced && error instanceof ApiError && (error.status ?? 0) >= 400 && (error.status ?? 0) < 500) {
+        yield* streamMessage(resolved.apiKey, { ...body, model: resolved.model.id }, signal)
+        return
+      }
+      throw error
+    }
     return
   }
 
@@ -306,6 +327,17 @@ export async function* streamChat(
     }
   }
 
+  // 自定义端点用标准的 reasoning_effort；关闭思考时只有声明了 none 的模型才需要显式传
+  const effort = settings.thinkingEffort
+  const reasoningEffort =
+    effort === 'off'
+      ? resolved.meta?.effort?.includes('none')
+        ? 'none'
+        : undefined
+      : effort === 'on'
+        ? undefined
+        : effort
+
   const options = {
     apiKey: resolved.apiKey,
     url: resolved.url,
@@ -313,6 +345,7 @@ export async function* streamChat(
     thinking,
     noTemperature: Boolean(resolved.meta?.noTemp),
     extraHeaders: providerHeaders(resolved.url, body.clientSessionId),
+    reasoningEffort,
     signal,
   }
 

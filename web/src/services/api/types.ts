@@ -180,6 +180,8 @@ export type CreateMessageRequest = {
   model: ChatModel
   /** 本机会话 id：只在自定义端点需要「稳定会话标识」时使用（如 OpenCode Go） */
   clientSessionId?: string
+  /** DeepSeek Anthropic 格式的思考强度：{"effort": "low" | "high" | "max"} */
+  output_config?: { effort: string }
   system: string
   messages: MessageParam[]
   thinking: { type: 'enabled' | 'disabled' }

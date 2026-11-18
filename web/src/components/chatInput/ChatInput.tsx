@@ -32,7 +32,7 @@ import { useVoiceInput } from './useVoiceInput.js'
 import { VoiceButton } from './VoiceButton.js'
 import { Spectrum } from './Spectrum.js'
 import { useTranslate } from '../../i18n/index.js'
-import { ModelPicker } from '../models/ModelPicker.js'
+import { ModelCapsule } from '../models/ModelCapsule.js'
 import { useModelState } from '../../services/models/store.js'
 import { ensureActiveModelReady } from '../../services/models/ready.js'
 import styles from './ChatInput.module.css'
@@ -217,7 +217,7 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
         </div>
       </div>
       <div className={styles.functionRow}>
-        <ModelPicker />
+        <ModelCapsule />
         {/* 深度思考 / 智能搜索开关，tooltip 在按钮上方 */}
         <div ref={togglesRef} className={styles.toggles}>
           <Tooltip content={t('deactivatedThinkTooltip')}>

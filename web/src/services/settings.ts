@@ -19,6 +19,8 @@ type Settings = {
   siderCollapsed: boolean
   /** 整体界面缩放，1 为原始大小 */
   uiScale: number
+  /** 思考强度档位：off / on / low / high / max…，与 thinking 双向同步 */
+  thinkingEffort: string
 }
 
 const KEYS = {
@@ -31,6 +33,7 @@ const KEYS = {
   search: 'chat-demo:search',
   siderCollapsed: 'chat-demo:sider-collapsed',
   uiScale: 'chat-demo:ui-scale',
+  thinkingEffort: 'chat-demo:thinking-effort',
 } as const
 
 const read = (key: string) => {
@@ -99,6 +102,15 @@ const clampScale = (value: number) =>
 
 const initialUiScale = (): number => clampScale(Number(read(KEYS.uiScale) ?? '1'))
 
+/** 默认档位：沿用旧的开关状态，新用户默认关闭思考 */
+const initialThinkingEffort = (): string => {
+  const saved = read(KEYS.thinkingEffort)
+  if (saved) {
+    return saved
+  }
+  return read(KEYS.thinking) === 'true' ? 'high' : 'off'
+}
+
 export const useSettings = create<Settings>(() => ({
   apiKey: read(KEYS.apiKey),
   locale: initialLocale(),
@@ -109,6 +121,7 @@ export const useSettings = create<Settings>(() => ({
   search: read(KEYS.search) === 'true',
   siderCollapsed: read(KEYS.siderCollapsed) === 'true',
   uiScale: initialUiScale(),
+  thinkingEffort: initialThinkingEffort(),
 }))
 
 export const setLocale = (locale: Locale) => {
@@ -137,9 +150,19 @@ export const setApiKey = (apiKey: string | null) => {
   useSettings.setState({ apiKey })
 }
 
+/** 选择档位：'off' 等同关闭思考，其余等同开启 */
+export const setThinkingEffort = (effort: string) => {
+  write(KEYS.thinkingEffort, effort)
+  write(KEYS.thinking, String(effort !== 'off'))
+  useSettings.setState({ thinkingEffort: effort, thinking: effort !== 'off' })
+}
+
 export const setThinking = (thinking: boolean) => {
+  const current = useSettings.getState().thinkingEffort
+  const next = thinking ? (current === 'off' ? 'high' : current) : 'off'
   write(KEYS.thinking, String(thinking))
-  useSettings.setState({ thinking })
+  write(KEYS.thinkingEffort, next)
+  useSettings.setState({ thinking, thinkingEffort: next })
 }
 
 export const setSearch = (search: boolean) => {

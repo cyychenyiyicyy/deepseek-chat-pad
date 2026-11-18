@@ -151,7 +151,7 @@ export const fetchOnlineMeta = async (
       attachment?: boolean
       reasoning?: boolean
       tool_call?: boolean
-      reasoning_options?: { type: string }[]
+      reasoning_options?: { type: string; values?: string[] }[]
       temperature?: boolean
       cost?: { input?: number; output?: number }
       release_date?: string
@@ -168,6 +168,12 @@ export const fetchOnlineMeta = async (
       ...(m.reasoning ? { reason: 1 as const } : {}),
       ...(m.tool_call ? { tool: 1 as const } : {}),
       ...(m.reasoning_options?.length ? { ropt: m.reasoning_options.map((o) => o.type) } : {}),
+      ...(() => {
+        const values = (m.reasoning_options ?? [])
+          .filter((o) => o.type === 'effort')
+          .flatMap((o) => o.values ?? [])
+        return values.length > 0 ? { effort: values } : {}
+      })(),
       ...(m.temperature === false ? { noTemp: 1 as const } : {}),
       ...(m.cost ? { cost: [m.cost.input ?? 0, m.cost.output ?? 0] as [number, number] } : {}),
       ...(m.release_date ? { rel: m.release_date } : {}),

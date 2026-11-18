@@ -1,0 +1,317 @@
+.trigger {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  max-width: 260px;
+  height: 32px;
+  padding: 0 8px 0 10px;
+  border: none;
+  border-radius: 100px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.16s var(--ds-ease-in-out);
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--dsw-alias-button-primary-fill);
+    outline-offset: 1px;
+  }
+}
+
+.triggerOpen {
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+.triggerName {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.triggerEffort {
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.triggerArrow {
+  display: flex;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+/* ---------- 小浮窗 ---------- */
+
+.panel {
+  position: fixed;
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 16px;
+  background-color: var(--dsw-alias-bg-layer-3);
+  box-shadow: var(--dsw-shadow-lv3);
+}
+
+.modelRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 40px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.rowLabel {
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.rowValue {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: right;
+  color: var(--dsw-alias-label-primary);
+}
+
+.rowChevron {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.effortBlock {
+  padding: 2px 8px 10px;
+}
+
+.effortHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  font-size: 13px;
+}
+
+.effortValue {
+  flex: 1;
+  text-align: right;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.effortHint {
+  padding: 2px 0 4px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ---------- 滑条（观感对齐 Codex 风格：轨道 + 填充 + 刻度 + 白色滑块） ---------- */
+
+.track {
+  position: relative;
+  box-sizing: border-box;
+  height: 20px;
+  margin: 12px 6px 8px;
+  border-radius: 999px;
+  background-color: var(--dsw-alias-border-l1);
+  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+
+  &:focus-visible {
+    outline: 2px solid var(--dsw-alias-button-primary-fill);
+    outline-offset: 6px;
+  }
+}
+
+.trackFill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 10px 0 0 10px;
+  background-color: var(--dsw-alias-button-primary-fill);
+  pointer-events: none;
+  transition: width 0.16s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+.tick {
+  position: absolute;
+  top: 50%;
+  width: 3px;
+  height: 3px;
+  margin: -1.5px 0 0 -1.5px;
+  border-radius: 50%;
+  background-color: rgba(15, 17, 21, 0.26);
+  pointer-events: none;
+}
+
+.tickOn {
+  background-color: rgba(255, 255, 255, 0.55);
+}
+
+.knob {
+  position: absolute;
+  top: 50%;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+  border-radius: 50%;
+  background-color: #fff;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.16),
+    0 0 0 1px rgba(0, 0, 0, 0.05);
+  pointer-events: none;
+  transition: left 0.16s cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+[data-ds-dark-theme] .tick {
+  background-color: rgba(255, 255, 255, 0.28);
+}
+
+[data-ds-dark-theme] .tickOn {
+  background-color: rgba(15, 17, 21, 0.45);
+}
+
+/* ---------- 模型列表弹窗 ---------- */
+
+.dialog {
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(78vh, 720px);
+}
+
+.dialogBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  max-height: min(58vh, 560px);
+}
+
+.search {
+  flex-shrink: 0;
+  box-sizing: border-box;
+  width: 100%;
+  height: 42px;
+  padding: 0 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 15px;
+  outline: none;
+
+  &::placeholder {
+    color: var(--dsw-alias-label-tertiary);
+  }
+
+  &:focus {
+    border-color: var(--dsw-alias-button-primary-fill);
+  }
+}
+
+.list {
+  flex: 1;
+  min-height: 0;
+  margin: 0 -4px;
+  padding: 0 4px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  overscroll-behavior: contain;
+}
+
+.group {
+  padding-top: 6px;
+}
+
+.groupName {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+}
+
+.groupCount {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 10px;
+  border-radius: 10px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 15px;
+  line-height: 22px;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.itemName {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.itemMeta {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+}
+
+.empty {
+  padding: 24px 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 14px;
+  text-align: center;
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+}

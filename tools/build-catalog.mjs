@@ -108,8 +108,14 @@ const pruneModel = (m) => ({
   ...(m.attachment ? { attach: 1 } : {}),
   ...(m.reasoning ? { reason: 1 } : {}),
   ...(m.tool_call ? { tool: 1 } : {}),
-  // 思考开关的类型：toggle=开关，effort=档位
+  // 思考开关的类型：toggle=开关，effort=档位；以及档位允许的取值
   ...(m.reasoning_options?.length ? { ropt: m.reasoning_options.map((o) => o.type) } : {}),
+  ...(() => {
+    const values = (m.reasoning_options ?? [])
+      .filter((o) => o.type === 'effort')
+      .flatMap((o) => o.values ?? [])
+    return values.length > 0 ? { effort: values } : {}
+  })(),
   ...(m.temperature === false ? { noTemp: 1 } : {}),
   ...(m.cost ? { cost: [m.cost.input ?? 0, m.cost.output ?? 0] } : {}),
   ...(m.release_date ? { rel: m.release_date } : {}),

@@ -41,6 +41,8 @@ export type OpenAIStreamOptions = {
   tools?: OpenAITool[]
   /** 收集本轮模型发起的工具调用（不产出给界面） */
   toolCallsOut?: OpenAIToolCall[]
+  /** 思考强度：OpenAI 兼容字段 reasoning_effort */
+  reasoningEffort?: string
   signal: AbortSignal
 }
 
@@ -85,8 +87,19 @@ type Chunk = {
  * 渲染、续写、导出、历史回放都不用改。
  */
 export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerator<MessageStreamEvent> {
-  const { apiKey, url, model, messages, thinking, noTemperature, extraHeaders, tools, toolCallsOut, signal } =
-    options
+  const {
+    apiKey,
+    url,
+    model,
+    messages,
+    thinking,
+    noTemperature,
+    extraHeaders,
+    tools,
+    toolCallsOut,
+    reasoningEffort,
+    signal,
+  } = options
   const payload: Record<string, unknown> = {
     model,
     messages,
@@ -95,6 +108,7 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
   }
   // 思考开关是 DeepSeek 的扩展字段；其他厂商收到未知字段可能直接 400，因此只在开启时附带
   if (thinking) payload.thinking = { type: 'enabled' }
+  if (reasoningEffort) payload.reasoning_effort = reasoningEffort
   if (noTemperature) delete payload.temperature
   if (tools && tools.length > 0) {
     payload.tools = tools
