@@ -106,25 +106,42 @@ jobs:
             echo "| 大小 | $(du -h "$apk" | cut -f1) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: 读取版本号
+        id: ver
+        run: |
+          set -euo pipefail
+          v=$(grep -m1 '^versionName=' android/version.properties | cut -d= -f2 | tr -d '\r[:space:]')
+          test -n "$v" || { echo "version.properties 里没有 versionName"; exit 1; }
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "本次版本：v$v"
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: deepseek-tablet-apk
+          name: deepseek-tablet-v${{ steps.ver.outputs.value }}
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 90
 
-      # main 分支上再发一个 release，方便直接下载安装，不用登录下载 artifact
-      - name: 发布 preview release
+      # main 分支上发布 release：标签与标题直接用应用版本号，不再用 run number
+      - name: 发布 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: build-${{ github.run_number }}
-          prerelease: true
+          tag_name: v${{ steps.ver.outputs.value }}
+          name: v${{ steps.ver.outputs.value }}
+          # 同一版本重跑时更新已有 release，而不是失败
+          allowUpdates: true
+          prerelease: false
           generate_release_notes: false
           body: |
-            自动构建（提交 `${{ github.sha }}`）。
+            DeepSeek 平板 **v${{ steps.ver.outputs.value }}**
 
-            安装：下载 `deepseek-tablet-*.apk` 后直接安装，需要允许「未知来源」。
+            | 项 | 值 |
+            |---|---|
+            | 版本 | v${{ steps.ver.outputs.value }} |
+            | 构建号 | ${{ github.run_number }} |
+            | 提交 | `${{ github.sha }}` |
+
+            安装：下载 `app-debug.apk` 直接覆盖安装（需要允许「未知来源」）。
           files: android/app/build/outputs/apk/debug/app-debug.apk

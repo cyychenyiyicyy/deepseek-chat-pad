@@ -7,9 +7,24 @@ import { rspack, type Configuration } from '@rspack/core'
 const dev = process.env.NODE_ENV !== 'production'
 const targets = ['chrome >= 105', 'edge >= 105', 'safari >= 16', 'firefox >= 110']
 const root = path.dirname(fileURLToPath(import.meta.url))
-const { version } = JSON.parse(
-  readFileSync(new URL('./package.json', import.meta.url), 'utf8')
-) as { version: string }
+const { version } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as {
+  version: string
+}
+// 版本号与 Android 端共用同一来源（android/version.properties）；
+// 单独部署前端时读不到该文件，退回 package.json 的版本，避免构建直接失败
+const appVersion = (() => {
+  try {
+    const matched = /^versionName=(.+)$/m.exec(
+      readFileSync(path.resolve(root, '../android/version.properties'), 'utf8')
+    )
+    if (matched) {
+      return matched[1].trim()
+    }
+  } catch {
+    // 没有 android 目录时忽略
+  }
+  return version
+})()
 
 const cssLoader = {
   loader: 'builtin:lightningcss-loader',
@@ -78,9 +93,12 @@ export const createConfig = ({
     new rspack.HtmlRspackPlugin({
       template: './src/index.html',
       scriptLoading: 'defer',
-      meta: { 'application-version': version },
+      meta: { 'application-version': appVersion },
     }),
-    new rspack.DefinePlugin({ __API_ORIGIN__: JSON.stringify(apiOrigin) }),
+    new rspack.DefinePlugin({
+      __API_ORIGIN__: JSON.stringify(apiOrigin),
+      __APP_VERSION__: JSON.stringify(appVersion),
+    }),
     new rspack.CopyRspackPlugin({
       patterns: [
         { from: path.resolve(root, 'LICENSE'), to: 'LICENSE', toType: 'file' },

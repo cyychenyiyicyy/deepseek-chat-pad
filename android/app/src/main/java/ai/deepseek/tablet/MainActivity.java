@@ -88,6 +88,13 @@ public final class MainActivity extends AppCompatActivity {
     private ValueCallback<Uri[]> filePathCallback;
     private String loadedUrl;
     private boolean renderProcessRestartScheduled;
+    /**
+     * 应用是否可见。后台时绝不做任何会把界面拉回前台的操作——
+     * 系统在后台回收 WebView 渲染进程非常常见，若此时重建 Activity 就会「自己跳出来」。
+     */
+    private boolean appVisible;
+    /** 后台期间渲染进程被回收过，等用户自己回来时再重建 */
+    private boolean rendererNeedsRebuild;
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -151,6 +158,8 @@ public final class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onPause() {
+        // 先标记不可见：渲染进程若在这一刻被回收，也不该把界面拉回来
+        appVisible = false;
         super.onPause();
         if (webView != null) {
             // 页面进入后台后停掉定时器与合成，后台 CPU / 内存占用明显下降
@@ -162,6 +171,19 @@ public final class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        appVisible = true;
+        if (rendererNeedsRebuild) {
+            // 后台被回收过，用户已经回来了，这时重建是可见且合理的
+            rendererNeedsRebuild = false;
+            renderProcessRestartScheduled = false;
+            Log.i(TAG, "rebuilding after background renderer loss");
+            mainHandler.post(() -> {
+                if (!isFinishing() && !isDestroyed()) {
+                    recreate();
+                }
+            });
+            return;
+        }
         if (webView != null) {
             webView.resumeTimers();
             webView.onResume();
@@ -414,6 +436,14 @@ public final class MainActivity extends AppCompatActivity {
             // 这个回调就在 WebView 内部调用栈里，立刻 destroy 有重入风险，挪到下一个消息周期
             mainHandler.post(() -> {
                 destroyWebView();
+                if (!appVisible) {
+                    // 后台被系统回收：只做记录，等用户下次回来再重建。
+                    // 这里一旦 startActivity，应用就会自己跳到前台。
+                    rendererNeedsRebuild = true;
+                    renderProcessRestartScheduled = false;
+                    Log.i(TAG, "renderer gone while backgrounded; rebuild deferred");
+                    return;
+                }
                 showError(getString(R.string.error_renderer_lost));
                 scheduleActivityRestart();
             });
@@ -670,7 +700,7 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void scheduleActivityRestart() {
-        if (renderProcessRestartScheduled) {
+        if (renderProcessRestartScheduled || !appVisible) {
             return;
         }
         renderProcessRestartScheduled = true;

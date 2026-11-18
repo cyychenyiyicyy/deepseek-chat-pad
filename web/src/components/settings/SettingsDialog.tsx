@@ -107,6 +107,7 @@ const SettingsContent = () => {
               <ScaleSetting />
               <LocaleSetting />
               <LocationSetting />
+              <VersionSetting />
             </>
           ) : section === 'models' ? (
             <ModelPanel onOpenSection={(next) => setSection(next)} />
@@ -296,6 +297,19 @@ const LocaleSetting = () => {
           onChange={setLocale}
         />
       }
+    />
+  )
+}
+
+/** 应用版本：和发布页的版本号一致，方便对照 */
+const VersionSetting = () => {
+  const t = useTranslate()
+  return (
+    <SettingCell
+      label={t('appVersion')}
+      description={`v${__APP_VERSION__}`}
+      status={null}
+      action={<span />}
     />
   )
 }

@@ -234,6 +234,7 @@ export const en = {
   siderModelEntry: 'Models',
   stopReadingAloud: 'Stop reading',
   themeToDark: 'Switch to dark',
+  appVersion: 'Version',
   settingsUiScale: 'Interface scale',
   settingsUiScaleHint: 'Scale the whole interface up or down for different tablet sizes',
   settingsUiScaleReset: 'Reset',

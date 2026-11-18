@@ -224,6 +224,7 @@ export const zh = {
   siderModelEntry: '模型',
   stopReadingAloud: '停止朗读',
   themeToDark: '切换到深色',
+  appVersion: '版本',
   settingsUiScale: '界面缩放',
   settingsUiScaleHint: '整体放大或缩小界面，适合不同尺寸的平板',
   settingsUiScaleReset: '恢复默认',
