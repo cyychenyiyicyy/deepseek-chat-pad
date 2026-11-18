@@ -143,6 +143,24 @@ jobs:
           retention-days: 90
 
       # main 分支上发布 release：标签与标题直接用应用版本号，不再用 run number
+      - name: 生成更新说明
+        run: |
+          set -euo pipefail
+          v=${{ steps.ver.outputs.value }}
+          {
+            echo "版本 v$v（构建 ${{ github.run_number }}）"
+            echo
+            echo "app-debug.apk：完整安装包，直接覆盖安装（需允许「未知来源」）"
+            echo "web-v$v.zip：网页更新包，应用内「设置 → 通用 → 检查更新」可直接拉取，不用重装"
+            echo
+            if [ -f release-notes.md ]; then
+              cat release-notes.md
+            else
+              echo "本次改动：小版本维护。"
+            fi
+          } > release-body.md
+          cat release-body.md
+
       - name: 发布 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
@@ -153,19 +171,7 @@ jobs:
           allowUpdates: true
           prerelease: false
           generate_release_notes: false
-          body: |
-            DeepSeek 平板 **v${{ steps.ver.outputs.value }}**
-
-            | 项 | 值 |
-            |---|---|
-            | 版本 | v${{ steps.ver.outputs.value }} |
-            | 构建号 | ${{ github.run_number }} |
-            | 提交 | `${{ github.sha }}` |
-
-            - `app-debug.apk`：完整安装包，直接覆盖安装（需要允许「未知来源」）
-            - `web-v${{ steps.ver.outputs.value }}.zip`：网页更新包，已装应用可在「设置 → 通用 → 检查更新」里直接拉取，不必重装
-
-            安装：下载 `app-debug.apk` 直接覆盖安装（需要允许「未知来源」）。
+          body_path: release-body.md
           files: |
             android/app/build/outputs/apk/debug/app-debug.apk
             web-v${{ steps.ver.outputs.value }}.zip

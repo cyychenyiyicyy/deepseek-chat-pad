@@ -22,3 +22,6 @@ tmp/
 *.log
 .DS_Store
 Thumbs.db
+
+# CI 生成的发布正文
+release-body.md

@@ -98,6 +98,41 @@ export const compareVersion = (a: string, b: string): number => {
   return 0
 }
 
+/* ---------------- 未完成更新记录 ----------------
+ * 「下载中途退出」后重进应用，内存里的状态已经没了。把目标版本落盘，
+ * 下次启动才能判断：到底是装上了，还是上次根本没装完。 */
+
+const PENDING_KEY = 'chat-demo:update-pending'
+
+export type PendingUpdate = { version: string; at: number }
+
+export const markUpdatePending = (version: string) => {
+  try {
+    localStorage.setItem(PENDING_KEY, JSON.stringify({ version, at: Date.now() } satisfies PendingUpdate))
+  } catch {
+    // 存储不可用时只是失去「中断检测」，不影响更新本身
+  }
+}
+
+export const readUpdatePending = (): PendingUpdate | null => {
+  try {
+    const raw = localStorage.getItem(PENDING_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<PendingUpdate>
+    return typeof parsed.version === 'string' ? { version: parsed.version, at: parsed.at ?? 0 } : null
+  } catch {
+    return null
+  }
+}
+
+export const clearUpdatePending = () => {
+  try {
+    localStorage.removeItem(PENDING_KEY)
+  } catch {
+    // 忽略
+  }
+}
+
 /**
  * 用 XHR 读 SSE 进度：老 WebView 也能用（fetch 流式要 Chrome 105+）。
  * 服务端每条事件都是一行 `data: {...}`。
@@ -150,7 +185,7 @@ const runStream = (endpoint: string, url: string, onProgress: (progress: UpdateP
     xhr.send()
   })
 
-/** 下载并切换网页包；成功后调用方刷新页面即可生效 */
+/** 下载并切换网页包；完成后必须再核对一次 state 才算成功 */
 export const applyWebUpdate = (url: string, onProgress: (progress: UpdateProgress) => void) =>
   runStream('apply-web', url, onProgress)
 

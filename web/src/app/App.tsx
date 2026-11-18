@@ -17,7 +17,16 @@ import { MobileHeader } from '../components/session/MobileHeader.js'
 import { Welcome } from '../components/session/Welcome.js'
 import { ensureApiKey } from '../components/settings/settingsDialogState.js'
 import { hasAnyCredential } from '../services/models/ready.js'
-import { compareVersion, fetchLatestRelease, isUpdateSupported, readUpdateState } from '../services/update.js'
+import {
+  clearUpdatePending,
+  compareVersion,
+  fetchLatestRelease,
+  isUpdateSupported,
+  readUpdatePending,
+  readUpdateState,
+} from '../services/update.js'
+import { openUpdateDialog } from '../components/settings/updateDialogState.js'
+import { UpdateDialog } from '../components/settings/UpdateDialog.js'
 import { SettingsDialog } from '../components/settings/SettingsDialog.js'
 import { Toast } from '../components/base/Toast.js'
 import { showToast } from '../components/base/toastState.js'
@@ -88,25 +97,43 @@ export const App = () => {
   // 移动端选中会话、切换布局后收起抽屉
   useEffect(closeMobileSider, [activeId, isMobile])
 
-  // 每次启动静默检查一次更新：有网页包新版本就提示，用户可在设置里一键更新
+  // 启动时检查一次更新：有新版本就弹窗（带完整更新日志），
+  // 同时核对上次没装完的更新、以及「网页包已换但页面还是旧的」这两种情况
   useEffect(() => {
     let cancelled = false
     void (async () => {
       if (!(await isUpdateSupported())) return
       const [current, latest] = await Promise.all([readUpdateState(), fetchLatestRelease()])
-      if (cancelled || !current || !latest) return
-      const newer = Math.max(
-        compareVersion(latest.version, current.appVersion),
-        compareVersion(latest.version, current.webVersion ?? current.appVersion)
-      )
-      if (newer > 0) {
-        showToast({ key: 'updateAvailable', params: { version: latest.version } })
+      if (cancelled || !current) return
+
+      let notice: string | null = null
+      const pending = readUpdatePending()
+      if (pending) {
+        clearUpdatePending()
+        // 上次点了更新但没装成功：如实告知，别让它看起来像已完成
+        if (current.webVersion !== pending.version) {
+          notice = t('updateInterrupted', { version: pending.version })
+        }
+      }
+      // 网页包已落盘但当前页面还是旧包 → 需要重新加载
+      if (!notice && current.webVersion && compareVersion(current.webVersion, __APP_VERSION__) > 0) {
+        notice = t('updateNeedsReload', { version: current.webVersion })
+      }
+
+      const newer = latest
+        ? Math.max(
+            compareVersion(latest.version, current.appVersion),
+            compareVersion(latest.version, current.webVersion ?? current.appVersion)
+          )
+        : -1
+      if (newer > 0 || notice) {
+        openUpdateDialog({ release: latest, state: current, notice })
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [t])
 
   useEffect(() => {
     void initChat()
@@ -175,6 +202,7 @@ export const App = () => {
         <SearchPanel />
       </div>
       <SettingsDialog />
+      <UpdateDialog />
       <Toast />
     </>
   )
