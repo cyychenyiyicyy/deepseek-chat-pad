@@ -4,7 +4,7 @@ plugins {
 
 // CI 通过 -PversionCode=<run number> 传入，保证每次构建版本号严格递增（能覆盖安装）
 def ciVersionCode = (findProperty('versionCode') ?: '3').toString().toInteger()
-def ciVersionName = (findProperty('versionName') ?: '1.4.0').toString()
+def ciVersionName = (findProperty('versionName') ?: '1.4.1').toString()
 
 android {
     // AGP 8 起用 namespace 取代 AndroidManifest 里的 package 属性

@@ -8,7 +8,7 @@ import {
   IconThinkOutline14,
 } from '../base/icons.js'
 import { setSearch, setThinking, useSettings } from '../../services/settings.js'
-import { useIsMobile } from '../../app/viewport.js'
+import { useIsMobile, useIsTouchPrimary } from '../../app/viewport.js'
 import { sendMessage, stopReply, useChatStore } from '../../services/chat/store.js'
 import {
   addDraftFiles,
@@ -55,6 +55,8 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const thinking = useSettings((state) => state.thinking)
   const importingHistory = useChatStore((state) => state.importingHistory)
   const isMobile = useIsMobile()
+  // 触摸设备上不自动聚焦：否则一进会话页/一发完消息就弹软键盘
+  const touchPrimary = useIsTouchPrimary()
   const search = useSettings((state) => state.search)
   const activeModel = useModelState((state) => state.active)
   const isDeepseek = activeModel.providerId === 'deepseek'
@@ -159,7 +161,8 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
       return
     }
     stopReadAloud()
-    if (isMobile) {
+    // 触摸设备上发完消息主动收起键盘；桌面才回到输入框
+    if (isMobile || touchPrimary) {
       textareaRef.current?.blur()
     } else {
       textareaRef.current?.focus()
@@ -183,7 +186,7 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
           placeholder={t('chatInputPlaceholderChat')}
           rows={2}
           // 移动端不自动聚焦，避免一打开就弹出键盘
-          autoFocus={!isMobile}
+          autoFocus={!isMobile && !touchPrimary}
           disabled={importingHistory}
           value={text}
           onChange={(event) => setText(event.target.value)}

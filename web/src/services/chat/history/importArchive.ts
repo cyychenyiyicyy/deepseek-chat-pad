@@ -54,7 +54,19 @@ const readJson = async (entry: ArchiveEntry): Promise<unknown> => {
  * 检查 ZIP 格式、首个 manifest 条目及格式版本。
  * 校验失败时保留正在生成的回答和现有暂存数据。
  */
-export const checkArchiveFormat = async (file: File): Promise<void> => {
+export type ImportProgress = {
+  phase: 'check' | 'sessions' | 'files' | 'finish'
+  /** 已解析的会话数 */
+  sessions: number
+  /** 已保存的图片数 */
+  files: number
+}
+
+export const checkArchiveFormat = async (
+  file: File,
+  onProgress?: (progress: ImportProgress) => void
+): Promise<void> => {
+  onProgress?.({ phase: 'check', sessions: 0, files: 0 })
   if (!(await isZipFile(file))) {
     fail('backupUnrecognized')
   }
@@ -78,7 +90,10 @@ export const checkArchiveFormat = async (file: File): Promise<void> => {
  * 会话读完立即暂存，只保留图片路径映射；图片全部读完后逐会话回填 MIME，不改变图片身份。
  * 写入导入暂存存储；调用方负责先清空暂存，成功后替换正式数据，失败时清理暂存。
  */
-export const importArchive = async (file: File): Promise<void> => {
+export const importArchive = async (
+  file: File,
+  onProgress?: (progress: ImportProgress) => void
+): Promise<void> => {
   if (!(await isZipFile(file))) {
     fail('backupUnrecognized')
   }
@@ -99,6 +114,7 @@ export const importArchive = async (file: File): Promise<void> => {
     const type = imageType(new Uint8Array(await data.slice(0, 16).arrayBuffer()))
     await db.saveStagingFiles([{ id, blob: new Blob([data], { type }) }])
     stored.set(id, type)
+    onProgress?.({ phase: 'files', sessions: imported.size, files: stored.size })
   }
 
   try {
@@ -125,6 +141,7 @@ export const importArchive = async (file: File): Promise<void> => {
           images.set(imagePath, id)
         }
         await db.addStagingSession(local.session)
+        onProgress?.({ phase: 'sessions', sessions: imported.size, files: stored.size })
       } else if (path === INDEX_PATH && !index) {
         index = readSessionIndex(await readJson(entry))
       } else if (
@@ -156,4 +173,5 @@ export const importArchive = async (file: File): Promise<void> => {
     fail('backupIncomplete')
   }
   await db.updateStagingFileTypes(stored)
+  onProgress?.({ phase: 'finish', sessions: imported.size, files: stored.size })
 }

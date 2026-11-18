@@ -99,6 +99,10 @@ export const ModelPicker = () => {
         onMouseDown={(event) => event.preventDefault()}
         onPointerDown={(event) => event.preventDefault()}
         onClick={() => {
+          // 先让当前输入框失焦，避免点开选择器时软键盘还挂着
+          if (document.activeElement instanceof HTMLElement) {
+            document.activeElement.blur()
+          }
           setQuery('')
           setOpen(true)
         }}

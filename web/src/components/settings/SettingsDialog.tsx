@@ -30,13 +30,15 @@ import {
   useSettings,
   type ThemePreference,
 } from '../../services/settings.js'
-import { useTranslate, type TranslationKey, type TranslationMessage } from '../../i18n/index.js'
+import { translate, useTranslate, type TranslationKey, type TranslationMessage } from '../../i18n/index.js'
 import { Button } from '../base/Button.js'
 import { Modal } from '../base/Modal.js'
 import { Select } from '../base/Select.js'
 import { showToast } from '../base/toastState.js'
 import { ApiKeyConfirm, ApiKeyField, useApiKeyEditor } from './ApiKeyField.js'
 import { closeSettings, useSettingsDialog, type SettingsSection } from './settingsDialogState.js'
+import type { ImportProgress } from '../../services/chat/history/importArchive.js'
+import { formatFileSize } from '../../utils/format.js'
 import { ModelPanel } from '../models/ModelPanel.js'
 import styles from './Settings.module.css'
 
@@ -352,7 +354,17 @@ const ImportConfirm = ({
         </>
       }
     >
-      <div className={styles.importConfirmText}>{t('historyImportConfirmDescription')}</div>
+      <div className={styles.importConfirmText}>
+        <div>{t('historyImportConfirmDescription')}</div>
+        {historyImport.file ? (
+          <div className={styles.importFileName}>
+            {t('historyImportFileInfo', {
+              name: historyImport.file.name,
+              size: formatFileSize(historyImport.file.size),
+            })}
+          </div>
+        ) : null}
+      </div>
     </Modal>
   )
 }
@@ -451,11 +463,16 @@ const SettingCell = ({
   )
 }
 
-/** 选文件后先提示覆盖；确认后才检查文件并执行导入，任何错误都提示导入失败。 */
+/**
+ * 选文件后先提示覆盖；确认后检查格式并导入。
+ * 导入过程回报进度；失败时展示具体原因（版本不符 / 格式不识别 / 内容不完整），
+ * 不再一律吞成「导入失败」。
+ */
 const useHistoryImport = () => {
   const [file, setFile] = useState<File | null>(null)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<Status>(null)
+  const [progress, setProgress] = useState<ImportProgress | null>(null)
   const importing = useRef(false)
 
   const confirm = async () => {
@@ -463,21 +480,41 @@ const useHistoryImport = () => {
       return
     }
     importing.current = true
+    const picked = file
     setFile(null)
     setBusy(true)
     setStatus(null)
+    setProgress(null)
     try {
-      const count = await importHistory(file)
+      const count = await importHistory(picked, setProgress)
       setStatus({ key: count === 1 ? 'historyImportedOne' : 'historyImported', params: { count } })
-    } catch {
-      setStatus({ key: 'historyImportFailed', error: true })
+    } catch (error) {
+      const reason =
+        error instanceof BackupError
+          ? translate(error.key, error.params)
+          : error instanceof Error
+            ? error.message
+            : String(error)
+      setStatus({ key: 'historyImportFailedReason', error: true, params: { message: reason } })
     } finally {
       importing.current = false
       setBusy(false)
+      setProgress(null)
     }
   }
 
-  return { file, busy, status, select: setFile, cancel: () => setFile(null), confirm }
+  return {
+    file,
+    busy,
+    status,
+    progress,
+    select: (picked: File) => {
+      setStatus(null)
+      setFile(picked)
+    },
+    cancel: () => setFile(null),
+    confirm,
+  }
 }
 
 /** 导入 = 覆盖：用选中文件替换本地全部会话与附件。 */
@@ -494,34 +531,44 @@ const ImportHistory = ({
   return (
     <SettingCell
       label={t('historyImport')}
-      description={t('historyImportDescription')}
-      status={historyImport.status}
+      description={
+        historyImport.busy
+          ? t('historyImportProgress', { count: historyImport.progress?.sessions ?? 0 })
+          : t('historyImportDescription')
+      }
+      status={historyImport.busy ? null : historyImport.status}
       action={
-        <>
-          <Button
-            variant="outlined"
-            size="m"
-            className={clsx(styles.cellButton, styles.uploadButton)}
-            disabled={disabled}
-            onClick={() => inputRef.current?.click()}
-          >
-            <IconUploadOutline14 />
-            {t('upload')}
-          </Button>
-          <input
-            ref={inputRef}
-            type="file"
-            accept=".zip,application/zip,application/x-zip-compressed"
-            hidden
-            onChange={(event) => {
-              const file = event.target.files?.[0]
-              event.target.value = ''
-              if (file) {
-                historyImport.select(file)
-              }
-            }}
-          />
-        </>
+        historyImport.busy ? (
+          <div className={styles.importBusy} aria-hidden>
+            <span className={styles.importSpinner} />
+          </div>
+        ) : (
+          <>
+            <Button
+              variant="outlined"
+              size="m"
+              className={clsx(styles.cellButton, styles.uploadButton)}
+              disabled={disabled}
+              onClick={() => inputRef.current?.click()}
+            >
+              <IconUploadOutline14 />
+              {t('upload')}
+            </Button>
+            <input
+              ref={inputRef}
+              type="file"
+              hidden
+              onChange={(event) => {
+                const picked = event.target.files?.[0]
+                // 先清空值，保证同一文件再次选择也能触发 change
+                event.target.value = ''
+                if (picked) {
+                  historyImport.select(picked)
+                }
+              }}
+            />
+          </>
+        )
       }
     />
   )

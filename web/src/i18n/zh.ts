@@ -112,6 +112,10 @@ export const zh = {
   historyImportConfirmDescription: '上传的历史对话会覆盖当前所有对话记录，是否确认导入？',
   historyImportDescription: '导入历史对话会覆盖全部本地对话和附件，支持 DeepSeek 导出的 ZIP 文件。',
   historyImportedOne: '已导入 1 个对话',
+  historyImportFailedReason: '导入失败：{message}',
+  historyImportProgress: '正在导入…已解析 {count} 个对话',
+  historyImportChecking: '正在检查文件…',
+  historyImportFileInfo: '将导入：{name}（{size}）',
   historyImported: '已导入 {count} 个对话',
   historyImportFailed:
     '文件导入失败，可能是文件格式错误或使用了旧版的对话导出 ZIP 文件，请前往 DeepSeek 重新导出历史对话文件后再次导入。',

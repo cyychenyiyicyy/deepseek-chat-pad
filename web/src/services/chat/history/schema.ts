@@ -230,10 +230,13 @@ const sessionId: Read<string> = (value) => {
 export const checkManifest = (value: unknown): void => {
   const version = record(value).export_format_version
   if (typeof version === 'number' && version > EXPORT_FORMAT_VERSION) {
-    fail('backupNewerVersion')
+    fail('backupNewerVersion', { version, supported: EXPORT_FORMAT_VERSION })
   }
   if (version !== EXPORT_FORMAT_VERSION) {
-    fail('backupInvalidVersion')
+    fail('backupInvalidVersion', {
+      version: typeof version === 'number' ? String(version) : '未知',
+      supported: EXPORT_FORMAT_VERSION,
+    })
   }
 }
 

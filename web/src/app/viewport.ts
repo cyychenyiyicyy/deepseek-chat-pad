@@ -10,6 +10,21 @@ const subscribe = (onChange: () => void) => {
 
 export const useIsMobile = () => useSyncExternalStore(subscribe, () => query.matches)
 
+/**
+ * 主指针是否为触摸（平板 / 手机）。
+ * 这类设备上不应自动聚焦输入框——一聚焦就会弹出软键盘，而用户往往还没准备输入。
+ * 桌面浏览器（鼠标）不受影响，仍保留自动聚焦。
+ */
+const coarseQuery = window.matchMedia('(pointer: coarse)')
+
+const subscribeCoarse = (onChange: () => void) => {
+  coarseQuery.addEventListener('change', onChange)
+  return () => coarseQuery.removeEventListener('change', onChange)
+}
+
+export const useIsTouchPrimary = () =>
+  useSyncExternalStore(subscribeCoarse, () => coarseQuery.matches)
+
 const preventPageScroll = (event: TouchEvent) => {
   if (event.touches.length !== 1) {
     return

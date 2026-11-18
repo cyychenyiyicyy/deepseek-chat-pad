@@ -504,17 +504,39 @@ public final class MainActivity extends AppCompatActivity {
                 && params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE;
         String[] mimeTypes = toMimeTypes(acceptTypes);
 
-        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType(resolveIntentType(mimeTypes));
+        // 优先用 SAF（ACTION_OPEN_DOCUMENT）：返回的 content:// 一定可读，
+        // GET_CONTENT 在部分国产 ROM 上会给出读不了的地址，表现为"选了文件但页面没反应"
+        Intent document = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        document.addCategory(Intent.CATEGORY_OPENABLE);
+        document.setType(resolveIntentType(mimeTypes));
         if (mimeTypes.length > 0) {
-            intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
+            document.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
         }
         if (multiple) {
-            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            document.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         }
+        document.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         try {
-            startActivityForResult(Intent.createChooser(intent, getString(R.string.pick_file)),
+            startActivityForResult(Intent.createChooser(document, getString(R.string.pick_file)),
+                    REQ_FILE_CHOOSER);
+            return true;
+        } catch (ActivityNotFoundException noDocument) {
+            Log.w(TAG, "no document picker, falling back to GET_CONTENT", noDocument);
+        }
+
+        // 没有 SAF 文档选择器的老 ROM，退回 GET_CONTENT
+        Intent legacy = new Intent(Intent.ACTION_GET_CONTENT);
+        legacy.addCategory(Intent.CATEGORY_OPENABLE);
+        legacy.setType(resolveIntentType(mimeTypes));
+        if (mimeTypes.length > 0) {
+            legacy.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
+        }
+        if (multiple) {
+            legacy.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        }
+        legacy.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivityForResult(Intent.createChooser(legacy, getString(R.string.pick_file)),
                     REQ_FILE_CHOOSER);
             return true;
         } catch (ActivityNotFoundException noChooser) {
