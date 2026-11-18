@@ -103,7 +103,8 @@ export const App = () => {
     let cancelled = false
     void (async () => {
       if (!(await isUpdateSupported())) return
-      const [current, latest] = await Promise.all([readUpdateState(), fetchLatestRelease()])
+      const [current, result] = await Promise.all([readUpdateState(), fetchLatestRelease()])
+      const latest = result.release
       if (cancelled || !current) return
 
       let notice: string | null = null
@@ -126,8 +127,9 @@ export const App = () => {
             compareVersion(latest.version, current.webVersion ?? current.appVersion)
           )
         : -1
-      if (newer > 0 || notice) {
-        openUpdateDialog({ release: latest, state: current, notice })
+      // 有新版本、有需要提示的状态、或者检查本身失败（网络问题）时才弹窗
+      if (newer > 0 || notice || result.error) {
+        openUpdateDialog({ release: latest, state: current, notice, error: result.error })
       }
     })()
     return () => {

@@ -133,3 +133,13 @@
     opacity: 0.5;
   }
 }
+
+.noticeError {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.network {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}

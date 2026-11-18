@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import { Modal } from '../base/Modal.js'
 import { Button } from '../base/Button.js'
@@ -11,7 +11,9 @@ import {
   formatSize,
   installApk,
   markUpdatePending,
+  readNetworkInfo,
   readUpdateState,
+  type NetworkInfo,
   type UpdateProgress,
 } from '../../services/update.js'
 import { closeUpdateDialog, useUpdateDialog } from './updateDialogState.js'
@@ -26,11 +28,18 @@ import styles from './UpdateDialog.module.css'
  */
 export const UpdateDialog = () => {
   const t = useTranslate()
-  const { open, release, state, notice } = useUpdateDialog()
+  const { open, release, state, notice, error } = useUpdateDialog()
   const [busy, setBusy] = useState<'' | 'web' | 'apk'>('')
   const [progress, setProgress] = useState<UpdateProgress | null>(null)
   const [message, setMessage] = useState('')
   const [failed, setFailed] = useState(false)
+  const [net, setNet] = useState<NetworkInfo | null>(null)
+
+  // 网络状态：代理是否生效、有没有走 VPN
+  useEffect(() => {
+    if (!open) return
+    void readNetworkInfo().then(setNet)
+  }, [open])
 
   if (!open) {
     return null
@@ -152,11 +161,26 @@ export const UpdateDialog = () => {
     >
       <div className={styles.body}>
         {notice ? <div className={styles.notice}>{notice}</div> : null}
+        {error ? (
+          <div className={clsx(styles.notice, styles.noticeError)}>
+            {t('updateCheckFailed', { message: error })}
+          </div>
+        ) : null}
 
         <div className={styles.versions}>
           <span>{t('updateCurrentVersions', { app: appVersion, web: webVersion })}</span>
           {release ? <span className={styles.latest}>{t('updateLatest', { version: release.version })}</span> : null}
         </div>
+
+        {net ? (
+          <div className={styles.network}>
+            {net.proxy
+              ? t('updateNetProxy', { proxy: net.proxy })
+              : net.vpn
+                ? t('updateNetVpn')
+                : t('updateNetDirect')}
+          </div>
+        ) : null}
 
         {release?.notes ? (
           <div className={styles.section}>

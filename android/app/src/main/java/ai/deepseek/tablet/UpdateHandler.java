@@ -1,5 +1,8 @@
 package ai.deepseek.tablet;
 
+import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -13,10 +16,15 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
+import java.net.ProxySelector;
+import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -57,6 +65,9 @@ final class UpdateHandler {
 
     /** 路由前缀，LocalServer 用它把请求交给本类处理 */
     static final String PATH_PREFIX = "/__ds_update/";
+
+    /** 网络状态：当前系统代理与是否走 VPN，用于排查「开了代理连不上」 */
+    private static final String PATH_NET = "/__ds_update/net";
 
     private static final String PATH_STATE = "/__ds_update/state";
     private static final String PATH_RELEASE = "/__ds_update/release";
@@ -102,7 +113,11 @@ final class UpdateHandler {
     private final AtomicBoolean webInstallRunning = new AtomicBoolean(false);
     private final AtomicBoolean apkDownloadRunning = new AtomicBoolean(false);
 
-    UpdateHandler(OkHttpClient client, WebBundle webBundle, ApkUpdater apkUpdater) {
+    private final Context context;
+
+    UpdateHandler(Context context, OkHttpClient client, WebBundle webBundle, ApkUpdater apkUpdater) {
+        this.context = context.getApplicationContext() != null
+                ? context.getApplicationContext() : context;
         this.client = client;
         this.webBundle = webBundle;
         this.apkUpdater = apkUpdater;
@@ -129,6 +144,15 @@ final class UpdateHandler {
             OutputStream out, boolean keepAlive) throws IOException {
         // 请求体没消费掉就不能复用连接，否则残留字节会被当成下一个请求
         boolean canKeepAlive = keepAlive && !hasRequestBody(headers);
+
+        if (PATH_NET.equals(path)) {
+            if (!isReadOnly(method)) {
+                HttpUtil.sendJson(out, 405, canKeepAlive, errorJson("method_not_allowed"));
+                return !canKeepAlive;
+            }
+            serveNet("HEAD".equals(method), out, canKeepAlive);
+            return !canKeepAlive;
+        }
 
         if (PATH_STATE.equals(path)) {
             if (!isReadOnly(method)) {
@@ -178,6 +202,67 @@ final class UpdateHandler {
     }
 
     // ---------------------------------------------------------------- 1. 状态
+
+    /**
+     * 网络状态。
+     *
+     * OkHttp 默认使用 {@link ProxySelector#getDefault()}，也就是「系统代理」——
+     * 无论代理是 Wi-Fi 高级设置里配的，还是代理类应用写入的系统代理，都会自动生效；
+     * VPN 的 TUN 模式更是整个网络层透明转发。这里把实际生效的结果报给页面，
+     * 方便用户在「检查更新失败」时确认代理到底有没有被用上。
+     */
+    private void serveNet(boolean headOnly, OutputStream out, boolean keepAlive)
+            throws IOException {
+        String proxy = currentProxy();
+        String json = "{\"ok\":true,\"proxy\":" + (proxy == null ? "null" : JSONObject.quote(proxy))
+                + ",\"vpn\":" + isVpnActive() + "}";
+        HttpUtil.sendJson(out, 200, keepAlive, json, headOnly);
+    }
+
+    /** 取当前生效的代理（形如 http://127.0.0.1:7890）；直连返回 null */
+    private String currentProxy() {
+        try {
+            ProxySelector selector = ProxySelector.getDefault();
+            if (selector == null) {
+                return null;
+            }
+            List<Proxy> proxies = selector.select(new URI("https://api.github.com"));
+            for (Proxy proxy : proxies) {
+                if (proxy == null || proxy.type() == Proxy.Type.DIRECT) {
+                    continue;
+                }
+                if (!(proxy.address() instanceof InetSocketAddress)) {
+                    continue;
+                }
+                InetSocketAddress address = (InetSocketAddress) proxy.address();
+                if (address.isUnresolved() && address.getHostString() == null) {
+                    continue;
+                }
+                return proxy.type().name().toLowerCase(Locale.US) + "://"
+                        + address.getHostString() + ":" + address.getPort();
+            }
+        } catch (Exception ignored) {
+            // 取不到就当没有代理
+        }
+        return null;
+    }
+
+    /** 当前活动网络是不是 VPN（代理类应用的 TUN 模式走这个） */
+    private boolean isVpnActive() {
+        try {
+            ConnectivityManager manager =
+                    (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (manager == null) {
+                return false;
+            }
+            NetworkCapabilities capabilities =
+                    manager.getNetworkCapabilities(manager.getActiveNetwork());
+            return capabilities != null
+                    && capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
 
     private void serveState(boolean headOnly, OutputStream out, boolean keepAlive)
             throws IOException {

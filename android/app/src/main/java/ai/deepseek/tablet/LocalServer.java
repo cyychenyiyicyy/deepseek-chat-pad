@@ -65,7 +65,7 @@ public final class LocalServer {
         this.webBundle = new WebBundle(base);
         this.assetHandler = new AssetHandler(base, webBundle);
         this.proxyHandler = new ProxyHandler(httpClient);
-        this.updateHandler = new UpdateHandler(httpClient, webBundle, new ApkUpdater(base));
+        this.updateHandler = new UpdateHandler(context, httpClient, webBundle, new ApkUpdater(base));
         this.workers = Executors.newCachedThreadPool(runnable -> {
             Thread thread = new Thread(runnable, "ds-http-" + threadCounter.incrementAndGet());
             thread.setDaemon(true);

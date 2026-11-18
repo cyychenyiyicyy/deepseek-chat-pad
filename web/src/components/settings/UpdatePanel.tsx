@@ -43,9 +43,14 @@ export const UpdatePanel = () => {
   const check = async () => {
     setChecking(true)
     try {
-      const [current, latest] = await Promise.all([readUpdateState(), fetchLatestRelease()])
+      const [current, result] = await Promise.all([readUpdateState(), fetchLatestRelease()])
       setState(current)
-      openUpdateDialog({ release: latest, state: current, notice: null })
+      openUpdateDialog({
+        release: result.release,
+        state: current,
+        notice: null,
+        error: result.error,
+      })
     } finally {
       setChecking(false)
     }

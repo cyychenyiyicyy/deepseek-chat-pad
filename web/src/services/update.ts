@@ -68,13 +68,42 @@ export const readUpdateState = async (): Promise<UpdateState | null> => {
   }
 }
 
-/** 取最新 release；没有 release 时返回 null */
-export const fetchLatestRelease = async (): Promise<ReleaseInfo | null> => {
+/** 当前网络：系统代理与是否 VPN。用于排查「开了代理却连不上」 */
+export type NetworkInfo = { proxy: string | null; vpn: boolean }
+
+export const readNetworkInfo = async (): Promise<NetworkInfo | null> => {
   try {
-    const info = await readJson<ReleaseInfo & { ok?: boolean; error?: string }>(`${BASE}/release`)
-    return info.ok ? info : null
+    const info = await readJson<NetworkInfo & { ok?: boolean }>(`${BASE}/net`)
+    return info.ok ? { proxy: info.proxy ?? null, vpn: Boolean(info.vpn) } : null
   } catch {
     return null
+  }
+}
+
+/**
+ * 取最新 release。
+ * error 为 null 表示「查询成功但没有可更新的 release」；
+ * 有 error 时说明是网络/仓库原因，界面上要如实显示，而不是装作已经是最新。
+ */
+export const fetchLatestRelease = async (): Promise<{
+  release: ReleaseInfo | null
+  error: string | null
+}> => {
+  try {
+    const res = await fetch(`${BASE}/release`, { cache: 'no-store' })
+    const body = (await res.json().catch(() => null)) as
+      | (ReleaseInfo & { ok?: boolean; error?: string })
+      | null
+    if (body?.ok) {
+      return { release: body, error: null }
+    }
+    // no_release 不是错误，只是仓库还没发过版本
+    if (body?.error === 'no_release') {
+      return { release: null, error: null }
+    }
+    return { release: null, error: body?.error ?? `HTTP ${res.status}` }
+  } catch (error) {
+    return { release: null, error: error instanceof Error ? error.message : String(error) }
   }
 }
 
