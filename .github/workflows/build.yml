@@ -45,6 +45,25 @@ jobs:
         env:
           NODE_ENV: production
 
+      - name: 写入网页包版本标记
+        working-directory: web
+        run: |
+          set -euo pipefail
+          v=$(grep -m1 '^versionName=' ../android/version.properties | cut -d= -f2 | tr -d '\r[:space:]')
+          printf '{"version":"%s","builtAt":"%s"}\n' "$v" "$(date -u +%FT%TZ)" > dist/version.json
+          cat dist/version.json
+
+      # 网页包单独发布：应用内可以直接换掉网页，不必重装 APK
+      - name: 打包网页更新包
+        run: |
+          set -euo pipefail
+          v=$(grep -m1 '^versionName=' android/version.properties | cut -d= -f2 | tr -d '\r[:space:]')
+          cd web/dist
+          zip -qr "$PWD/../../web-v$v.zip" .
+          cd ../..
+          ls -lh "web-v$v.zip"
+          unzip -l "web-v$v.zip" | head -5
+
       - name: 把产物放进 Android assets
         run: |
           set -euo pipefail
@@ -143,5 +162,10 @@ jobs:
             | 构建号 | ${{ github.run_number }} |
             | 提交 | `${{ github.sha }}` |
 
+            - `app-debug.apk`：完整安装包，直接覆盖安装（需要允许「未知来源」）
+            - `web-v${{ steps.ver.outputs.value }}.zip`：网页更新包，已装应用可在「设置 → 通用 → 检查更新」里直接拉取，不必重装
+
             安装：下载 `app-debug.apk` 直接覆盖安装（需要允许「未知来源」）。
-          files: android/app/build/outputs/apk/debug/app-debug.apk
+          files: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            web-v${{ steps.ver.outputs.value }}.zip

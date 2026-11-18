@@ -13,7 +13,7 @@ import { Button } from '../base/Button.js'
 import { openSettings } from '../settings/settingsDialogState.js'
 import styles from './ModelCapsule.module.css'
 
-const PANEL_WIDTH = 300
+const PANEL_WIDTH = 340
 
 type Group = { key: string; name: string; providerId: string; models: ModelEntry[] }
 
@@ -75,13 +75,22 @@ export const ModelCapsule = () => {
       }
     }
     const close = () => setOpen(false)
+    // 拖动滑块时内层也可能触发滚动事件，来自浮窗内部的滚动一律忽略，
+    // 否则手指还在滑条上、浮窗就被关掉了
+    const onScroll = (event: Event) => {
+      const target = event.target as Node | null
+      if (target && panelRef.current?.contains(target)) {
+        return
+      }
+      setOpen(false)
+    }
     document.addEventListener('pointerdown', onPointerDown, true)
     window.addEventListener('resize', close)
-    window.addEventListener('scroll', close, true)
+    window.addEventListener('scroll', onScroll, true)
     return () => {
       document.removeEventListener('pointerdown', onPointerDown, true)
       window.removeEventListener('resize', close)
-      window.removeEventListener('scroll', close, true)
+      window.removeEventListener('scroll', onScroll, true)
     }
   }, [open])
 
@@ -188,8 +197,21 @@ export const ModelCapsule = () => {
                   <span className={styles.effortValue}>{level ? t(level.labelKey) : t('effortOff')}</span>
                 </div>
                 {levels.length > 1 ? (
-                  <div
-                    ref={trackRef}
+                  <div className={styles.trackRow}>
+                    <button
+                      type="button"
+                      className={styles.step}
+                      aria-label={t('effortDecrease')}
+                      disabled={index <= 0}
+                      onClick={() => {
+                        const next = levels[index - 1]
+                        if (next) setThinkingEffort(next.value)
+                      }}
+                    >
+                      −
+                    </button>
+                    <div
+                      ref={trackRef}
                     className={styles.track}
                     role="slider"
                     aria-label={t('thinkingEffort')}
@@ -238,7 +260,20 @@ export const ModelCapsule = () => {
                         style={{ left: `${(itemIndex / (levels.length - 1)) * 100}%` }}
                       />
                     ))}
-                    <div className={styles.knob} style={{ left: `${percent}%` }} />
+                      <div className={styles.knob} style={{ left: `${percent}%` }} />
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.step}
+                      aria-label={t('effortIncrease')}
+                      disabled={index >= levels.length - 1}
+                      onClick={() => {
+                        const next = levels[index + 1]
+                        if (next) setThinkingEffort(next.value)
+                      }}
+                    >
+                      +
+                    </button>
                   </div>
                 ) : (
                   <div className={styles.effortHint}>{t('thinkingEffortUnsupported')}</div>

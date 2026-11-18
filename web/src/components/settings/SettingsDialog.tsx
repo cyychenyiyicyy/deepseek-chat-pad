@@ -40,6 +40,7 @@ import { closeSettings, useSettingsDialog, type SettingsSection } from './settin
 import type { ImportProgress } from '../../services/chat/history/importArchive.js'
 import { formatFileSize } from '../../utils/format.js'
 import { ModelPanel } from '../models/ModelPanel.js'
+import { UpdatePanel } from './UpdatePanel.js'
 import styles from './Settings.module.css'
 
 /**
@@ -107,6 +108,7 @@ const SettingsContent = () => {
               <ScaleSetting />
               <LocaleSetting />
               <LocationSetting />
+              <UpdatePanel />
               <VersionSetting />
             </>
           ) : section === 'models' ? (

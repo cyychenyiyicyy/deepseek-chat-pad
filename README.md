@@ -1,171 +1,92 @@
-# DeepSeek 平板（Tablet）
+# DeepSeek Chat Pad
 
-在 [deepseek-ai/chat-demo](https://github.com/deepseek-ai/chat-demo) 基础上做的**平板向 Android 客户端**：
-WebView 壳 + 改造过的前端。不是简单套壳——前端做了平板布局、侧栏动效、多模型支持。
+面向平板的 DeepSeek 客户端。基于 [deepseek-ai/chat-demo](https://github.com/deepseek-ai/chat-demo) 改造，
+用 Android WebView 外壳承载，前端做了平板布局与多模型支持。
 
-## 做了什么
+> 非官方项目，与 DeepSeek 无隶属关系；请自备 API Key。
 
-### 1. 平板界面
+## 功能
 
-按官方 DeepSeek 平板端的形态重做了布局：
+- **平板布局**：常驻左侧栏（可带动效收起）+ 主对话区，字号与触控目标按平板放大
+- **多模型**：内置 DeepSeek，也可以填任意 OpenAI / Anthropic 兼容端点（MiniMax、OpenCode Go、Kimi、GLM…）
+  - 填 Base URL + API Key 自动识别厂商与协议、自动拉模型列表
+  - 上下文长度、是否支持思考等元信息来自 [models.dev](https://models.dev)，内置离线目录（31 家常用厂商）
+- **思考强度滑条**：模型胶囊里一条可拖动的滑条，档位来自模型声明的 `reasoning_options`
+  - DeepSeek 走 Anthropic 格式的 `output_config.effort`，其它端点走标准 `reasoning_effort`
+- **分体式更新**：网页包和 APK 分开更新，网页包可以直接在应用内拉取，不必重装
+- **DeepSeek 余额**：新对话页显示账户余额
+- 联网搜索、文件上传、URL 阅读沿用 DeepSeek 官方接口
+- 会话导入导出（DeepSeek 导出的 `deepseek_data-*.zip`）
 
-- **常驻左栏**（宽度 `clamp(280px, 27vw, 396px)`），主对话区在右
-- 左栏内是「胶囊搜索框 → 新建对话 → 按时间分组的会话 → 底部模型/设置入口」
-- 顶栏：左侧 ☰ 控制侧栏，右侧「停止朗读 / 新对话」
-- 字号与触控目标整体放大（会话行 46–50px、搜索框 48–50px），手机端保持原有排版
+## 安装
 
-### 2. 侧栏滑动动效（原项目缺失的部分）
+到 [Releases](https://github.com/cyychenyiyicyy/deepseek-chat-pad/releases) 下载最新的 `app-debug.apk`，
+允许「未知来源」后安装。最低 Android 9（API 28）。
 
-原实现是在 `Sider` 与 `CollapsedSider` 之间**直接换组件**，手机端抽屉更是 `if (!open) return null`，
-所以开合是硬切、毫无过渡。现在：
+首次打开在设置里填 DeepSeek API Key 即可开始；想用第三方模型则在「设置 → 模型服务」里添加端点。
 
-- 侧栏**始终挂载**，收起时同时把容器宽度收到 0、把面板 `translateX(-100%)`
-- 两个属性用同一条 `cubic-bezier(.32,.72,0,1)` / 300ms，视觉上是一次干净的滑出
-- 手机抽屉同样是常驻挂载 + `transform` 动画，关闭时延后 `visibility` 保证动画播完
-- 尊重系统「减弱动态效果」（`prefers-reduced-motion`）
-
-### 3. 自定义模型端点
-
-- 填 **Base URL + API Key** 就能用：自动识别厂商（`models.dev` + `openmodels.run` 的离线目录）、
-  自动判断 OpenAI / Anthropic 兼容协议、自动拉 `GET /models` 得到模型列表
-- 模型元信息（上下文窗口、是否支持思考、是否收图片、价格、发布日期）从离线目录补全，
-  冷门厂商可以点「在线补全元信息」按需从 models.dev 取，结果缓存 7 天
-- 输入框里的**模型选择器**：按厂商分组、可搜索、显示上下文长度
-
-已内置 31 家常用厂商 / 2211 个模型的元信息，另有 336 家厂商的端点目录。
-
-### 4. DeepSeek 余额
-
-新对话页问候语下方显示余额胶囊（`GET /user/balance`），点按刷新；余额不足变红提示。
-余额与当前对话模型无关，始终用 DeepSeek 的 Key。
-
-### 5. 打包
-
-GitHub Actions 一键出 APK：类型检查 → 前端构建 → 塞进 assets → Gradle 编译 → 上传 artifact + 发 preview release。
-
-## 目录
+## 架构
 
 ```
-web/                前端（React 18 + rspack，源自 chat-demo）
-  src/services/models/   模型目录、端点解析、OpenAI 协议适配
-  src/components/models/ 模型选择器、模型服务设置、余额胶囊
+web/               前端（React 18 + rspack，源自 chat-demo）
+  src/services/models/   模型目录、端点解析、思考档位、协议适配
+  src/components/models/ 模型胶囊（浮窗 + 滑条）、模型服务设置
   public/catalog/        离线模型目录（生成物，已提交）
-android/            WebView 壳（纯 Java，AGP 8.4 / Gradle 8.7）
-  LocalServer     127.0.0.1 上的本地 HTTP 服务：静态资源 + API 透传代理
-tools/             build-catalog.mjs 生成离线目录
-.github/workflows/ build.yml
+android/           WebView 壳（纯 Java，AGP 8.4 / Gradle 8.7）
+  LocalServer     127.0.0.1 上的本地 HTTP 服务：静态资源 + API 透传 + 更新接口
+  UpdateHandler   分体更新的下载 / 解压 / 切换
+tools/            build-catalog.mjs 生成离线目录
+.github/workflows/ build.yml：类型检查 → 打包 → 编译 APK → 发布 release
 ```
 
-## 架构要点
+### 为什么要有本地 HTTP 服务
 
-**为什么要有本地 HTTP 服务？**
-几十家模型的端点不可能都对 WebView 的源放行 CORS，而且部分端点不允许浏览器直连。
-壳在 `127.0.0.1` 起一个服务，页面加载自它、API 也经它转发：
+几十家模型的端点不可能都对 WebView 的源放行 CORS，部分端点也不允许浏览器直连。
+壳在 `127.0.0.1` 上起一个服务（固定端口 18888），页面加载自它、API 也经它转发：
 
 ```
-WebView ──GET /static/*──▶ LocalServer ──▶ assets/www/*
+WebView ──GET /static/*──▶ LocalServer ──▶ assets/www 或 filesDir/web
         ──POST /__ds_proxy──▶ ProxyHandler ──OkHttp──▶ 任意 https 端点（流式 chunked 回写）
+        ──/__ds_update/*──▶ UpdateHandler ──▶ 网页包 / APK 更新
 ```
 
-同源之后，`fetch` 不再受 CORS 与混合内容限制，SSE 由原生侧边收边转。
+同源之后 `fetch` 不再受 CORS 与混合内容限制，SSE 由原生侧边收边转。
 
-**协议适配**：DeepSeek 走 Anthropic 兼容的 `/anthropic/v1/messages`（保留原生思考块、
-联网搜索、文件引用、服务端标题）；自定义端点走 OpenAI 兼容的 `/chat/completions`，
-`reasoning_content` / `content` 增量被翻译成同一套内部事件，渲染、续写、导出、历史回放都不用改。
+### 分体式更新
 
-## v1.1 变更（第一轮反馈）
+Release 里会同时挂两个产物：
 
-- **跨域**：不再依赖 User-Agent 判断，改为探测同源 `/__ds_health`，杜绝「请求发不出去」
-- **深色**：顶栏加浅/深切换按钮；系统栏图标随主题切换（JS→原生桥）；首屏预置底色防闪
-- **模型服务并入设置页**：设置 → 模型服务，独立滚动由设置页负责（修掉「滑不动」）
-- **产品名**：侧栏标题改为「DeepSeek 平板」
-- **移除自动朗读**：回答下方朗读按钮、音色设置、顶栏停止朗读
-- **后台内存**：渲染进程不可见时降优先级 + 前后台 `pauseTimers`；离线目录按需加载
-- **工具支持自定义模型**：联网搜索与读链接改由 DeepSeek 的 `/v1/tools/search`、`/v1/tools/fetch`
-  取回资料再注入上下文，界面照常显示来源卡片
-- **多 provider 同名模型**：元信息按 provider 优先匹配，选择器按 provider 分组并标注来源
+| 产物 | 用途 |
+|---|---|
+| `app-debug.apk` | 完整安装包 |
+| `web-v1.5.0.zip` | 网页包，应用内下载后直接切换，不重装 |
 
-## v1.2 变更（第二轮反馈）
+壳会把网页包解压到应用私有目录，`AssetHandler` 优先从那里取资源；切换完刷新页面即可生效。
+APK 更新则下载后拉起系统安装器。
 
-- **修掉「发不出消息」**：上游用了 `toReversed`（Chrome 110）与 `throwIfAborted`（Chrome 100），
-  老 WebView 缺这两个方法就在发送前抛错。新增 `web/src/polyfills.ts` 兜底，并让错误显示真实原因而不是一律「上传失败」
-- **模型选择器**改为居中弹层，点击不再把焦点交给输入框（之前会弹软键盘）
-- **状态栏避让**：WebView 顶部按状态栏高度留白（Android 上 `env(safe-area-inset-*)` 恒为 0）
-- **应用图标**换成鲸鱼 logo
-
-## v1.3 变更（第三轮反馈）
-
-- **固定签名**：仓库内置自签密钥，debug/release 共用，CI 校验签名指纹；
-  versionCode 取 run number，保证每次构建都能覆盖安装、保留本地数据
-- **图标**改为等比缩放，不再拉伸
-- **OpenCode Go**：请求带稳定的 `x-opencode-session`
-- **收起侧栏**后不再有悬浮胶囊与标题重叠，统一用顶栏 ☰
-- **侧栏名**改为 DeepSeek
-- **界面缩放**：设置 → 通用 → 界面缩放（80%–130%）
-
-> 注意：v1.3.0 之前的包签名各不相同，装这一版仍需卸载一次；之后所有更新都能直接覆盖。
-
-## v1.4 变更（第四轮反馈）
-
-- **移除全部悬浮提示**：`Tooltip` 改为空实现 + 删除原生 `title` 属性，触屏上不再冒出说明文字
-- **联网搜索改为模型自行决定**：第三方模型下把 `deepseek_web_search` 声明为 function tool，
-  模型判断需要最新信息时才调用，客户端再调 DeepSeek 的 `/v1/tools/search` 取结果续答；
-  不支持工具调用的端点会自动退化为「不搜索」
-
-## v1.4.1 变更
-
-- **不再自动弹软键盘**：触摸设备（`pointer: coarse`）一律不自动聚焦输入框，发送后主动收起；
-  模型选择器打开时先让输入框失焦
-- **历史导入修复**：原生选择器改用 SAF（`ACTION_OPEN_DOCUMENT`），去掉 `accept` 的 MIME 过滤
-- **导入可观测**：显示进度、确认弹窗显示文件名与大小、失败时给出具体原因（含实际导出格式版本号）
-
-## v1.4.2 变更
-
-- **版本号规范**：`android/version.properties` 是唯一来源，release 用 `v1.4.2` 这样的正式版本号，
-  设置页显示当前版本；旧 `build-N` 发布已清理
-- **修复后台自启**：WebView 渲染进程在后台被回收时，原本会 `startActivity` 重启自己
-  （应用就自己跳回前台）。现在后台只记录待重建，回到前台才重建
-
-## v1.4.3 变更
-
-- **修复大文件导入卡住**：ZIP 中央目录是逐条目随机读，`content://` 上每次 slice 都跨进程，
-  60MB 的包会在解析出第一段会话前卡住。现在先整包顺序读入内存再解析
-- **导入进度按阶段显示**：读取文件 / 检查格式 / 解析对话 / 处理附件
-- 超过 256MB 给出明确提示
-
-## v1.5.0 变更
-
-- **思考强度滑条**：模型胶囊点开是小浮窗（模型名 + 可拖动滑条），档位取自 models.dev
-- DeepSeek 用 `output_config.effort`，自定义端点用 `reasoning_effort`；不认 `output_config` 时自动降级
-- 档位与「深度思考」开关双向同步
-
-## 已知限制
-
-- **联网搜索、文件上传、读链接仍是 DeepSeek 独有能力**。选中自定义模型时这两个开关会置灰，
-  附件也会被拦下并提示切回 DeepSeek 模型。这些能力由 DeepSeek 服务端执行（`/v1/tools/*`），
-  与对话模型解耦，后续可以接到任意模型上。
-- 自定义模型下历史里的图片附件不会回传（第三方端点无法引用 DeepSeek 的 `file_id`）。
-- 首版未做手势滑动开合侧栏，只有点按 + 动画。
-
-## 构建
-
-CI 已经全自动。本地想跑前端：
+## 本地开发
 
 ```bash
 cd web
 pnpm install
-pnpm run type                  # 类型检查
-npx rspack build -c rspack.config.ts   # 需要 NODE_ENV=production
+pnpm run type                          # 类型检查
+NODE_ENV=production npx rspack build -c rspack.config.ts
 ```
 
-本地打 APK 需要 JDK 17 + Android SDK 34（`gradle assembleDebug`），CI 里由
-`gradle/actions/setup-gradle` 提供，仓库不放 wrapper jar。
+重新生成离线模型目录（需要联网）：
 
-## 安装
+```bash
+node tools/build-catalog.mjs
+```
 
-从 Actions 的 artifact 或 Release 里下载 `app-debug.apk`，允许「未知来源」后安装。
-最低 Android 9（API 28）。
+## 已知限制
+
+- 联网搜索 / 文件上传 / URL 阅读由 DeepSeek 的服务端能力提供，自定义模型下走客户端代取；
+  附件目前仍只在 DeepSeek 模型下可用
+- 思考强度依赖模型声明，未声明的模型不显示滑条
+- 侧栏只有点按开合，没有手势滑动
 
 ## 许可
 
-前端沿用上游 MIT。本仓库的修改同样以 MIT 发布。
+前端沿用上游 [chat-demo](https://github.com/deepseek-ai/chat-demo) 的 MIT 许可；
+本仓库的改动同样以 MIT 发布。

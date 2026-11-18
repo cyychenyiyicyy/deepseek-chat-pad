@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-17T12:32:03.759Z",
+  "generatedAt": "2026-11-18T12:36:06.025Z",
   "root": "C:\\Users\\Administrator\\Desktop\\harness workspace\\projects\\deepseek-tablet\\android",
   "summary": {
     "pass": 7,
@@ -10,7 +10,7 @@
     {
       "level": "PASS",
       "name": "java.structure",
-      "detail": "5 个 Java 文件括号/字面量全部配平"
+      "detail": "8 个 Java 文件括号/字面量全部配平"
     },
     {
       "level": "PASS",
@@ -30,17 +30,17 @@
     {
       "level": "PASS",
       "name": "gradle.dsl",
-      "detail": "AGP 8.4 / compileSdk 34 / minSdk 28 / Java 17 / buildConfig 均就位"
+      "detail": "AGP 8.4 / compileSdk 34 / minSdk 28 / Java 17 / buildConfig / 版本号外部注入 均就位"
     },
     {
       "level": "PASS",
       "name": "manifest.security",
-      "detail": "仅 INTERNET/ACCESS_NETWORK_STATE，明文只放行回环"
+      "detail": "仅 INTERNET/ACCESS_NETWORK_STATE/REQUEST_INSTALL_PACKAGES，明文只放行回环，FileProvider 范围精确"
     },
     {
       "level": "PASS",
       "name": "features",
-      "detail": "26 项需求断言全部命中"
+      "detail": "49 项需求断言全部命中"
     }
   ]
 }

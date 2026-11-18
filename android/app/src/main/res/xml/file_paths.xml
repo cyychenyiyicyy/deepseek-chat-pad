@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    FileProvider 可授权的目录范围。
+
+    只登记分体式更新用得到的那一个子目录，别把整个私有目录暴露出去：
+      getExternalFilesDir(null)/update/  →  下载好的 apk 放这里
+      cacheDir/update/                   →  外部存储不可用时的退路
+    对应代码在 ApkUpdater.updateDir()，改路径时两边要一起改。
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-files-path
+        name="update_external"
+        path="update/" />
+    <cache-path
+        name="update_cache"
+        path="update/" />
+</paths>

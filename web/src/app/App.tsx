@@ -17,6 +17,7 @@ import { MobileHeader } from '../components/session/MobileHeader.js'
 import { Welcome } from '../components/session/Welcome.js'
 import { ensureApiKey } from '../components/settings/settingsDialogState.js'
 import { hasAnyCredential } from '../services/models/ready.js'
+import { compareVersion, fetchLatestRelease, isUpdateSupported, readUpdateState } from '../services/update.js'
 import { SettingsDialog } from '../components/settings/SettingsDialog.js'
 import { Toast } from '../components/base/Toast.js'
 import { showToast } from '../components/base/toastState.js'
@@ -86,6 +87,26 @@ export const App = () => {
   useEffect(stopReadAloud, [activeId])
   // 移动端选中会话、切换布局后收起抽屉
   useEffect(closeMobileSider, [activeId, isMobile])
+
+  // 每次启动静默检查一次更新：有网页包新版本就提示，用户可在设置里一键更新
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      if (!(await isUpdateSupported())) return
+      const [current, latest] = await Promise.all([readUpdateState(), fetchLatestRelease()])
+      if (cancelled || !current || !latest) return
+      const newer = Math.max(
+        compareVersion(latest.version, current.appVersion),
+        compareVersion(latest.version, current.webVersion ?? current.appVersion)
+      )
+      if (newer > 0) {
+        showToast({ key: 'updateAvailable', params: { version: latest.version } })
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     void initChat()

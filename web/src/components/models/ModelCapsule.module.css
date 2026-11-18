@@ -139,9 +139,10 @@
 
 .track {
   position: relative;
+  flex: 1;
   box-sizing: border-box;
-  height: 20px;
-  margin: 12px 6px 8px;
+  height: 32px;
+  margin: 0;
   border-radius: 999px;
   background-color: var(--dsw-alias-border-l1);
   cursor: pointer;
@@ -184,9 +185,9 @@
 .knob {
   position: absolute;
   top: 50%;
-  width: 28px;
-  height: 28px;
-  margin: -14px 0 0 -14px;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
   border-radius: 50%;
   background-color: #fff;
   box-shadow:
@@ -314,4 +315,37 @@
 .footer {
   display: flex;
   justify-content: flex-end;
+}
+
+
+/* ---------- 思考强度：加大滑条与点击区域 ---------- */
+.trackRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 2px;
+}
+
+.step {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 17px;
+  line-height: 1;
+  cursor: pointer;
+
+  &:disabled {
+    opacity: 0.35;
+  }
+
+  &:hover:not(:disabled) {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
 }

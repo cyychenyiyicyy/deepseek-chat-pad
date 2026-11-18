@@ -493,3 +493,40 @@
   color: var(--dsw-alias-label-tertiary);
   word-break: break-all;
 }
+
+
+/* ---------- 检查更新 ---------- */
+.updateVersions {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.updateActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.updateBusy {
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.updateProgress {
+  width: 100%;
+  max-width: 320px;
+  height: 4px;
+  margin-top: 8px;
+  border-radius: 999px;
+  background-color: var(--dsw-alias-border-l1);
+  overflow: hidden;
+}
+
+.updateProgressFill {
+  height: 100%;
+  border-radius: 999px;
+  background-color: var(--dsw-alias-button-primary-fill);
+  transition: width 0.2s ease;
+}

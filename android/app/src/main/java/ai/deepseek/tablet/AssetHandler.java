@@ -5,6 +5,9 @@ import android.content.res.AssetFileDescriptor;
 import android.content.res.AssetManager;
 import android.util.Log;
 
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -16,15 +19,16 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * 把 APK 里的 assets/www/ 当静态站点提供。
+ * 静态站点服务：优先用下载的网页包（{@code filesDir/web}），没有就回退 APK 内置的 assets/www/。
  *
  * <ul>
- *   <li>/ → www/index.html</li>
- *   <li>/foo/ → www/foo/index.html</li>
+ *   <li>/ → index.html</li>
+ *   <li>/foo/ → foo/index.html</li>
  *   <li>静态资源带 hash（static/ 下）给一年 immutable 缓存，html 给 no-cache</li>
  * </ul>
  *
- * 所有路径先做规范化与越权校验，拒绝 ".." 与反斜杠，读不到就 404。
+ * 两套来源共用同一套路径规范化与越权校验（{@link #normalizePath}），
+ * 文件来源额外做一次真实路径包含判断，读不到就 404。
  */
 final class AssetHandler {
 
@@ -34,10 +38,12 @@ final class AssetHandler {
     private static final int BUFFER_BYTES = 16 * 1024;
 
     private final AssetManager assets;
+    private final WebBundle webBundle;
 
-    AssetHandler(Context context) {
+    AssetHandler(Context context, WebBundle webBundle) {
         Context application = context.getApplicationContext();
         this.assets = (application != null ? application : context).getAssets();
+        this.webBundle = webBundle;
     }
 
     /**
@@ -51,7 +57,66 @@ final class AssetHandler {
             return notFound(out, keepAlive);
         }
 
-        String assetPath = toAssetPath(path);
+        String relativePath = toAssetPath(path);
+
+        // 下载过网页包就优先用它：apply-web 换完目录后刷新页面即生效
+        File installedRoot = webBundle.installedRoot();
+        if (installedRoot != null) {
+            return serveFromFiles(installedRoot, relativePath, headOnly, out, keepAlive);
+        }
+        return serveFromAssets(relativePath, headOnly, out, keepAlive);
+    }
+
+    /** 从下载的网页包里读；路径已由 normalizePath 校验过。 */
+    private boolean serveFromFiles(File root, String relativePath, boolean headOnly,
+            OutputStream out, boolean keepAlive) throws IOException {
+        File file = resolveInside(root, relativePath);
+        if (file == null || !file.isFile()) {
+            String fallback = spaFallback(relativePath);
+            file = fallback == null ? null : resolveInside(root, fallback);
+            if (file == null || !file.isFile()) {
+                Log.d(TAG, "404 (web bundle) /" + relativePath);
+                return notFound(out, keepAlive);
+            }
+            relativePath = fallback;
+        }
+        InputStream stream = new BufferedInputStream(new FileInputStream(file), BUFFER_BYTES);
+        try {
+            writeResource(relativePath, stream, file.length(), headOnly, out, keepAlive);
+        } finally {
+            HttpUtil.closeQuietly(stream);
+        }
+        return !keepAlive;
+    }
+
+    /**
+     * 把包内相对路径落成真实文件，并确认没跑出根目录。
+     *
+     * <p>normalizePath 已经挡掉 ".." 与反斜杠，这里再做一次真实路径包含判断，
+     * 防止符号链接之类的绕过。
+     */
+    private static File resolveInside(File root, String relativePath) {
+        if (relativePath == null || relativePath.isEmpty()) {
+            return null;
+        }
+        try {
+            String rootPath = root.getCanonicalPath();
+            File candidate = new File(root, relativePath);
+            String candidatePath = candidate.getCanonicalPath();
+            if (!candidatePath.equals(rootPath)
+                    && !candidatePath.startsWith(rootPath + File.separator)) {
+                Log.w(TAG, "rejected path outside web bundle: " + relativePath);
+                return null;
+            }
+            return candidate;
+        } catch (IOException brokenPath) {
+            return null;
+        }
+    }
+
+    /** 回退来源：APK 内置的 assets/www/。 */
+    private boolean serveFromAssets(String assetPath, boolean headOnly, OutputStream out,
+            boolean keepAlive) throws IOException {
         InputStream stream = null;
         AssetFileDescriptor descriptor = null;
         long knownLength = -1L;
@@ -93,7 +158,7 @@ final class AssetHandler {
                 }
             }
 
-            writeAsset(assetPath, stream, knownLength, headOnly, out, keepAlive);
+            writeResource(assetPath, stream, knownLength, headOnly, out, keepAlive);
             return !keepAlive;
         } finally {
             HttpUtil.closeQuietly(stream);
@@ -106,8 +171,9 @@ final class AssetHandler {
         return !keepAlive;
     }
 
-    private void writeAsset(String assetPath, InputStream stream, long knownLength, boolean headOnly,
-            OutputStream out, boolean keepAlive) throws IOException {
+    /** 两套来源共用的响应写出：MIME / 缓存策略 / 定长与 chunked 二选一。 */
+    private void writeResource(String assetPath, InputStream stream, long knownLength,
+            boolean headOnly, OutputStream out, boolean keepAlive) throws IOException {
         Map<String, String> headers = new LinkedHashMap<>();
         headers.put("Content-Type", mimeType(assetPath));
         headers.put("Cache-Control", cacheControl(assetPath));
