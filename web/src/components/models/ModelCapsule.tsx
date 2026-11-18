@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { IconCheckOutline16, IconChevronDownOutline14, IconChevronRightOutline14 } from '../base/icons.js'
 import { useTranslate } from '../../i18n/index.js'
@@ -15,17 +15,20 @@ import { Button } from '../base/Button.js'
 import { openSettings } from '../settings/settingsDialogState.js'
 import styles from './ModelCapsule.module.css'
 
-/** Codex 弹层宽度：轨道 248 + 左右各 12 */
-const PANEL_WIDTH = 272
-
 type Group = { key: string; name: string; providerId: string; models: ModelEntry[] }
+
+/** 磁吸范围：档距的 18%，靠近档位时旋钮会被「吸」过去一点，松手才完全吸附 */
+const MAGNET_RATIO = 0.18
+
+/** 弹层高度（Codex 实测 104），用于打开时定位 */
+const PANEL_HEIGHT = 104
 
 /**
  * 输入框里的模型胶囊：显示「模型名 · 思考强度」。
  *
- * 点开是 Codex 桌面版那张弹层 —— 上面是当前档位（带色的标题）与模型名，点它换模型；
- * 下面是按 Codex 尺寸复刻的滑条：轨道 26px / 圆角 16 / 旋钮 30px，
- * 拖动时旋钮连续跟手（不吸附），松手才吸附到最近档位。
+ * 点开是 Codex 桌面版那张弹层（几何与配色按录屏实测复刻）：
+ * 上面是档位标题与模型名，点它换模型；下面是可以拖动/点按的滑条。
+ * 弹层用「相对胶囊的绝对定位」，不做视口坐标换算 —— 这样界面缩放、软键盘都不会把它放歪。
  */
 export const ModelCapsule = () => {
   const t = useTranslate()
@@ -33,12 +36,16 @@ export const ModelCapsule = () => {
   const [catalog, setCatalog] = useState<ProviderMeta[]>([])
   const [open, setOpen] = useState(false)
   const [listOpen, setListOpen] = useState(false)
-  const [position, setPosition] = useState<{ left: number; bottom: number } | null>(null)
   const [listQuery, setListQuery] = useState('')
-  /** 拖动中的连续位置（0–1）；null 表示没在拖 */
-  const [dragPos, setDragPos] = useState<number | null>(null)
+  /** 只在拖动开始/结束时变化，拖动过程中直接改 DOM，避免每移动一像素就重渲染 */
+  const [dragging, setDragging] = useState(false)
+  /** 弹层相对宿主的位置（两个 rect 相减得到，不依赖视口尺寸） */
+  const [panelPos, setPanelPos] = useState<{ top: number; left: number } | null>(null)
+  const hostRef = useRef<HTMLDivElement>(null)
 
-  const triggerRef = useRef<HTMLButtonElement>(null)
+  /** 拖动过程中当前的位置，不放进 state，避免每移动一像素就整棵树重渲染 */
+  const posRef = useRef(0)
+  const anchorRef = useRef<HTMLSpanElement>(null)
   const panelRef = useRef<HTMLDivElement>(null)
   const railRef = useRef<HTMLDivElement>(null)
 
@@ -54,97 +61,130 @@ export const ModelCapsule = () => {
   const index = levels.length > 0 ? resolveEffortIndex(levels, effort) : -1
   const level = index >= 0 ? levels[index] : null
   const snapped = levels.length > 1 ? index / (levels.length - 1) : 0
-  const pos = dragPos ?? snapped
   const palette = effortPalette(level?.value ?? 'off', theme === 'dark')
 
-  const openPanel = () => {
-    const rect = triggerRef.current?.getBoundingClientRect()
-    if (!rect) {
+  // 打开时量一次：用「胶囊 rect − 宿主 rect」定位，同一坐标系里相减，
+  // 因此界面缩放（html zoom）与软键盘都不会让弹层跑偏
+  useLayoutEffect(() => {
+    if (!open) {
+      setPanelPos(null)
       return
     }
-    setPosition({
-      left: Math.min(Math.max(8, rect.left), window.innerWidth - PANEL_WIDTH - 8),
-      bottom: window.innerHeight - rect.top + 8,
-    })
-    setOpen(true)
-  }
+    const anchor = anchorRef.current
+    const host = hostRef.current
+    if (!anchor || !host) {
+      return
+    }
+    const anchorRect = anchor.getBoundingClientRect()
+    const hostRect = host.getBoundingClientRect()
+    const width = 272
+    const height = host.firstElementChild instanceof HTMLElement
+      ? host.firstElementChild.offsetHeight
+      : PANEL_HEIGHT
+    const left = Math.min(
+      Math.max(8, anchorRect.left - hostRect.left),
+      Math.max(8, hostRect.width - width - 8)
+    )
+    // 永远向上展开：贴住胶囊上沿再留 10px
+    const top = Math.max(8, anchorRect.top - hostRect.top - height - 10)
+    setPanelPos({ top, left })
+  }, [open])
 
-  // 点空白 / 改变窗口大小收起；浮窗内部的滚动不关（拖滑条时会被误触）
+  // 点空白收起
   useEffect(() => {
     if (!open) {
       return
     }
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null
-      if (target && !panelRef.current?.contains(target) && !triggerRef.current?.contains(target)) {
+      if (target && !panelRef.current?.contains(target) && !anchorRef.current?.contains(target)) {
         setOpen(false)
       }
     }
-    const onResize = () => setOpen(false)
-    const onScroll = (event: Event) => {
-      const target = event.target as Node | null
-      if (target && panelRef.current?.contains(target)) {
-        return
-      }
-      setOpen(false)
-    }
     document.addEventListener('pointerdown', onPointerDown, true)
-    window.addEventListener('resize', onResize)
-    window.addEventListener('scroll', onScroll, true)
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown, true)
-      window.removeEventListener('resize', onResize)
-      window.removeEventListener('scroll', onScroll, true)
-    }
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
   }, [open])
 
-  /** 指针横坐标 → 0–1 位置 */
+  /** 直接把位置写进 CSS 变量：跟手的关键，不经过 React 渲染 */
+  const applyPos = (value: number) => {
+    posRef.current = value
+    railRef.current?.style.setProperty('--pos', String(value))
+  }
+
+  // 每次渲染后把拖动位置写回去：React 会用 style 里的 --pos 覆盖它
+  useLayoutEffect(() => {
+    if (dragging) {
+      railRef.current?.style.setProperty('--pos', String(posRef.current))
+    }
+  })
+
+  /** 指针横坐标 → 0–1，超出轨道时夹在两端 */
   const ratioAt = (clientX: number) => {
-    const rect = railRef.current?.getBoundingClientRect()
-    if (!rect || rect.width <= 0) {
+    const rail = railRef.current
+    if (!rail) {
+      return 0
+    }
+    const rect = rail.getBoundingClientRect()
+    if (rect.width <= 0) {
       return 0
     }
     return Math.min(1, Math.max(0, (clientX - rect.left) / rect.width))
   }
 
-  const moveTo = (next: number) => {
+  /** 磁吸：离档位够近时把指针位置往档位拉，拖动过程中就有吸附感 */
+  const magnetize = (raw: number) => {
     if (levels.length < 2) {
-      return
+      return raw
     }
-    const level = levels[Math.min(levels.length - 1, Math.max(0, next))]
-    if (level && level.value !== effort) {
-      setThinkingEffort(level.value)
+    const count = levels.length - 1
+    const nearest = Math.round(raw * count) / count
+    const distance = Math.abs(raw - nearest)
+    const threshold = MAGNET_RATIO / count
+    if (distance >= threshold) {
+      return raw
     }
+    const pull = 1 - distance / threshold
+    return raw + (nearest - raw) * pull
   }
 
-  /**
-   * 拖动：手势由 document 持有（不做指针捕获），
-   * 这样即使指针移出弹层再移回来也不会中断 —— Codex 就是这么处理的。
-   */
   const startDrag = (event: React.PointerEvent) => {
     if (levels.length < 2) {
       return
     }
     event.preventDefault()
-    setDragPos(ratioAt(event.clientX))
+    setDragging(true)
+    applyPos(magnetize(ratioAt(event.clientX)))
 
+    // 手势挂在 document 上：拖出弹层再拖回来也不会断
     const onMove = (moveEvent: PointerEvent) => {
-      setDragPos(ratioAt(moveEvent.clientX))
+      applyPos(magnetize(ratioAt(moveEvent.clientX)))
     }
     const finish = (upEvent: PointerEvent) => {
       document.removeEventListener('pointermove', onMove)
       document.removeEventListener('pointerup', finish)
       document.removeEventListener('pointercancel', finish)
       const ratio = ratioAt(upEvent.clientX)
+      // 松手才真正吸附到最近档位
       const next = levels[Math.round(ratio * (levels.length - 1))]
       if (next) {
         setThinkingEffort(next.value)
       }
-      setDragPos(null)
+      setDragging(false)
+      applyPos(ratio)
     }
     document.addEventListener('pointermove', onMove)
     document.addEventListener('pointerup', finish)
     document.addEventListener('pointercancel', finish)
+  }
+
+  const moveTo = (next: number) => {
+    if (levels.length < 2) {
+      return
+    }
+    const target = levels[Math.min(levels.length - 1, Math.max(0, next))]
+    if (target && target.value !== effort) {
+      setThinkingEffort(target.value)
+    }
   }
 
   const groups: Group[] = useMemo(() => {
@@ -183,121 +223,124 @@ export const ModelCapsule = () => {
     .filter((group) => group.models.length > 0)
 
   const railStyle = {
-    '--pos': pos,
+    // 拖动中由 applyPos 直接改这个变量；静止时用当前档位
+    '--pos': snapped,
     '--fill': palette.fill,
-    '--ink': palette.ink,
     '--track': palette.track,
   } as CSSProperties
 
+  const passedIndex = Math.round(snapped * Math.max(0, levels.length - 1))
+
   return (
     <>
-      <button
-        ref={triggerRef}
-        type="button"
-        className={styles.trigger}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        onMouseDown={(event) => event.preventDefault()}
-        onPointerDown={(event) => event.preventDefault()}
-        onClick={() => (open ? setOpen(false) : openPanel())}
-      >
-        <span className={styles.triggerName}>{current.model.name}</span>
-        {level ? (
-          <span className={styles.triggerEffort} style={{ color: palette.ink }}>
-            {t(level.labelKey)}
+      <span ref={anchorRef} className={styles.anchor}>
+        <button
+          type="button"
+          className={clsx(styles.trigger, open && styles.triggerOpen)}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          onMouseDown={(event) => event.preventDefault()}
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <span className={styles.triggerName}>{current.model.name}</span>
+          {level ? (
+            <span className={styles.triggerEffort} style={{ color: palette.ink }}>
+              {t(level.labelKey)}
+            </span>
+          ) : null}
+          <span className={styles.triggerArrow}>
+            <IconChevronDownOutline14 />
           </span>
-        ) : null}
-        <span className={styles.triggerArrow}>
-          <IconChevronDownOutline14 />
-        </span>
-      </button>
+        </button>
 
-      {open && position
+      </span>
+
+      {open
         ? createPortal(
-            <div
-              ref={panelRef}
-              className={styles.panel}
-              style={{ left: position.left, bottom: position.bottom, width: PANEL_WIDTH }}
-              role="dialog"
-              aria-label={t('thinkingEffort')}
+            <div ref={hostRef} className={styles.host}>
+              <div
+                ref={panelRef}
+                className={styles.panel}
+                role="dialog"
+                aria-label={t('thinkingEffort')}
+                style={panelPos ? { top: panelPos.top, left: panelPos.left } : { visibility: 'hidden' }}
+              >
+            <button
+              type="button"
+              className={styles.modelLink}
+              onClick={() => {
+                setOpen(false)
+                setListQuery('')
+                setListOpen(true)
+              }}
             >
-              <button
-                type="button"
-                className={styles.modelLink}
-                onClick={() => {
-                  setOpen(false)
-                  setListQuery('')
-                  setListOpen(true)
+              <span className={styles.heading} style={{ color: palette.ink }}>
+                {level ? t(level.labelKey) : t('effortOff')}
+                <IconChevronRightOutline14 />
+              </span>
+              <span className={styles.modelName}>{current.model.name}</span>
+            </button>
+
+            {levels.length > 1 ? (
+              <div
+                ref={railRef}
+                className={clsx(
+                  styles.rail,
+                  dragging && styles.railDragging,
+                  palette.peak && styles.railPeak
+                )}
+                style={railStyle}
+                role="slider"
+                tabIndex={0}
+                aria-label={t('thinkingEffort')}
+                aria-valuemin={0}
+                aria-valuemax={levels.length - 1}
+                aria-valuenow={index}
+                aria-valuetext={level ? t(level.labelKey) : ''}
+                onPointerDown={startDrag}
+                onKeyDown={(event) => {
+                  const delta =
+                    event.key === 'ArrowRight' || event.key === 'ArrowUp'
+                      ? 1
+                      : event.key === 'ArrowLeft' || event.key === 'ArrowDown'
+                        ? -1
+                        : 0
+                  if (delta !== 0) {
+                    event.preventDefault()
+                    moveTo(index + delta)
+                    return
+                  }
+                  if (event.key === 'Home') {
+                    event.preventDefault()
+                    moveTo(0)
+                  } else if (event.key === 'End') {
+                    event.preventDefault()
+                    moveTo(levels.length - 1)
+                  }
                 }}
               >
-                <span className={styles.heading} style={{ color: palette.ink }}>
-                  {level ? t(level.labelKey) : t('effortOff')}
-                  <IconChevronRightOutline14 />
-                </span>
-                <span className={styles.modelName}>{current.model.name}</span>
-              </button>
-
-              {levels.length > 1 ? (
                 <div
-                  ref={railRef}
-                  className={clsx(
-                    styles.rail,
-                    dragPos !== null && styles.railDragging,
-                    palette.peak && styles.railPeak
-                  )}
-                  style={railStyle}
-                  role="slider"
-                  tabIndex={0}
-                  aria-label={t('thinkingEffort')}
-                  aria-valuemin={0}
-                  aria-valuemax={levels.length - 1}
-                  aria-valuenow={index}
-                  aria-valuetext={level ? t(level.labelKey) : ''}
-                  onPointerDown={startDrag}
-                  onKeyDown={(event) => {
-                    const delta =
-                      event.key === 'ArrowRight' || event.key === 'ArrowUp'
-                        ? 1
-                        : event.key === 'ArrowLeft' || event.key === 'ArrowDown'
-                          ? -1
-                          : 0
-                    if (delta !== 0) {
-                      event.preventDefault()
-                      moveTo(index + delta)
-                      return
-                    }
-                    if (event.key === 'Home') {
-                      event.preventDefault()
-                      moveTo(0)
-                    } else if (event.key === 'End') {
-                      event.preventDefault()
-                      moveTo(levels.length - 1)
-                    }
-                  }}
-                >
-                  <div
-                    className={styles.fill}
-                    style={
-                      palette.peak
-                        ? { background: PEAK_GRADIENT, backgroundSize: '300% 100%' }
-                        : undefined
-                    }
+                  className={styles.fill}
+                  style={
+                    palette.peak
+                      ? { background: PEAK_GRADIENT, backgroundSize: '300% 100%' }
+                      : undefined
+                  }
+                />
+                {levels.map((item, itemIndex) => (
+                  <span
+                    key={item.value}
+                    className={clsx(styles.dot, itemIndex <= passedIndex && styles.dotPassed)}
+                    style={{ '--tick': itemIndex / (levels.length - 1) } as CSSProperties}
                   />
-                  {levels.map((item, itemIndex) => (
-                    <span
-                      key={item.value}
-                      className={clsx(
-                        styles.dot,
-                        Math.round(pos * (levels.length - 1)) >= itemIndex && styles.dotPassed
-                      )}
-                      style={{ '--tick': itemIndex / (levels.length - 1) } as CSSProperties}
-                    />
-                  ))}
-                  <div className={styles.knob} />
-                </div>
-              ) : (
-                <div className={styles.noEffort}>{t('thinkingEffortUnsupported')}</div>
-              )}
+                ))}
+                <div className={styles.knob} />
+              </div>
+                ) : (
+                  <div className={styles.noEffort}>{t('thinkingEffortUnsupported')}</div>
+                )}
+              </div>
             </div>,
             document.body
           )

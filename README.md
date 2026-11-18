@@ -103,6 +103,12 @@ node tools/build-catalog.mjs
 - 检查更新失败时如实显示原因，不再伪装成「已是最新」
 - 说明：OkHttp 未禁用代理，系统 HTTP 代理与 VPN TUN 都会自动生效
 
+## v1.6.4 变更
+
+- **修掉开 VPN 时显示「没有新版本」**：GitHub API 按 IP 限流，VPN 共享出口容易 403；
+  现在增加 `latest.json` 备用通道（release 资产，走 `/releases/latest/download/latest.json`，不限流）
+- API 失败自动回落，两条都失败才报错
+
 ## 已知限制
 
 - 联网搜索 / 文件上传 / URL 阅读由 DeepSeek 的服务端能力提供，自定义模型下走客户端代取；

@@ -51,11 +51,25 @@
 
 /* ---------- Codex 弹层：272 × 104 ---------- */
 
+.anchor {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+/* 宿主铺满整个文档坐标区，弹层在里面按差值定位，指哪儿算哪儿 */
+.host {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+}
+
 .panel {
-  position: fixed;
-  z-index: 900;
+  position: absolute;
   box-sizing: border-box;
+  width: 272px;
   height: 104px;
+  pointer-events: auto;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 16px;
   background-color: var(--dsw-alias-bg-layer-3);
