@@ -133,6 +133,12 @@ WebView ──GET /static/*──▶ LocalServer ──▶ assets/www/*
 - **导入进度按阶段显示**：读取文件 / 检查格式 / 解析对话 / 处理附件
 - 超过 256MB 给出明确提示
 
+## v1.5.0 变更
+
+- **思考强度滑条**：模型胶囊点开是小浮窗（模型名 + 可拖动滑条），档位取自 models.dev
+- DeepSeek 用 `output_config.effort`，自定义端点用 `reasoning_effort`；不认 `output_config` 时自动降级
+- 档位与「深度思考」开关双向同步
+
 ## 已知限制
 
 - **联网搜索、文件上传、读链接仍是 DeepSeek 独有能力**。选中自定义模型时这两个开关会置灰，
