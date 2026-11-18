@@ -161,6 +161,26 @@ jobs:
           } > release-body.md
           cat release-body.md
 
+      - name: 生成 latest.json
+        run: |
+          set -euo pipefail
+          v=$(grep -m1 '^versionName=' android/version.properties | cut -d= -f2 | tr -d '\r[:space:]')
+          apk=android/app/build/outputs/apk/debug/app-debug.apk
+          web=web-v$v.zip
+          notes=$(jq -Rs . < release-notes.md)
+          cat > latest.json <<EOF
+          {
+            "version": "$v",
+            "tag": "v$v",
+            "apkUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/download/v$v/app-debug.apk",
+            "apkSize": $(stat -c%s "$apk"),
+            "webUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/download/v$v/web-v$v.zip",
+            "webSize": $(stat -c%s "$web"),
+            "notes": $notes
+          }
+          EOF
+          cat latest.json
+
       - name: 发布 release
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
@@ -175,3 +195,4 @@ jobs:
           files: |
             android/app/build/outputs/apk/debug/app-debug.apk
             web-v${{ steps.ver.outputs.value }}.zip
+            latest.json

@@ -90,6 +90,17 @@ final class UpdateHandler {
     private static final String ACCEPT_GITHUB = "application/vnd.github+json";
     private static final String GITHUB_API_VERSION = "2022-11-28";
 
+    /**
+     * 备用通道：release 里随包发布的 latest.json，走 github.com 的稳定别名
+     * （/releases/latest/download/xxx 永远指向最新一版的资产）。
+     *
+     * 为什么需要它：api.github.com 按 IP 限 60 次/小时，开着 VPN 时出口是共享 IP，
+     * 很容易被限流；一旦失败，旧逻辑会把「查不到」当成「没有新版本」。
+     * 这个地址不限流、不需要认证，只是多一次请求。
+     */
+    private static final String RELEASE_FALLBACK =
+            "https://github.com/" + REPO_SLUG + "/releases/latest/download/latest.json";
+
     /** release notes 只截前 500 字，整篇 body 可能有几千字 */
     private static final int NOTES_LIMIT = 500;
 
@@ -277,14 +288,32 @@ final class UpdateHandler {
 
     private void serveRelease(boolean headOnly, OutputStream out, boolean keepAlive)
             throws IOException {
-        Release release;
+        Release release = null;
+        String failure = null;
         try {
             release = fetchRelease();
         } catch (IOException network) {
-            // 让页面能直接把原因显示出来，而不是只看到"失败"
-            Log.w(TAG, "查询 release 失败", network);
+            failure = describe(network);
+            Log.w(TAG, "查询 release 失败，尝试备用通道", network);
+        }
+        if (release == null) {
+            // API 不可用（限流 / 被拦 / 网络问题）时改用 release 里的 latest.json
+            try {
+                release = fetchFallback();
+                if (release != null) {
+                    Log.i(TAG, "已通过 latest.json 取到版本 " + release.version);
+                }
+            } catch (IOException fallbackFailed) {
+                if (failure == null) {
+                    failure = describe(fallbackFailed);
+                }
+                Log.w(TAG, "备用通道也失败", fallbackFailed);
+            }
+        }
+        if (release == null && failure != null) {
+            // 两个通道都失败：如实说原因，不要伪装成「没有新版本」
             HttpUtil.sendJson(out, 502, keepAlive,
-                    errorJson("无法访问 GitHub：" + describe(network)), headOnly);
+                    errorJson("无法访问 GitHub：" + failure), headOnly);
             return;
         }
         if (release == null) {
@@ -344,6 +373,67 @@ final class UpdateHandler {
         } finally {
             activeCalls.remove(call);
         }
+    }
+
+    /** 备用通道：读 release 资产里的 latest.json */
+    private Release fetchFallback() throws IOException {
+        Request request = new Request.Builder()
+                .url(RELEASE_FALLBACK)
+                .header("User-Agent", USER_AGENT)
+                .header("Accept", "application/json")
+                .header("Cache-Control", "no-cache")
+                .get()
+                .build();
+        Call call = client.newCall(request);
+        call.timeout().timeout(API_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        activeCalls.add(call);
+        try {
+            Response response = call.execute();
+            try {
+                if (response.code() == 404) {
+                    return null;
+                }
+                if (!response.isSuccessful()) {
+                    throw new IOException("latest.json 返回 HTTP " + response.code());
+                }
+                ResponseBody body = response.body();
+                if (body == null) {
+                    throw new IOException("latest.json 响应体为空");
+                }
+                try {
+                    return parseLatestJson(new JSONObject(body.string()));
+                } catch (JSONException brokenJson) {
+                    throw new IOException("latest.json 无法解析", brokenJson);
+                }
+            } finally {
+                response.close();
+            }
+        } finally {
+            activeCalls.remove(call);
+        }
+    }
+
+    /** latest.json 的形状由 CI 生成：version / apkUrl / webUrl / notes 都是扁平字段 */
+    private static Release parseLatestJson(JSONObject root) throws JSONException {
+        Release release = new Release();
+        release.version = root.optString("version", "").trim();
+        release.tag = root.optString("tag", release.version.isEmpty() ? "" : "v" + release.version);
+        if (release.version.isEmpty()) {
+            return null;
+        }
+        String apk = root.optString("apkUrl", "").trim();
+        if (!apk.isEmpty()) {
+            release.apkUrl = apk;
+            release.apkSize = root.optLong("apkSize", 0L);
+        }
+        String web = root.optString("webUrl", "").trim();
+        if (!web.isEmpty()) {
+            release.webUrl = web;
+            release.webSize = root.optLong("webSize", 0L);
+        }
+        String notes = root.optString("notes", "");
+        release.notes = notes.length() > NOTES_LIMIT ? notes.substring(0, NOTES_LIMIT) : notes;
+        return release;
     }
 
     /** 从 release JSON 里挑出 apk 与 web-*.zip；两个都缺也算成功（只是没东西可更）。 */
