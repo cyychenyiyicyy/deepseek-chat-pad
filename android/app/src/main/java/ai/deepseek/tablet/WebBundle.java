@@ -99,15 +99,16 @@ final class WebBundle {
         // 典型场景：用户 OTA 过一版网页包，之后覆盖安装了新 APK；
         // 若还从这个旧目录取资源，等于新 APK 里的页面永远不生效
         // （曾经出现过「装了新版 APK 仍然卡在旧页面的 bug」）。
-        String installed = readVersion(new File(webRoot, VERSION_FILE));
+        String installed = null;
+        try {
+            installed = readVersion(new File(webRoot, VERSION_FILE));
+        } catch (IOException unreadable) {
+            // 读不出包版本：按「没有可用网页包」处理，回退内置资源
+            Log.w(TAG, "网页包版本读不出来", unreadable);
+        }
         if (installed != null && compareVersion(installed, BuildConfig.VERSION_NAME) < 0) {
             Log.i(TAG, "丢弃比 APK 旧的网页包：" + installed + " < " + BuildConfig.VERSION_NAME);
-            try {
-                deleteRecursively(webRoot);
-            } catch (IOException ignored) {
-                // 删不掉也不能影响启动：下面照样回退内置资源
-                Log.w(TAG, "旧网页包删除失败", ignored);
-            }
+            deleteRecursively(webRoot);
             clearVersion();
             return null;
         }
