@@ -32,6 +32,13 @@ const MIGRATED_KEY = 'chat-demo:native-migrated'
 const SESSION_BATCH = 20
 /** 附件分批上传，避免一次开几十个请求把本地服务挤满 */
 const FILE_BATCH = 8
+/** 迁移进度：sessions / files 两个阶段带总数，其余阶段只报阶段名 */
+export type MigrationProgress = {
+  phase: 'prepare' | 'sessions' | 'files' | 'verify'
+  done: number
+  total: number
+}
+
 /** 迁移后抽查的会话数 */
 const SAMPLE_SESSIONS = 3
 /**
@@ -312,7 +319,8 @@ const postSessions = async (sessions: Session[]): Promise<void> => {
 /** 分批导入会话；一批一个事务，失败整批回滚（下次启动重跑，按 id upsert 幂等）。 */
 const importAll = async (
   source: MigrationSource,
-  summaries: SessionSummary[]
+  summaries: SessionSummary[],
+  onProgress?: (progress: MigrationProgress) => void
 ): Promise<Imported> => {
   const counts = new Map<string, number>()
   const fileIds = new Set<string>()
@@ -328,6 +336,7 @@ const importAll = async (
         fileIds.add(id)
       }
       counts.set(summary.id, session.messages.length)
+      onProgress?.({ phase: 'sessions', done: counts.size, total: summaries.length })
     }
     await postSessions(sessions)
   }
@@ -337,9 +346,11 @@ const importAll = async (
 /** 搬运附件原件（分批）。本地没有原件的附件跳过：界面只展示文件名。 */
 const uploadOriginals = async (
   source: MigrationSource,
-  ids: Iterable<string>
+  ids: Iterable<string>,
+  onProgress?: (progress: MigrationProgress) => void
 ): Promise<void> => {
   const list = [...ids]
+  let uploaded = 0
   for (let index = 0; index < list.length; index += FILE_BATCH) {
     await Promise.all(
       list.slice(index, index + FILE_BATCH).map(async (id) => {
@@ -347,6 +358,7 @@ const uploadOriginals = async (
         if (blob) {
           await uploadFile({ id, blob })
         }
+        onProgress?.({ phase: 'files', done: ++uploaded, total: list.length })
       })
     )
   }
@@ -358,7 +370,10 @@ const uploadOriginals = async (
  * @returns 成功（含「本来就迁移过」「新用户没有数据」）返回 true；任何一步失败返回 false，
  *          并且**不写标记**，下次启动重试。整个过程不抛异常给界面。
  */
-export const migrate = async (source: MigrationSource): Promise<boolean> => {
+export const migrate = async (
+  source: MigrationSource,
+  onProgress?: (progress: MigrationProgress) => void
+): Promise<boolean> => {
   try {
     if (readMigrated()) {
       return true
@@ -373,6 +388,7 @@ export const migrate = async (source: MigrationSource): Promise<boolean> => {
       writeMigrated()
       return true
     }
+    onProgress?.({ phase: 'prepare', done: 0, total: summaries.length })
     const samples = pickSamples(summaries)
     if (state.migrated) {
       // 原生侧已经搬过（上次 localStorage 没写成功、或标记被清掉）：先校验，通过就别再覆盖一遍
@@ -382,8 +398,10 @@ export const migrate = async (source: MigrationSource): Promise<boolean> => {
         return true
       }
     }
-    const imported = await importAll(source, summaries)
-    await uploadOriginals(source, imported.fileIds)
+    const imported = await importAll(source, summaries, onProgress)
+    onProgress?.({ phase: 'files', done: 0, total: imported.fileIds.size })
+    await uploadOriginals(source, imported.fileIds, onProgress)
+    onProgress?.({ phase: 'verify', done: 0, total: 0 })
     const expected = new Map<string, number>()
     for (const summary of samples) {
       expected.set(summary.id, imported.counts.get(summary.id) ?? -1)

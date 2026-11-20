@@ -131,6 +131,13 @@ node tools/build-catalog.mjs
 - Tavily 网络层失败重试一次；错误提示是可读的一句话（`upstream_failed` 是本地代理的错误码）
 - 会话列表分页（首屏 60 + 显示更多）；长会话渐进加载（24 + 40）
 
+## v1.8.0 变更：会话存储迁到原生 SQLite
+
+- 四张表（sessions / messages / files / meta）；列会话列表不读消息体 → 启动快
+- 老用户首启自动迁移，分批 + 校验条数，失败静默回退，IndexedDB 永不删除
+- 设置 → 数据 显示后端（原生 SQLite / IndexedDB）
+- 导入暂存仍用 IndexedDB
+
 ## 已知限制
 
 - 联网搜索 / 文件上传 / URL 阅读由 DeepSeek 的服务端能力提供，自定义模型下走客户端代取；

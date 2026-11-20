@@ -28,6 +28,7 @@ import {
 } from '../services/update.js'
 import { openUpdateDialog } from '../components/settings/updateDialogState.js'
 import { UpdateDialog } from '../components/settings/UpdateDialog.js'
+import { MigrationOverlay } from '../components/layout/MigrationOverlay.js'
 import { SettingsDialog } from '../components/settings/SettingsDialog.js'
 import { Toast } from '../components/base/Toast.js'
 import { showToast } from '../components/base/toastState.js'
@@ -210,6 +211,7 @@ export const App = () => {
       </div>
       <SettingsDialog />
       <UpdateDialog />
+      <MigrationOverlay />
       <Toast />
     </>
   )

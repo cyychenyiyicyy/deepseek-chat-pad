@@ -1,6 +1,7 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 import { toSessionSummary, type Session, type SessionSummary } from './types.js'
 import * as dbNative from './dbNative.js'
+import { migrationEnd, migrationProgress, migrationStart } from './migrationState.js'
 
 /** IndexedDB 存储结构版本；新增或调整存储、索引时递增。 */
 const DB_VERSION = 11
@@ -298,7 +299,9 @@ let backend: StorageBackend | 'pending' = 'pending'
 const getImpl = (): Promise<DbImpl> => (implPromise ??= pickImpl())
 
 const pickImpl = async (): Promise<DbImpl> => {
+  migrationStart()
   const native = await useNative()
+  migrationEnd(native)
   backend = native ? 'native' : 'indexeddb'
   return native ? nativeImpl : indexedDbImpl
 }
@@ -323,11 +326,15 @@ const useNative = async (): Promise<boolean> => {
   if (readSwitch() === 'off') {
     return false
   }
-  return dbNative.migrate({
-    summaries: idbLoadSessionSummaries,
-    loadSession: idbLoadSession,
-    loadFile: idbLoadFile,
-  })
+  return dbNative.migrate(
+    {
+      summaries: idbLoadSessionSummaries,
+      loadSession: idbLoadSession,
+      loadFile: idbLoadFile,
+    },
+    // 迁移可能要跑好几秒，进度必须让用户看得见
+    (progress) => migrationProgress(progress)
+  )
 }
 
 /** 当前存储后端；第一次读写之前返回 pending（设置页据此显示「检测中」）。 */
