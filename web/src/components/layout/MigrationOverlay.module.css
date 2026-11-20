@@ -1,24 +1,24 @@
 .backdrop {
   position: fixed;
-  inset: 0;
+  left: 50%;
+  bottom: 24px;
   z-index: 1200;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background-color: var(--dsw-alias-bg-mask, rgba(0, 0, 0, 0.45));
-  backdrop-filter: blur(2px);
+  transform: translateX(-50%);
+  /* 不挡操作：迁移在后台跑，界面照常可用 */
+  pointer-events: none;
 }
 
 .card {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 12px;
+  align-items: stretch;
+  gap: 8px;
   box-sizing: border-box;
-  width: min(360px, calc(100vw - 48px));
-  padding: 24px 22px;
+  width: min(320px, calc(100vw - 48px));
+  padding: 14px 18px;
+  pointer-events: auto;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 18px;
+  border-radius: 14px;
   background-color: var(--dsw-alias-bg-layer-3);
   box-shadow: var(--dsw-shadow-lv3);
   text-align: center;

@@ -299,11 +299,42 @@ let backend: StorageBackend | 'pending' = 'pending'
 const getImpl = (): Promise<DbImpl> => (implPromise ??= pickImpl())
 
 const pickImpl = async (): Promise<DbImpl> => {
-  migrationStart()
   const native = await useNative()
-  migrationEnd(native)
   backend = native ? 'native' : 'indexeddb'
   return native ? nativeImpl : indexedDbImpl
+}
+
+/** 真实读一次列表：接口在但读不出来（库损坏 / 路由打不通）就退回，别让界面一直转圈 */
+const smokeTest = async (): Promise<boolean> => {
+  try {
+    await dbNative.loadSessionSummaries()
+    return true
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.warn('[storage] 原生存储读取失败，改用 IndexedDB', error)
+    return false
+  }
+}
+
+/**
+ * 迁移放在后台跑：本次会话仍然用 IndexedDB，搬完下次启动再切原生。
+ *
+ * 之前是「迁移完才决定用哪个后端」，会话多的用户首启会卡在加载界面，
+ * 而且一旦原生接口不返回就永久卡死 —— 这是不能接受的。
+ */
+const migrateInBackground = (): void => {
+  migrationStart()
+  void dbNative
+    .migrate(
+      {
+        summaries: idbLoadSessionSummaries,
+        loadSession: idbLoadSession,
+        loadFile: idbLoadFile,
+      },
+      (progress) => migrationProgress(progress)
+    )
+    .then((ok) => migrationEnd(ok))
+    .catch(() => migrationEnd(false))
 }
 
 const readSwitch = (): string | null => {
@@ -320,21 +351,19 @@ const readSwitch = (): string | null => {
  * 迁移失败不标记、不抛给界面，下次启动重试；IndexedDB 的数据始终原地保留。
  */
 const useNative = async (): Promise<boolean> => {
-  if (!(await dbNative.probe())) {
-    return false
-  }
   if (readSwitch() === 'off') {
     return false
   }
-  return dbNative.migrate(
-    {
-      summaries: idbLoadSessionSummaries,
-      loadSession: idbLoadSession,
-      loadFile: idbLoadFile,
-    },
-    // 迁移可能要跑好几秒，进度必须让用户看得见
-    (progress) => migrationProgress(progress)
-  )
+  if (!(await dbNative.probe())) {
+    return false
+  }
+  if (dbNative.isMigrated()) {
+    // 已经搬过：再确认真的读得出来才敢用
+    return smokeTest()
+  }
+  // 还没搬：本次继续用 IndexedDB，后台搬运，下次启动生效
+  migrateInBackground()
+  return false
 }
 
 /** 当前存储后端；第一次读写之前返回 pending（设置页据此显示「检测中」）。 */

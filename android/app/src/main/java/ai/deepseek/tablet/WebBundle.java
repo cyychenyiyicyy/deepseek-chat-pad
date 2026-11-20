@@ -92,7 +92,46 @@ final class WebBundle {
         if (!webRoot.isDirectory()) {
             return null;
         }
-        return new File(webRoot, INDEX_FILE).isFile() ? webRoot : null;
+        if (!new File(webRoot, INDEX_FILE).isFile()) {
+            return null;
+        }
+        // APK 比已装的网页包新 ⇒ 内置资源才是新的。
+        // 典型场景：用户 OTA 过一版网页包，之后覆盖安装了新 APK；
+        // 若还从这个旧目录取资源，等于新 APK 里的页面永远不生效
+        // （曾经出现过「装了新版 APK 仍然卡在旧页面的 bug」）。
+        String installed = readVersion(new File(webRoot, VERSION_FILE));
+        if (installed != null && compareVersion(installed, BuildConfig.VERSION_NAME) < 0) {
+            Log.i(TAG, "丢弃比 APK 旧的网页包：" + installed + " < " + BuildConfig.VERSION_NAME);
+            deleteRecursively(webRoot);
+            clearVersion();
+            return null;
+        }
+        return webRoot;
+    }
+
+    /** 语义化版本比较：1.10.0 > 1.9.9；解析不出来的段按 0 处理 */
+    private static int compareVersion(String left, String right) {
+        String[] a = left.trim().replaceFirst("^[vV]", "").split("[.\\-+]");
+        String[] b = right.trim().replaceFirst("^[vV]", "").split("[.\\-+]");
+        int length = Math.max(a.length, b.length);
+        for (int index = 0; index < length; index++) {
+            int x = 0;
+            int y = 0;
+            try {
+                x = index < a.length ? Integer.parseInt(a[index].trim()) : 0;
+            } catch (NumberFormatException ignored) {
+                x = 0;
+            }
+            try {
+                y = index < b.length ? Integer.parseInt(b[index].trim()) : 0;
+            } catch (NumberFormatException ignored) {
+                y = 0;
+            }
+            if (x != y) {
+                return x < y ? -1 : 1;
+            }
+        }
+        return 0;
     }
 
     /** "files" = 在用下载的包；"assets" = 在用 APK 内置的 */

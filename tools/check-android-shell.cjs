@@ -638,11 +638,11 @@ dbChecks.push([
 
 // 10. Web 侧迁移：探测 → 分批 → 校验条数 → 才写标记
 dbChecks.push([
-  'dbNative 有 probe/migrate，分批导入并校验会话数与 3 个抽查会话的消息数',
-  /export const probe = async \(\): Promise<boolean>/.test(dbNativeTs) &&
-    /export const migrate = async \(source: MigrationSource\): Promise<boolean>/.test(
-      dbNativeTs
-    ) &&
+  'dbNative 有 probe/migrate（含超时），分批导入并校验会话数与 3 个抽查会话的消息数',
+  /export const probe = async \(\)/.test(dbNativeTs) &&
+    /export const migrate = async \(\s*source: MigrationSource/.test(dbNativeTs) &&
+    /DEFAULT_TIMEOUT_MS/.test(dbNativeTs) &&
+    /timeoutMs: 3000/.test(dbNativeTs) &&
     /const SESSION_BATCH = 20/.test(dbNativeTs) &&
     /const SAMPLE_SESSIONS = 3/.test(dbNativeTs) &&
     /state\.sessions < total/.test(dbNativeTs) &&
@@ -679,7 +679,9 @@ dbChecks.push([
     /export const saveStagingFiles = idbSaveStagingFiles/.test(chatDbTs) &&
     /export const updateStagingFileTypes = idbUpdateStagingFileTypes/.test(chatDbTs) &&
     /await dbNative\.probe\(\)/.test(chatDbTs) &&
-    /return dbNative\.migrate\(/.test(chatDbTs),
+    // 迁移必须在后台跑：启动不能等它（否则原生一不返回就永久卡在加载界面）
+    /migrateInBackground/.test(chatDbTs) &&
+    /dbNative\s*\.migrate\(/.test(chatDbTs),
   `缺: ${missingExports.join(', ')}`
 ])
 

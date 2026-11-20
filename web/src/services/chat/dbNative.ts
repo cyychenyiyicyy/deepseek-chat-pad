@@ -74,8 +74,31 @@ export type MigrationSource = {
 
 // ---------------------------------------------------------------- HTTP 小工具
 
-const request = (path: string, init?: RequestInit): Promise<Response> =>
-  fetch(`${BASE}${path}`, { cache: 'no-store', ...init })
+/**
+ * 单次请求的超时。
+ *
+ * 之前没有超时：原生一旦不返回响应（服务端阻塞、SQLite 锁住、连接半开），
+ * 整个启动流程就永久卡在「正在加载会话」，用户完全无法自救。
+ * 现在超时就中断，上层据此退回 IndexedDB。
+ */
+const DEFAULT_TIMEOUT_MS = 8000
+
+type RequestInitWithTimeout = RequestInit & { timeoutMs?: number }
+
+const request = async (path: string, init?: RequestInitWithTimeout): Promise<Response> => {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...rest } = init ?? {}
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(`${BASE}${path}`, {
+      cache: 'no-store',
+      ...rest,
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 /** 非 2xx 一律抛错，由调用方（db.ts / 迁移流程）决定是退回 IDB 还是原样上报 */
 const ensureOk = async (response: Response, label: string): Promise<void> => {
@@ -97,12 +120,17 @@ const readJson = async <T>(path: string, init?: RequestInit): Promise<T> => {
   return body
 }
 
-const postJson = async (path: string, payload: unknown): Promise<void> => {
+const postJson = async (
+  path: string,
+  payload: unknown,
+  timeoutMs?: number
+): Promise<void> => {
   await readJson<unknown>(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     // 已经序列化好的（超大的 import 批次）直接用，避免再 stringify 一遍
     body: typeof payload === 'string' ? payload : JSON.stringify(payload),
+    ...(timeoutMs ? { timeoutMs } : {}),
   })
 }
 
@@ -125,7 +153,18 @@ const readState = async (): Promise<NativeState | null> => {
 }
 
 /** 原生存储是否可用：只有 `/__ds_db/state` 成功才算。 */
-export const probe = async (): Promise<boolean> => (await readState()) !== null
+/** 探测：给很短的上限，探不到就按不支持处理，绝不让启动等它 */
+export const probe = async (): Promise<boolean> => {
+  try {
+    const response = await request('/state', { timeoutMs: 3000 })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
+/** 是否已经完成过迁移（迁移标记在 localStorage，db.ts 用它决定要不要再搬） */
+export const isMigrated = (): boolean => readMigrated()
 
 export const loadSessionSummaries = async (): Promise<SessionSummary[]> => {
   const body = await readJson<{ sessions?: SessionSummary[] }>('/summaries')
