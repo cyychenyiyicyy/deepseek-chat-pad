@@ -31,6 +31,15 @@ import styles from './MessageList.module.css'
 
 /** 距底部小于该值时视为在底部，流式内容增长时跟随 */
 const STICKY_THRESHOLD = 40
+
+/**
+ * 渐进式加载：长会话先只渲染最后这么多条，往上滚 / 点按钮再往前补。
+ * 之前是一次性把所有消息挂进 DOM，几百条的长会话光首屏渲染就要等好几秒。
+ */
+const INITIAL_WINDOW = 24
+const WINDOW_STEP = 40
+/** 滚到距顶部这么近时自动往前补一屏 */
+const LOAD_MORE_THRESHOLD = 120
 const EMPTY_VERSIONS: MessageVersions = { ids: [], index: -1 }
 
 export const MessageList = ({
@@ -49,6 +58,16 @@ export const MessageList = ({
   const scrollTopRef = useRef(0)
   const restoreScrollRef = useRef<{ messageId: string; top: number } | null>(null)
   const messages = getVisibleMessages(session)
+  /** 已渲染的尾部消息条数；换会话时重置 */
+  const [windowSize, setWindowSize] = useState(INITIAL_WINDOW)
+  /** 补历史后要恢复的滚动位置（scrollHeight − scrollTop） */
+  const keepBottomRef = useRef<number | null>(null)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => setWindowSize(INITIAL_WINDOW), [session.id])
+  const totalRef = useRef(messages.length)
+  totalRef.current = messages.length
+  const startIndex = Math.max(0, messages.length - windowSize)
+  const visibleMessages = startIndex > 0 ? messages.slice(startIndex) : messages
   const [previousVersions, setPreviousVersions] = useState(() =>
     buildMessageVersions(session, new Map())
   )
@@ -126,6 +145,11 @@ export const MessageList = ({
       el.scrollTop = scrollTopRef.current
     }
     const onScroll = () => {
+      // 快滚到顶时往前补一屏，并记住当前位置，补完不跳
+      if (el.scrollTop < LOAD_MORE_THRESHOLD) {
+        keepBottomRef.current = el.scrollHeight - el.scrollTop
+        setWindowSize((size) => (size < totalRef.current ? size + WINDOW_STEP : size))
+      }
       const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < STICKY_THRESHOLD
       // 仅在用户向上滚动时停止跟随底部，布局或内容增高时保持跟随状态。
       if (nearBottom) {
@@ -139,21 +163,44 @@ export const MessageList = ({
     return () => el.removeEventListener('scroll', onScroll)
   }, [isMobile, scrollToBottom])
 
-  const lastIndex = messages.length - 1
+  // 往前补了消息之后，把视口钉在原来看到的那条上
+  useLayoutEffect(() => {
+    const keep = keepBottomRef.current
+    const el = scrollRef.current
+    if (keep === null || !el) {
+      return
+    }
+    keepBottomRef.current = null
+    el.scrollTop = el.scrollHeight - keep
+  }, [windowSize])
+
+  const lastIndex = visibleMessages.length - 1
   const uploadRetryId = getUploadRetryId(messages, streaming)
   return (
     <ScrollToBottomContext.Provider value={scrollToBottom}>
       <div ref={isMobile ? undefined : scrollRef} className={styles.container}>
         <div ref={isMobile ? scrollRef : undefined} className={styles.scroll}>
           <div ref={contentRef} className={styles.column}>
-            {messages.map((message, index) =>
+            {startIndex > 0 ? (
+              <button
+                type="button"
+                className={styles.loadMore}
+                onClick={() => {
+                  keepBottomRef.current = (scrollRef.current?.scrollHeight ?? 0) - (scrollRef.current?.scrollTop ?? 0)
+                  setWindowSize((size) => size + WINDOW_STEP)
+                }}
+              >
+                加载更早的 {Math.min(WINDOW_STEP, startIndex)} 条（还有 {startIndex} 条）
+              </button>
+            ) : null}
+            {visibleMessages.map((message, index) =>
               message.role === 'user' ? (
                 <UserMessage
                   key={message.id}
                   sessionId={session.id}
                   message={message}
                   retryUploadId={uploadRetryId}
-                  isFirst={index === 0}
+                  isFirst={startIndex === 0 && index === 0}
                   isLast={index === lastIndex || index === lastIndex - 1}
                   busy={streaming}
                   versions={versions.get(message.id) ?? EMPTY_VERSIONS}

@@ -35,3 +35,21 @@
   margin: 0 auto;
   padding-bottom: 24px;
 }
+
+/* 顶部「加载更早的消息」 */
+.loadMore {
+  align-self: center;
+  margin: 4px auto 12px;
+  padding: 8px 16px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}

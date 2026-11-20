@@ -417,9 +417,28 @@ export async function* streamChat(
   if (!searchCall) return
 
   const query = readQuery(searchCall.arguments) || lastUserText(body).slice(0, 128)
-  // 按设置走 DeepSeek 或 Tavily
-  const results = await runSearch(query, signal)
-  if (results.length === 0) return
+  // 按设置走 DeepSeek 或 Tavily。搜索失败不该让整轮对话失败：
+  // 把原因写进上下文，让模型照常回答并说明没搜到资料。
+  let results: Awaited<ReturnType<typeof runSearch>> = []
+  let searchFailure: string | null = null
+  try {
+    results = await runSearch(query, signal)
+  } catch (searchError) {
+    if (signal.aborted) {
+      throw searchError
+    }
+    searchFailure = searchError instanceof Error ? searchError.message : String(searchError)
+    console.warn('[search] 失败：', searchFailure)
+  }
+  if (results.length === 0) {
+    // 没结果：把失败原因作为一条上下文补进去
+    if (searchFailure) {
+      const note = `【联网搜索失败】${searchFailure}\n请照常回答，但告诉用户这次没能联网检索，答案里不要编造引用。`
+      messages.push({ role: 'user', content: note })
+      yield* streamOpenAI({ ...options, messages })
+    }
+    return
+  }
 
   // 让界面照常显示「搜索了哪些来源」
   yield* searchBlocks([{ id: searchCall.id || `call_${randomHex(6)}`, query, results }])

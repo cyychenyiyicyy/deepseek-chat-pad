@@ -34,7 +34,12 @@ export const tavilySearch = async (
 ): Promise<SearchResult[]> => {
   const res = await apiFetch(TAVILY_ENDPOINT, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      // 新版接口认 Bearer，旧版认 body 里的 api_key，两种都带上
+      Authorization: `Bearer ${apiKey}`,
+    },
     body: JSON.stringify({
       api_key: apiKey,
       query,
@@ -59,7 +64,7 @@ export const tavilySearch = async (
     } catch {
       /* 非 JSON 错误体直接展示原文 */
     }
-    throw new ApiError('http', message, res.status)
+    throw new ApiError('http', `Tavily：${message}`, res.status)
   }
 
   const body = (await res.json()) as { results?: TavilyItem[] }
