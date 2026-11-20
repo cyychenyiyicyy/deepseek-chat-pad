@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Button } from '../base/Button.js'
 import { useTranslate } from '../../i18n/index.js'
+import { setAutoCheckUpdate, useSettings } from '../../services/settings.js'
 import {
   fetchLatestRelease,
   isUpdateSupported,
@@ -20,6 +21,7 @@ export const UpdatePanel = () => {
   const [supported, setSupported] = useState<boolean | null>(null)
   const [state, setState] = useState<UpdateState | null>(null)
   const [checking, setChecking] = useState(false)
+  const autoCheck = useSettings((state) => state.autoCheckUpdate)
 
   useEffect(() => {
     let cancelled = false
@@ -73,6 +75,14 @@ export const UpdatePanel = () => {
         </div>
       </div>
       <div className={styles.updateActions}>
+        <label className={styles.autoCheck}>
+          <input
+            type="checkbox"
+            checked={autoCheck}
+            onChange={(event) => setAutoCheckUpdate(event.target.checked)}
+          />
+          {t('updateAutoCheck')}
+        </label>
         <Button variant="outlined" size="m" disabled={checking} onClick={() => void check()}>
           {checking ? t('updateChecking') : t('updateCheckButton')}
         </Button>

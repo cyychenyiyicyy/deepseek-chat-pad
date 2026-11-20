@@ -20,6 +20,9 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 要跟上一个 tag 比对 android/ 是否变化，浅克隆拿不到 tag
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
         with:
@@ -151,7 +154,11 @@ jobs:
             echo "版本 v$v（构建 ${{ github.run_number }}）"
             echo
             echo "app-debug.apk：完整安装包，直接覆盖安装（需允许「未知来源」）"
-            echo "web-v$v.zip：网页更新包，应用内「设置 → 通用 → 检查更新」可直接拉取，不用重装"
+            if [ "${{ steps.native.outputs.required }}" = "true" ]; then
+              echo "web-v$v.zip：网页更新包（本次包含原生改动，建议同时更新 APK）"
+            else
+              echo "web-v$v.zip：网页更新包（本次只有网页变化，应用内直接更新即可，无需重装）"
+            fi
             echo
             if [ -f release-notes.md ]; then
               cat release-notes.md
@@ -161,6 +168,25 @@ jobs:
           } > release-body.md
           cat release-body.md
 
+      - name: 判断是否需要更新 APK
+        id: native
+        run: |
+          set -euo pipefail
+          v=${{ steps.ver.outputs.value }}
+          prev=$(git tag --sort=-v:refname | grep -v "^v$v$" | head -1 || true)
+          if [ -z "$prev" ]; then
+            echo "required=true" >> "$GITHUB_OUTPUT"
+            echo "首个版本，需要 APK"
+            exit 0
+          fi
+          if git diff --quiet "$prev" HEAD -- android/; then
+            echo "required=false" >> "$GITHUB_OUTPUT"
+            echo "自 $prev 起 android/ 没有变化，本次只需要更新网页包"
+          else
+            echo "required=true" >> "$GITHUB_OUTPUT"
+            echo "自 $prev 起 android/ 有改动，需要更新 APK"
+          fi
+
       - name: 生成 latest.json
         run: |
           set -euo pipefail
@@ -168,6 +194,7 @@ jobs:
           apk=android/app/build/outputs/apk/debug/app-debug.apk
           web=web-v$v.zip
           notes=$(jq -Rs . < release-notes.md)
+          apk_required=${{ steps.native.outputs.required }}
           cat > latest.json <<EOF
           {
             "version": "$v",
@@ -176,6 +203,7 @@ jobs:
             "apkSize": $(stat -c%s "$apk"),
             "webUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/download/v$v/web-v$v.zip",
             "webSize": $(stat -c%s "$web"),
+            "apkRequired": $apk_required,
             "notes": $notes
           }
           EOF

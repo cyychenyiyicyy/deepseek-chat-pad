@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { createId } from '../../utils/id.js'
 import { ApiError } from '../api/client.js'
-import { streamChat } from '../models/resolve.js'
+import { resolveActiveModel, streamChat } from '../models/resolve.js'
 import type { ChatModel, CreateMessageRequest } from '../api/types.js'
 import { extractFileIds, getFileErrorCode, isRetryableApiError } from '../api/errors.js'
 import { cancelUpload, describeUploadError, uploadAttachment, useUploads } from '../attachments.js'
@@ -777,6 +777,16 @@ const saveServerIds = (sessionId: string, serverIds: Map<string, string>) => {
  * 附件的服务端 id：已有直接用；正在上传的等待同一任务；否则读取本地原件补传。
  * 本地也没有原件（导入的文档附件只有元数据）时返回 null，该附件只展示、不进入请求。
  */
+/** 本轮附件的本地信息，供自定义模型走 data URL 发送 */
+const preparedQuestionFiles = (question: UserMessage) =>
+  question.files.map((file) => ({
+    id: file.id,
+    serverId: file.serverId,
+    name: file.name,
+    isImage: file.isImage,
+    mimeType: file.mimeType,
+  }))
+
 const ensureServerId = async (apiKey: string, file: FileAttachment): Promise<string | null> => {
   if (file.serverId) {
     return file.serverId
@@ -825,8 +835,16 @@ const prepareFiles = async (sessionId: string, request: Request, signal: AbortSi
   const aborted = new Promise<never>((_, reject) => {
     signal.addEventListener('abort', () => reject(signal.reason), { once: true })
   })
+  // 自定义模型下图片由客户端转 data URL 直接发送，不需要再传 DeepSeek Files API
+  const active = resolveActiveModel()
+  const usesBase64Images = !active.isDeepseek
+  const shouldUpload = (file: FileAttachment) => !(usesBase64Images && file.isImage)
+
   const uploads = Promise.allSettled(
     request.question.files.map(async (file) => {
+      if (!shouldUpload(file)) {
+        return
+      }
       const serverId = await ensureServerId(apiKey, file)
       if (serverId) {
         serverIds.set(file.id, serverId)
@@ -853,6 +871,9 @@ const prepareFiles = async (sessionId: string, request: Request, signal: AbortSi
     }
   }
   for (const file of pending.values()) {
+    if (!shouldUpload(file)) {
+      continue
+    }
     signal.throwIfAborted()
     try {
       const serverId = await Promise.race([ensureServerId(apiKey, file), aborted])
@@ -1001,6 +1022,8 @@ const streamReply = async (sessionId: string, initial: AssistantMessage, request
           {
             model: initial.model ?? MODEL,
             clientSessionId: sessionId,
+            // 自定义模型下图片由客户端直接转 data URL 发送，请求层需要本地 id
+            localFiles: preparedQuestionFiles(prepared.question),
             system: SYSTEM_PROMPT,
             messages,
             thinking: { type: initial.thinking ? 'enabled' : 'disabled' },

@@ -30,6 +30,8 @@ export type ReleaseInfo = {
   apkSize: number
   webUrl: string | null
   webSize: number
+  /** 这次是否必须换 APK（CI 根据 android/ 是否变化判断） */
+  apkRequired?: boolean
   notes: string
 }
 
@@ -125,6 +127,35 @@ export const compareVersion = (a: string, b: string): number => {
     }
   }
   return 0
+}
+
+/* ---------------- 跳过某个版本 ----------------
+ * 「跳过此版本」后，启动时的自动检查不再为它弹窗；手动点「检查更新」仍然会显示。 */
+
+const SKIP_KEY = 'chat-demo:update-skipped'
+
+export const readSkippedVersion = (): string | null => {
+  try {
+    return localStorage.getItem(SKIP_KEY)
+  } catch {
+    return null
+  }
+}
+
+export const skipVersion = (version: string) => {
+  try {
+    localStorage.setItem(SKIP_KEY, version)
+  } catch {
+    // 存储不可用时只是这次不生效
+  }
+}
+
+export const clearSkippedVersion = () => {
+  try {
+    localStorage.removeItem(SKIP_KEY)
+  } catch {
+    // 忽略
+  }
 }
 
 /* ---------------- 未完成更新记录 ----------------

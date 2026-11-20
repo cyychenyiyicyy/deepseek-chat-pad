@@ -1,8 +1,10 @@
 import { ApiError, streamMessage } from '../api/client.js'
 import { streamOpenAI, type OpenAIMessage, type OpenAITool, type OpenAIToolCall } from '../api/openai.js'
-import { deepseekFetch, deepseekSearch, extractUrls, formatFetchContext, formatSearchContext } from '../api/tools.js'
+import { deepseekFetch, extractUrls, formatFetchContext, formatSearchContext } from '../api/tools.js'
+import { hasSearchCredential, runSearch } from './searchBackend.js'
 import type { SearchResult } from '../api/tools.js'
 import type { CreateMessageRequest, MessageParam, MessageStreamEvent } from '../api/types.js'
+import * as db from '../chat/db.js'
 import { useSettings } from '../settings.js'
 import { chatUrl, findModelMeta, loadCoreProviders, type ModelMeta, type ProviderMeta } from './catalog.js'
 import { deepseekEffort, isExplicitEffort } from './effort.js'
@@ -91,7 +93,34 @@ const lastUserText = (body: CreateMessageRequest): string => {
 }
 
 /** 把本应用的 Messages 结构降级成 OpenAI 兼容的纯文本消息 */
-const toOpenAIMessages = (body: CreateMessageRequest, extraContext = ''): OpenAIMessage[] => {
+/** 把图片附件读成 data URL：自定义模型不认识 DeepSeek 的 file_id，只能直接把字节发过去 */
+const loadImageUrls = async (files: CreateMessageRequest['localFiles']): Promise<string[]> => {
+  const urls: string[] = []
+  for (const file of files ?? []) {
+    if (!file.isImage) continue
+    const blob = await db.loadFile(file.id).catch(() => null)
+    if (!blob) continue
+    try {
+      urls.push(
+        await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () => resolve(String(reader.result))
+          reader.onerror = () => reject(reader.error)
+          reader.readAsDataURL(blob)
+        })
+      )
+    } catch {
+      // 单张读失败就跳过，不影响整轮
+    }
+  }
+  return urls
+}
+
+const toOpenAIMessages = (
+  body: CreateMessageRequest,
+  extraContext = '',
+  imageUrls: string[] = []
+): OpenAIMessage[] => {
   const messages: OpenAIMessage[] = [{ role: 'system', content: body.system }]
   const list = body.messages as MessageParam[]
   const lastUserIndex = (() => {
@@ -116,6 +145,17 @@ const toOpenAIMessages = (body: CreateMessageRequest, extraContext = ''): OpenAI
       }
       if (index === lastUserIndex && extraContext) {
         text = `${text}\n\n${extraContext}`
+      }
+      // 多模态模型：图片作为 image_url 一起发，而不是占位文字
+      if (index === lastUserIndex && imageUrls.length > 0) {
+        messages.push({
+          role: 'user',
+          content: [
+            { type: 'text' as const, text },
+            ...imageUrls.map((url) => ({ type: 'image_url' as const, image_url: { url } })),
+          ],
+        })
+        return
       }
       messages.push({ role: 'user', content: text })
       return
@@ -314,7 +354,8 @@ export async function* streamChat(
   const thinking = body.thinking.type === 'enabled' && Boolean(resolved.meta?.reason)
 
   const linkContext = await collectLinkContext(body, settings.apiKey ?? '', signal)
-  const messages = toOpenAIMessages(body, linkContext)
+  const imageUrls = await loadImageUrls(body.localFiles)
+  const messages = toOpenAIMessages(body, linkContext, imageUrls)
 
   // 自定义厂商没有服务端标题，先补一条带标题的 message_delta，让会话列表有名字
   if (body.title?.enabled) {
@@ -350,11 +391,10 @@ export async function* streamChat(
   }
 
   const wantsSearch = body.tools.some((tool) => tool.type === 'deepseek_web_search')
-  const deepseekKey = settings.apiKey ?? ''
   // 目录里没收录的模型也试一次：不认识 tools 会退化成不搜索
   const canUseTools = Boolean(resolved.meta?.tool) || !resolved.meta
 
-  if (!wantsSearch || !deepseekKey || !canUseTools) {
+  if (!wantsSearch || !hasSearchCredential() || !canUseTools) {
     yield* streamOpenAI({ ...options, messages })
     return
   }
@@ -377,7 +417,8 @@ export async function* streamChat(
   if (!searchCall) return
 
   const query = readQuery(searchCall.arguments) || lastUserText(body).slice(0, 128)
-  const results = await deepseekSearch(deepseekKey, query, { count: 8, signal })
+  // 按设置走 DeepSeek 或 Tavily
+  const results = await runSearch(query, signal)
   if (results.length === 0) return
 
   // 让界面照常显示「搜索了哪些来源」

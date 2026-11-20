@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { memo, useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   IconGlobeLanguageOutline14,
   IconPaperclipOutline16,
@@ -35,6 +35,8 @@ import { useTranslate } from '../../i18n/index.js'
 import { ModelCapsule } from '../models/ModelCapsule.js'
 import { useModelState } from '../../services/models/store.js'
 import { ensureActiveModelReady } from '../../services/models/ready.js'
+import { ensureCatalog, resolveActiveModel } from '../../services/models/resolve.js'
+import type { ProviderMeta } from '../../services/models/catalog.js'
 import styles from './ChatInput.module.css'
 
 /** 输入框：自适应高度的文本框 + 文件 + 深度思考与智能搜索开关 + 语音输入 + 发送 / 停止 */
@@ -60,8 +62,18 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const search = useSettings((state) => state.search)
   const activeModel = useModelState((state) => state.active)
   const isDeepseek = activeModel.providerId === 'deepseek'
-  // 联网搜索由 DeepSeek 的 /v1/tools/search 执行，与对话模型无关，只要有 Key 就能开
-  const hasDeepseekKey = Boolean(useSettings((state) => state.apiKey))
+  // 联网搜索与对话模型无关：看当前搜索后端（DeepSeek / Tavily）有没有配好 Key
+  const searchBackend = useSettings((state) => state.searchBackend)
+  const tavilyKey = useSettings((state) => state.tavilyKey)
+  const deepseekKey = useSettings((state) => state.apiKey)
+  const hasSearchKey = searchBackend === 'tavily' ? Boolean(tavilyKey) : Boolean(deepseekKey)
+  // 自定义模型能不能收图，看它有没有声明 image 输入
+  const [catalog, setCatalog] = useState<ProviderMeta[]>([])
+  useEffect(() => {
+    void ensureCatalog().then(setCatalog)
+  }, [])
+  const activeInfo = resolveActiveModel(catalog)
+  const acceptsImage = activeInfo.isDeepseek || Boolean(activeInfo.meta?.in?.includes('image'))
   const fileInputRef = useRef<HTMLInputElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const togglesRef = useRef<HTMLDivElement>(null)
@@ -87,9 +99,13 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
     if (files.length === 0 || useChatStore.getState().importingHistory) {
       return
     }
+    // 非 DeepSeek：只有声明了图片输入的多模态模型能收，且只收图片
     if (!isDeepseek) {
-      showToast({ key: 'modelAttachUnsupported', type: 'error' })
-      return
+      const onlyImages = files.every((file) => file.type.startsWith('image/'))
+      if (!acceptsImage || !onlyImages) {
+        showToast({ key: 'modelAttachUnsupported', type: 'error' })
+        return
+      }
     }
     if (!ensureApiKey()) {
       return
@@ -232,19 +248,19 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
               <span className={styles.toggleLabel}>{t('thinkingSwitch')}</span>
             </button>
           </Tooltip>
-          <Tooltip content={hasDeepseekKey ? t('deactivatedSearchTooltip') : t('modelDeepseekKeyMissing')}>
+          <Tooltip content={hasSearchKey ? t('deactivatedSearchTooltip') : t('modelSearchKeyMissing')}>
             <button
               type="button"
               className={clsx(
                 styles.toggle,
-                search && hasDeepseekKey && styles.selected,
-                !hasDeepseekKey && styles.toggleDim
+                search && hasSearchKey && styles.selected,
+                !hasSearchKey && styles.toggleDim
               )}
               aria-label={t('search')}
-              aria-pressed={search && hasDeepseekKey}
+              aria-pressed={search && hasSearchKey}
               onClick={() => {
-                if (!hasDeepseekKey) {
-                  showToast({ key: 'modelDeepseekKeyMissing', type: 'error' })
+                if (!hasSearchKey) {
+                  showToast({ key: 'modelSearchKeyMissing', type: 'error' })
                   return
                 }
                 setSearch(!search)
@@ -282,7 +298,7 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
             type="file"
             multiple
             hidden
-            accept={ACCEPT}
+            accept={isDeepseek ? ACCEPT : 'image/*'}
             onChange={(event) => {
               acceptFiles(Array.from(event.target.files ?? []))
               event.target.value = ''

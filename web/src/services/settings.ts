@@ -21,6 +21,12 @@ type Settings = {
   uiScale: number
   /** 思考强度档位：off / on / low / high / max…，与 thinking 双向同步 */
   thinkingEffort: string
+  /** 启动时是否自动检查更新 */
+  autoCheckUpdate: boolean
+  /** 联网搜索后端：DeepSeek 官方接口 或 自己的 Tavily */
+  searchBackend: 'deepseek' | 'tavily'
+  /** Tavily API Key */
+  tavilyKey: string
 }
 
 const KEYS = {
@@ -34,6 +40,9 @@ const KEYS = {
   siderCollapsed: 'chat-demo:sider-collapsed',
   uiScale: 'chat-demo:ui-scale',
   thinkingEffort: 'chat-demo:thinking-effort',
+  autoCheckUpdate: 'chat-demo:auto-check-update',
+  searchBackend: 'chat-demo:search-backend',
+  tavilyKey: 'chat-demo:tavily-key',
 } as const
 
 const read = (key: string) => {
@@ -122,6 +131,9 @@ export const useSettings = create<Settings>(() => ({
   siderCollapsed: read(KEYS.siderCollapsed) === 'true',
   uiScale: initialUiScale(),
   thinkingEffort: initialThinkingEffort(),
+  autoCheckUpdate: read(KEYS.autoCheckUpdate) !== 'false',
+  searchBackend: read(KEYS.searchBackend) === 'tavily' ? 'tavily' : 'deepseek',
+  tavilyKey: read(KEYS.tavilyKey) ?? '',
 }))
 
 export const setLocale = (locale: Locale) => {
@@ -174,6 +186,21 @@ export const setUiScale = (uiScale: number) => {
   const next = clampScale(uiScale)
   write(KEYS.uiScale, String(next))
   useSettings.setState({ uiScale: next })
+}
+
+export const setSearchBackend = (searchBackend: 'deepseek' | 'tavily') => {
+  write(KEYS.searchBackend, searchBackend)
+  useSettings.setState({ searchBackend })
+}
+
+export const setTavilyKey = (tavilyKey: string) => {
+  write(KEYS.tavilyKey, tavilyKey)
+  useSettings.setState({ tavilyKey })
+}
+
+export const setAutoCheckUpdate = (autoCheckUpdate: boolean) => {
+  write(KEYS.autoCheckUpdate, String(autoCheckUpdate))
+  useSettings.setState({ autoCheckUpdate })
 }
 
 export const setSiderCollapsed = (siderCollapsed: boolean) => {

@@ -182,6 +182,18 @@ export type CreateMessageRequest = {
   clientSessionId?: string
   /** DeepSeek Anthropic 格式的思考强度：{"effort": "low" | "high" | "max"} */
   output_config?: { effort: string }
+  /**
+   * 本轮附件的本地信息。
+   * 自定义模型下附件不走 DeepSeek 的 file_id，而是由客户端读原件转成 data URL，
+   * 所以要把本地 id 一起带给请求层。
+   */
+  localFiles?: {
+    id: string
+    serverId: string | null
+    name: string
+    isImage: boolean
+    mimeType: string
+  }[]
   system: string
   messages: MessageParam[]
   thinking: { type: 'enabled' | 'disabled' }

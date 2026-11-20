@@ -327,6 +327,7 @@ final class UpdateHandler {
                 + ",\"apkSize\":" + release.apkSize
                 + ",\"webUrl\":" + quoteOrNull(release.webUrl)
                 + ",\"webSize\":" + release.webSize
+                + ",\"apkRequired\":" + release.apkRequired
                 + ",\"notes\":" + JSONObject.quote(release.notes) + "}";
         HttpUtil.sendJson(out, 200, keepAlive, json, headOnly);
     }
@@ -433,6 +434,7 @@ final class UpdateHandler {
         }
         String notes = root.optString("notes", "");
         release.notes = notes.length() > NOTES_LIMIT ? notes.substring(0, NOTES_LIMIT) : notes;
+        release.apkRequired = root.optBoolean("apkRequired", true);
         return release;
     }
 
@@ -815,5 +817,10 @@ final class UpdateHandler {
         String webUrl;
         long webSize;
         String notes = "";
+        /**
+         * 这次是否需要换 APK：latest.json 里由 CI 根据 android/ 是否变化判断。
+         * 默认 true —— 拿不到这个字段时宁可提示得保守一些。
+         */
+        boolean apkRequired = true;
     }
 }

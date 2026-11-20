@@ -109,6 +109,11 @@ node tools/build-catalog.mjs
   现在增加 `latest.json` 备用通道（release 资产，走 `/releases/latest/download/latest.json`，不限流）
 - API 失败自动回落，两条都失败才报错
 
+## v1.6.5 变更
+
+- 思考强度滑条**真正跟手**：拖动期间直接写 CSS 变量，不经 React 渲染；带磁吸，松手吸附
+- 模型弹层**向上展开**：用两个 rect 相减定位，不再依赖视口高度，界面缩放/软键盘都不会算歪
+
 ## 已知限制
 
 - 联网搜索 / 文件上传 / URL 阅读由 DeepSeek 的服务端能力提供，自定义模型下走客户端代取；

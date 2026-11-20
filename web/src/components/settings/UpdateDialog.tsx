@@ -13,6 +13,7 @@ import {
   markUpdatePending,
   readNetworkInfo,
   readUpdateState,
+  skipVersion,
   type NetworkInfo,
   type UpdateProgress,
 } from '../../services/update.js'
@@ -49,8 +50,12 @@ export const UpdateDialog = () => {
   const webVersion = state?.webVersion ?? appVersion
   const hasWeb =
     Boolean(release?.webUrl) && Boolean(release) && compareVersion(release!.version, webVersion) > 0
+  // CI 判定这次没动原生代码时就不再催更 APK
   const hasApk =
-    Boolean(release?.apkUrl) && Boolean(release) && compareVersion(release!.version, appVersion) > 0
+    Boolean(release?.apkUrl) &&
+    release?.apkRequired !== false &&
+    Boolean(release) &&
+    compareVersion(release!.version, appVersion) > 0
 
   const copyLink = async (url: string | null) => {
     if (!url) return
@@ -151,6 +156,18 @@ export const UpdateDialog = () => {
           {busy === '' && release?.apkUrl ? (
             <Button variant="outlined" size="m" onClick={() => void copyLink(release.apkUrl)}>
               {t('updateCopyLink')}
+            </Button>
+          ) : null}
+          {busy === '' && release && (hasWeb || hasApk) ? (
+            <Button
+              variant="outlined"
+              size="m"
+              onClick={() => {
+                skipVersion(release.version)
+                closeUpdateDialog()
+              }}
+            >
+              {t('updateSkipVersion')}
             </Button>
           ) : null}
           <Button variant="outlined" size="m" disabled={Boolean(busy)} onClick={closeUpdateDialog}>

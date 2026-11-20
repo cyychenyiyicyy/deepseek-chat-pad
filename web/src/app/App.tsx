@@ -22,6 +22,7 @@ import {
   compareVersion,
   fetchLatestRelease,
   isUpdateSupported,
+  readSkippedVersion,
   readUpdatePending,
   readUpdateState,
 } from '../services/update.js'
@@ -74,6 +75,7 @@ export const App = () => {
   )
   const activeId = useChatStore((state) => state.activeId)
   const uiScale = useSettings((state) => state.uiScale)
+  const autoCheckUpdate = useSettings((state) => state.autoCheckUpdate)
 
   usePreventPageScroll(isMobile)
 
@@ -102,7 +104,7 @@ export const App = () => {
   useEffect(() => {
     let cancelled = false
     void (async () => {
-      if (!(await isUpdateSupported())) return
+      if (!autoCheckUpdate || !(await isUpdateSupported())) return
       const [current, result] = await Promise.all([readUpdateState(), fetchLatestRelease()])
       const latest = result.release
       if (cancelled || !current) return
@@ -127,15 +129,18 @@ export const App = () => {
             compareVersion(latest.version, current.webVersion ?? current.appVersion)
           )
         : -1
+      // 用户点过「跳过此版本」就不再为这个版本自动弹窗（有其它提示时仍然弹）
+      const skipped = readSkippedVersion()
+      const skipThis = Boolean(latest && skipped === latest.version && !notice && !result.error)
       // 有新版本、有需要提示的状态、或者检查本身失败（网络问题）时才弹窗
-      if (newer > 0 || notice || result.error) {
+      if (!skipThis && (newer > 0 || notice || result.error)) {
         openUpdateDialog({ release: latest, state: current, notice, error: result.error })
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [t])
+  }, [t, autoCheckUpdate])
 
   useEffect(() => {
     void initChat()

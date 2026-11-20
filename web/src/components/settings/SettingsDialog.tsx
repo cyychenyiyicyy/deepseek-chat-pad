@@ -23,6 +23,8 @@ import {
   isChineseBrowser,
   setLocale,
   setLocation,
+  setSearchBackend,
+  setTavilyKey,
   SCALE_MAX,
   SCALE_MIN,
   setThemePreference,
@@ -107,6 +109,7 @@ const SettingsContent = () => {
               <ThemeSetting />
               <ScaleSetting />
               <LocaleSetting />
+              <SearchSetting />
               <LocationSetting />
               <UpdatePanel />
               <VersionSetting />
@@ -298,6 +301,48 @@ const LocaleSetting = () => {
           ]}
           onChange={setLocale}
         />
+      }
+    />
+  )
+}
+
+/**
+ * 联网搜索后端：DeepSeek 官方接口跑在自己服务端，Tavily 用用户自己的 Key。
+ * 与对话模型无关 —— 换模型不影响这里的设置。
+ */
+const SearchSetting = () => {
+  const t = useTranslate()
+  const backend = useSettings((state) => state.searchBackend)
+  const tavilyKey = useSettings((state) => state.tavilyKey)
+  return (
+    <SettingCell
+      label={t('settingsSearchBackend')}
+      description={t('settingsSearchBackendHint')}
+      status={null}
+      action={
+        <div className={styles.searchBackend}>
+          <Select
+            ariaLabel={t('settingsSearchBackend')}
+            value={backend}
+            options={[
+              { value: 'deepseek', label: 'DeepSeek' },
+              { value: 'tavily', label: 'Tavily' },
+            ]}
+            onChange={(value) => setSearchBackend(value as 'deepseek' | 'tavily')}
+          />
+          {backend === 'tavily' ? (
+            <input
+              className={styles.searchKey}
+              type="password"
+              placeholder={t('settingsTavilyKeyPlaceholder')}
+              value={tavilyKey}
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              onChange={(event) => setTavilyKey(event.target.value)}
+            />
+          ) : null}
+        </div>
       }
     />
   )
