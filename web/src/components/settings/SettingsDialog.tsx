@@ -16,6 +16,7 @@ import {
   exportHistory,
   importHistory,
 } from '../../services/chat/backup.js'
+import { currentBackend } from '../../services/chat/db.js'
 import { useIsMobile } from '../../app/viewport.js'
 import { useChatStore } from '../../services/chat/store.js'
 import { regionCodes, getRegionName, provinces } from '../../services/location.js'
@@ -118,6 +119,7 @@ const SettingsContent = () => {
             <ModelPanel onOpenSection={(next) => setSection(next)} />
           ) : (
             <>
+              <StorageSetting />
               <ApiKeyField editor={apiKeyEditor} />
               <ImportHistory historyImport={historyImport} disabled={historyBusy} />
               <ExportHistory disabled={historyBusy} />
@@ -355,6 +357,29 @@ const VersionSetting = () => {
     <SettingCell
       label={t('appVersion')}
       description={`v${__APP_VERSION__}`}
+      status={null}
+      action={<span />}
+    />
+  )
+}
+
+/**
+ * 当前会话存储后端。老用户升级后会先自动迁移到原生 SQLite，迁移成功才显示原生；
+ * 浏览器打开、原生接口不可用、迁移校验没通过时仍是 IndexedDB —— 行为与升级前一致。
+ */
+const StorageSetting = () => {
+  const t = useTranslate()
+  const backend = currentBackend()
+  return (
+    <SettingCell
+      label={t('settingsStorageBackend')}
+      description={t(
+        backend === 'native'
+          ? 'settingsStorageBackendNative'
+          : backend === 'indexeddb'
+            ? 'settingsStorageBackendIndexedDb'
+            : 'settingsStorageBackendPending'
+      )}
       status={null}
       action={<span />}
     />

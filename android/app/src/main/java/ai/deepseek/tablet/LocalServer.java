@@ -28,7 +28,8 @@ import okhttp3.OkHttpClient;
  *   <li>端口固定为 {@link #PREFERRED_PORT}，保证页面 origin 稳定（localStorage / IndexedDB 按 origin 隔离），
  *       只有端口被占用时才退回系统分配</li>
  *   <li>静态资源走 {@link AssetHandler}，/__ds_proxy 走 {@link ProxyHandler}，
- *       /__ds_update/* 走 {@link UpdateHandler}（分体式更新）</li>
+ *       /__ds_update/* 走 {@link UpdateHandler}（分体式更新），
+ *       /__ds_db/* 走 {@link DbHandler}（会话存储的原生 SQLite）</li>
  *   <li>每个连接一个小循环支持 keep-alive，最多 256 个请求</li>
  *   <li>工作线程全部是 daemon，Activity 退出时不会把进程挂住</li>
  * </ul>
@@ -50,6 +51,7 @@ public final class LocalServer {
     private final ProxyHandler proxyHandler;
     private final WebBundle webBundle;
     private final UpdateHandler updateHandler;
+    private final DbHandler dbHandler;
     private final ExecutorService workers;
     private final AtomicInteger threadCounter = new AtomicInteger();
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -66,6 +68,8 @@ public final class LocalServer {
         this.assetHandler = new AssetHandler(base, webBundle);
         this.proxyHandler = new ProxyHandler(httpClient);
         this.updateHandler = new UpdateHandler(context, httpClient, webBundle, new ApkUpdater(base));
+        // 会话存储用同一个 Application context：SQLiteOpenHelper 会一直持有它
+        this.dbHandler = new DbHandler(base);
         this.workers = Executors.newCachedThreadPool(runnable -> {
             Thread thread = new Thread(runnable, "ds-http-" + threadCounter.incrementAndGet());
             thread.setDaemon(true);
@@ -261,6 +265,12 @@ public final class LocalServer {
                 return !keepAlive;
             }
             return proxyHandler.handle(headers, in, out, keepAlive);
+        }
+
+        // 会话存储接口（/__ds_db/*）同样必须排在静态资源判断之前，否则会被当成页面路径去 assets 里找。
+        // 这里要把 in 一起传进去：POST /session、/import 的 JSON 与 POST /file 的二进制都在请求体里
+        if (path.startsWith(DbHandler.PATH_PREFIX)) {
+            return dbHandler.handle(method, target, path, headers, in, out, keepAlive);
         }
 
         // 更新接口必须排在静态资源判断之前，否则会被当成页面路径去 assets 里找。

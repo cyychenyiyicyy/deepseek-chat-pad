@@ -153,7 +153,9 @@ const knownClasses = new Set([
   'HttpUtil',
   'WebBundle',
   'UpdateHandler',
-  'ApkUpdater'
+  'ApkUpdater',
+  'ChatDatabase',
+  'DbHandler'
 ])
 const javaProblems = []
 const stringCollisions = []
@@ -486,6 +488,206 @@ const featureChecks = [
 const featureProblems = featureChecks.filter(([, pass]) => !pass).map(([label]) => label)
 if (featureProblems.length === 0) ok('features', `${featureChecks.length} 项需求断言全部命中`)
 else fail('features', `未命中: ${featureProblems.join(', ')}`)
+
+// ---------------------------------------------------------------- 6. 原生 SQLite 存储（/__ds_db/*）
+//
+// 这一块是「会话存储从 IndexedDB 搬到原生 SQLite」的验收要点：
+// 表结构、事务与幂等写、10 条路由、挂载顺序、二进制回传、异常兜底，
+// 以及 Web 侧的探测/迁移/校验是否真的写了。契约见
+// work/2026-11-17-deepseek-tablet/native-sqlite-design.md。
+
+const WEB_CHAT_DIR = path.resolve(ROOT, '..', 'web', 'src', 'services', 'chat')
+function readWebChat(name) {
+  const file = path.join(WEB_CHAT_DIR, name)
+  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
+}
+const chatDatabase = readJava('ChatDatabase')
+const dbHandler = readJava('DbHandler')
+const chatDbTs = readWebChat('db.ts')
+const dbNativeTs = readWebChat('dbNative.ts')
+
+const dbChecks = []
+
+// 1. 四张表 + 消息索引 + 外键级联
+const sqliteTables = ['sessions', 'messages', 'files', 'meta']
+const missingTables = sqliteTables.filter(
+  (table) => !new RegExp(`CREATE TABLE IF NOT EXISTS ${table} \\(`).test(chatDatabase)
+)
+dbChecks.push([
+  '4 张表 sessions/messages/files/meta（含 messages 主键、索引、外键级联）',
+  missingTables.length === 0 &&
+    /PRIMARY KEY \(session_id, seq\)/.test(chatDatabase) &&
+    /CREATE INDEX IF NOT EXISTS idx_messages_session ON messages\(session_id, seq\)/.test(
+      chatDatabase
+    ) &&
+    /FOREIGN KEY \(session_id\) REFERENCES sessions\(id\) ON DELETE CASCADE/.test(chatDatabase),
+  `缺表: ${missingTables.join(', ')}；messages 结构不完整`
+])
+
+// 2. SQLiteOpenHelper / 库名 / 版本
+dbChecks.push([
+  'SQLiteOpenHelper + chat.db + 版本 1',
+  /extends SQLiteOpenHelper/.test(chatDatabase) &&
+    /static final String DB_NAME = "chat\.db"/.test(chatDatabase) &&
+    /static final int VERSION = 1/.test(chatDatabase),
+  '库名或版本不对'
+])
+
+// 3. 写操作在事务里 + 幂等（INSERT OR REPLACE + 先删旧消息行）
+dbChecks.push([
+  '写入全部在事务里，且按 id upsert 幂等',
+  (chatDatabase.match(/beginTransaction\(\)/g) || []).length >= 4 &&
+    (chatDatabase.match(/setTransactionSuccessful\(\)/g) || []).length >= 4 &&
+    (chatDatabase.match(/CONFLICT_REPLACE/g) || []).length >= 2 &&
+    /db\.delete\(TABLE_MESSAGES/.test(chatDatabase),
+  '事务或幂等写法缺失'
+])
+
+// 4. 契约要求的公开操作都在
+const chatDbApi = [
+  'JSONArray summaries(',
+  'JSONObject loadSession(',
+  'void saveSession(',
+  'boolean rename(',
+  'boolean delete(',
+  'void putFile(',
+  'byte[] getFile(',
+  'int importSessions(',
+  'JSONObject counts(',
+  'boolean isMigrated(',
+  'void markMigrated('
+]
+const missingApi = chatDbApi.filter((signature) => !chatDatabase.includes(signature))
+dbChecks.push([
+  'ChatDatabase 提供 summaries/loadSession/saveSession/rename/delete/putFile/getFile/importSession/counts/isMigrated/markMigrated',
+  missingApi.length === 0,
+  `缺: ${missingApi.join(', ')}`
+])
+
+// 5. 路由前缀 + 8 条路径
+const dbPaths = [
+  '/__ds_db/state',
+  '/__ds_db/summaries',
+  '/__ds_db/session',
+  '/__ds_db/rename',
+  '/__ds_db/delete',
+  '/__ds_db/file',
+  '/__ds_db/import',
+  '/__ds_db/reset'
+]
+const missingPaths = dbPaths.filter((route) => !dbHandler.includes(`"${route}"`))
+dbChecks.push([
+  '前缀 /__ds_db/ 与 8 条路径常量都在',
+  /static final String PATH_PREFIX = "\/__ds_db\/"/.test(dbHandler) && missingPaths.length === 0,
+  `缺: ${missingPaths.join(', ')}`
+])
+
+// 6. 10 条 method+path 路由各自接到数据操作上
+const dbRouteCalls = [
+  'stateJson(',
+  'summariesJson(',
+  'database.loadSession(',
+  'database.saveSession(',
+  'database.rename(',
+  'database.delete(',
+  'database.putFile(',
+  'database.getFile(',
+  'database.importSessions(',
+  'database.reset('
+]
+const missingRoutes = dbRouteCalls.filter((call) => !dbHandler.includes(call))
+dbChecks.push([
+  '10 条路由（含 session/file 的 GET+POST）都接到数据操作上',
+  missingRoutes.length === 0 && /requireReadOnly\(method\)/.test(dbHandler),
+  `缺: ${missingRoutes.join(', ')}`
+])
+
+// 7. 挂载顺序：/__ds_db/* 必须在静态资源之前，且把请求体流传进去
+dbChecks.push([
+  'DbHandler 挂在静态资源之前并传请求体',
+  localServer.includes('dbHandler.handle(') &&
+    /dbHandler\.handle\(method, target, path, headers, in, out, keepAlive\)/.test(localServer) &&
+    localServer.indexOf('dbHandler.handle(') < localServer.indexOf('assetHandler.handle('),
+  '挂载顺序或参数不对'
+])
+dbChecks.push([
+  'handle 签名带 InputStream 请求体',
+  /boolean handle\(String method, String target, String path, HttpUtil\.Headers headers,\s+InputStream in, OutputStream out, boolean keepAlive\)/.test(
+    dbHandler
+  ),
+  'handle 参数列表与契约不一致'
+])
+
+// 8. 附件走二进制：Content-Type octet-stream + Content-Length
+dbChecks.push([
+  'GET /file 回二进制（octet-stream + Content-Length）',
+  /application\/octet-stream/.test(dbHandler) &&
+    /Content-Length", String\.valueOf\(data\.length\)/.test(dbHandler),
+  '二进制响应头缺失'
+])
+
+// 9. 请求体上限 + 异常兜底成 JSON（不让异常把连接打死）
+dbChecks.push([
+  '请求体限 32MB（413）、异常转 {"ok":false} + 500',
+  /MAX_BODY_BYTES = 32 \* 1024 \* 1024/.test(dbHandler) &&
+    /new HttpError\(413/.test(dbHandler) &&
+    /HttpUtil\.sendJson\(out, 500/.test(dbHandler) &&
+    dbHandler.includes('\\"ok\\":false,\\"error\\"'),
+  '上限或异常兜底缺失'
+])
+
+// 10. Web 侧迁移：探测 → 分批 → 校验条数 → 才写标记
+dbChecks.push([
+  'dbNative 有 probe/migrate，分批导入并校验会话数与 3 个抽查会话的消息数',
+  /export const probe = async \(\): Promise<boolean>/.test(dbNativeTs) &&
+    /export const migrate = async \(source: MigrationSource\): Promise<boolean>/.test(
+      dbNativeTs
+    ) &&
+    /const SESSION_BATCH = 20/.test(dbNativeTs) &&
+    /const SAMPLE_SESSIONS = 3/.test(dbNativeTs) &&
+    /state\.sessions < total/.test(dbNativeTs) &&
+    /session\.messages\.length !== count/.test(dbNativeTs) &&
+    /MIGRATED_KEY = 'chat-demo:native-migrated'/.test(dbNativeTs),
+  '迁移实现不完整'
+])
+
+// 11. db.ts 对外 API 一个不少，暂存仍走 IndexedDB，commitStaging 额外写原生
+const dbExports = [
+  'loadSessionSummaries',
+  'loadSession',
+  'saveSession',
+  'renameSession',
+  'deleteSession',
+  'saveFiles',
+  'loadFile',
+  'clearStaging',
+  'addStagingSession',
+  'saveStagingFiles',
+  'updateStagingFileTypes',
+  'commitStaging',
+  'reportStorageError'
+]
+const missingExports = dbExports.filter(
+  (name) => !new RegExp(`export const ${name}\\b`).test(chatDbTs)
+)
+dbChecks.push([
+  'db.ts 仍导出全部 13 个函数（+ currentBackend），暂存走 IDB，commitStaging 同步原生',
+  missingExports.length === 0 &&
+    /export const currentBackend = \(\): StorageBackend \| 'pending' => backend/.test(chatDbTs) &&
+    /export const clearStaging = idbClearStaging/.test(chatDbTs) &&
+    /export const addStagingSession = idbAddStagingSession/.test(chatDbTs) &&
+    /export const saveStagingFiles = idbSaveStagingFiles/.test(chatDbTs) &&
+    /export const updateStagingFileTypes = idbUpdateStagingFileTypes/.test(chatDbTs) &&
+    /await dbNative\.probe\(\)/.test(chatDbTs) &&
+    /return dbNative\.migrate\(/.test(chatDbTs),
+  `缺: ${missingExports.join(', ')}`
+])
+
+const dbProblems = dbChecks
+  .filter(([, pass]) => !pass)
+  .map(([label, , detail]) => `${label}${detail ? `（${detail}）` : ''}`)
+if (dbProblems.length === 0) ok('sqlite.native', `${dbChecks.length} 项原生 SQLite 断言全部命中`)
+else fail('sqlite.native', `未命中: ${dbProblems.join('; ')}`)
 
 // ---------------------------------------------------------------- 汇总
 

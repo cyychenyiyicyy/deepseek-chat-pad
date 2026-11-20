@@ -1,5 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 import { toSessionSummary, type Session, type SessionSummary } from './types.js'
+import * as dbNative from './dbNative.js'
 
 /** IndexedDB 存储结构版本；新增或调整存储、索引时递增。 */
 const DB_VERSION = 11
@@ -75,13 +76,17 @@ const getDB = () =>
     throw error
   }))
 
-export const loadSessionSummaries = async (): Promise<SessionSummary[]> =>
+// ---------------------------------------------------------------- IndexedDB 实现
+// 下面这一组是换原生 SQLite 之前的原实现，逐字保留（重命名成 idb* 只为和原生实现区分）。
+// 页面在没有原生壳时走这里；原生迁移失败时也退回这里，行为与升级前完全一致。
+
+const idbLoadSessionSummaries = async (): Promise<SessionSummary[]> =>
   (await (await getDB()).getAll('sessionSummaries')).map(toSessionSummary)
 
-export const loadSession = async (id: string): Promise<Session | undefined> =>
+const idbLoadSession = async (id: string): Promise<Session | undefined> =>
   (await getDB()).get('sessions', id)
 
-export const saveSession = async (session: Session, files: StoredFile[] = []): Promise<void> => {
+const idbSaveSession = async (session: Session, files: StoredFile[] = []): Promise<void> => {
   const summary = storedSummary(session)
   const tx = (await getDB()).transaction(['sessions', 'sessionSummaries', 'files'], 'readwrite')
   await Promise.all([
@@ -102,7 +107,7 @@ export const saveSession = async (session: Session, files: StoredFile[] = []): P
 }
 
 /** 未打开的会话也可重命名，只读取该会话，原子更新详情和列表。 */
-export const renameSession = async (id: string, title: string): Promise<void> => {
+const idbRenameSession = async (id: string, title: string): Promise<void> => {
   const tx = (await getDB()).transaction(['sessions', 'sessionSummaries'], 'readwrite')
   await Promise.all([
     (async () => {
@@ -124,7 +129,7 @@ export const renameSession = async (id: string, title: string): Promise<void> =>
 }
 
 /** 删除会话，仅清理已无会话引用的本地原件；远端文件不删。 */
-export const deleteSession = async (sessionId: string): Promise<void> => {
+const idbDeleteSession = async (sessionId: string): Promise<void> => {
   const tx = (await getDB()).transaction(['sessions', 'sessionSummaries', 'files'], 'readwrite')
   await Promise.all([
     (async () => {
@@ -147,18 +152,18 @@ export const deleteSession = async (sessionId: string): Promise<void> => {
   ])
 }
 
-const putFiles = async (store: 'files' | 'filesStaging', files: StoredFile[]) => {
+const idbPutFiles = async (store: 'files' | 'filesStaging', files: StoredFile[]) => {
   const tx = (await getDB()).transaction(store, 'readwrite')
   await Promise.all([...files.map((file) => tx.store.put(file)), tx.done])
 }
 
-export const saveFiles = (files: StoredFile[]): Promise<void> => putFiles('files', files)
+const idbSaveFiles = (files: StoredFile[]): Promise<void> => idbPutFiles('files', files)
 
-export const loadFile = async (id: string): Promise<Blob | undefined> =>
+const idbLoadFile = async (id: string): Promise<Blob | undefined> =>
   (await (await getDB()).get('files', id))?.blob
 
 /** 清空导入暂存：开始导入前清除上次中断（如关闭页面）遗留的数据，导入失败后清除本次写入。 */
-export const clearStaging = async (): Promise<void> => {
+const idbClearStaging = async (): Promise<void> => {
   const tx = (await getDB()).transaction(['sessionsStaging', 'filesStaging'], 'readwrite')
   await Promise.all([
     tx.objectStore('sessionsStaging').clear(),
@@ -167,15 +172,17 @@ export const clearStaging = async (): Promise<void> => {
   ])
 }
 
-export const addStagingSession = async (session: Session): Promise<void> => {
+const idbAddStagingSession = async (session: Session): Promise<void> => {
   await (await getDB()).add('sessionsStaging', session)
 }
 
-export const saveStagingFiles = (files: StoredFile[]): Promise<void> =>
-  putFiles('filesStaging', files)
+const idbSaveStagingFiles = (files: StoredFile[]): Promise<void> =>
+  idbPutFiles('filesStaging', files)
 
 /** 图片位于会话 JSON 之后；全部读完后回填具体 MIME，保留归档给出的 isImage 标识。 */
-export const updateStagingFileTypes = async (types: ReadonlyMap<string, string>): Promise<void> => {
+const idbUpdateStagingFileTypes = async (
+  types: ReadonlyMap<string, string>
+): Promise<void> => {
   const tx = (await getDB()).transaction('sessionsStaging', 'readwrite')
   await Promise.all([
     (async () => {
@@ -207,7 +214,7 @@ export const updateStagingFileTypes = async (types: ReadonlyMap<string, string>)
  * 导入完成后用暂存替换正式数据：同一事务中替换会话、摘要和原件，并清空暂存。
  * 逐条游标复制，同一时间只读取一条记录；事务失败时整体回滚，正式数据不变。
  */
-export const commitStaging = async (): Promise<SessionSummary[]> => {
+const idbCommitStaging = async (): Promise<SessionSummary[]> => {
   const summaries: SessionSummary[] = []
   const tx = (await getDB()).transaction(
     ['sessions', 'sessionSummaries', 'files', 'sessionsStaging', 'filesStaging'],
@@ -242,6 +249,172 @@ export const commitStaging = async (): Promise<SessionSummary[]> => {
   await Promise.all([move('sessionsStaging', 'sessions'), move('filesStaging', 'files'), tx.done])
   // 直接返回本次提交的列表，调用方无需在替换成功后再发起可能失败的读取。
   return summaries
+}
+
+// ---------------------------------------------------------------- 后端选择
+//
+// 原生 SQLite 可用就用它，否则用 IndexedDB。选择只做一次，结果缓存；
+// **不在模块顶层 await** —— 那样会阻塞首屏，第一次真正读写时才决出后端。
+
+/** 回滚开关：`localStorage['chat-demo:native-store'] = 'off'` 强制走 IndexedDB */
+const NATIVE_SWITCH_KEY = 'chat-demo:native-store'
+
+export type StorageBackend = 'native' | 'indexeddb'
+
+/** 两种实现共用的接口，对外导出的一律是这一层转发 */
+type DbImpl = {
+  loadSessionSummaries: () => Promise<SessionSummary[]>
+  loadSession: (id: string) => Promise<Session | undefined>
+  saveSession: (session: Session, files?: StoredFile[]) => Promise<void>
+  renameSession: (id: string, title: string) => Promise<void>
+  deleteSession: (sessionId: string) => Promise<void>
+  saveFiles: (files: StoredFile[]) => Promise<void>
+  loadFile: (id: string) => Promise<Blob | undefined>
+}
+
+const indexedDbImpl: DbImpl = {
+  loadSessionSummaries: idbLoadSessionSummaries,
+  loadSession: idbLoadSession,
+  saveSession: idbSaveSession,
+  renameSession: idbRenameSession,
+  deleteSession: idbDeleteSession,
+  saveFiles: idbSaveFiles,
+  loadFile: idbLoadFile,
+}
+
+const nativeImpl: DbImpl = {
+  loadSessionSummaries: dbNative.loadSessionSummaries,
+  loadSession: dbNative.loadSession,
+  saveSession: dbNative.saveSession,
+  renameSession: dbNative.renameSession,
+  deleteSession: dbNative.deleteSession,
+  saveFiles: dbNative.saveFiles,
+  loadFile: dbNative.loadFile,
+}
+
+let implPromise: Promise<DbImpl> | null = null
+let backend: StorageBackend | 'pending' = 'pending'
+
+const getImpl = (): Promise<DbImpl> => (implPromise ??= pickImpl())
+
+const pickImpl = async (): Promise<DbImpl> => {
+  const native = await useNative()
+  backend = native ? 'native' : 'indexeddb'
+  return native ? nativeImpl : indexedDbImpl
+}
+
+const readSwitch = (): string | null => {
+  try {
+    return window.localStorage.getItem(NATIVE_SWITCH_KEY)
+  } catch {
+    // 读不到 localStorage（隐私模式）时按默认走，不影响功能
+    return null
+  }
+}
+
+/**
+ * 探测 + 迁移：任一步不成立都退回 IndexedDB。
+ * 迁移失败不标记、不抛给界面，下次启动重试；IndexedDB 的数据始终原地保留。
+ */
+const useNative = async (): Promise<boolean> => {
+  if (!(await dbNative.probe())) {
+    return false
+  }
+  if (readSwitch() === 'off') {
+    return false
+  }
+  return dbNative.migrate({
+    summaries: idbLoadSessionSummaries,
+    loadSession: idbLoadSession,
+    loadFile: idbLoadFile,
+  })
+}
+
+/** 当前存储后端；第一次读写之前返回 pending（设置页据此显示「检测中」）。 */
+export const currentBackend = (): StorageBackend | 'pending' => backend
+
+// ---------------------------------------------------------------- 对外接口（签名与行为不变）
+
+export const loadSessionSummaries = async (): Promise<SessionSummary[]> =>
+  (await getImpl()).loadSessionSummaries()
+
+export const loadSession = async (id: string): Promise<Session | undefined> =>
+  (await getImpl()).loadSession(id)
+
+export const saveSession = async (session: Session, files: StoredFile[] = []): Promise<void> =>
+  (await getImpl()).saveSession(session, files)
+
+export const renameSession = async (id: string, title: string): Promise<void> =>
+  (await getImpl()).renameSession(id, title)
+
+export const deleteSession = async (sessionId: string): Promise<void> =>
+  (await getImpl()).deleteSession(sessionId)
+
+export const saveFiles = async (files: StoredFile[]): Promise<void> =>
+  (await getImpl()).saveFiles(files)
+
+export const loadFile = async (id: string): Promise<Blob | undefined> =>
+  (await getImpl()).loadFile(id)
+
+// 导入暂存是瞬态数据，搬去原生收益为零、风险很高：这四个入口永远走 IndexedDB。
+
+export const clearStaging = idbClearStaging
+
+export const addStagingSession = idbAddStagingSession
+
+export const saveStagingFiles = idbSaveStagingFiles
+
+export const updateStagingFileTypes = idbUpdateStagingFileTypes
+
+/**
+ * 导入完成后用暂存替换正式数据：IndexedDB 的事务是权威结果，成功后再同步到原生。
+ *
+ * 原生同步失败只留痕：返回值与 IndexedDB 的内容才是用户可见的结果，
+ * 不能因为原生库写不进去就让界面报「导入失败」。
+ */
+export const commitStaging = async (): Promise<SessionSummary[]> => {
+  const summaries = await idbCommitStaging()
+  await syncNative(summaries)
+  return summaries
+}
+
+/**
+ * 把「整体替换」的结果同步到原生库。
+ *
+ * 除了逐条写入，还要删掉原生侧本次没有保留下来的会话：导入/清空历史是整体替换语义，
+ * 少删这一步，「删除全部会话」之后原生库里的旧会话会在下次启动重新冒出来。
+ *
+ * 只在后端已经确定是原生时才同步：这里**不主动触发探测/迁移**，
+ * 免得在一个导入事务中间又跑一遍迁移（迁移由第一次读写负责，正常早就完成了）。
+ */
+const syncNative = async (summaries: SessionSummary[]): Promise<void> => {
+  if (backend !== 'native') {
+    return
+  }
+  try {
+    const keep = new Set(summaries.map((summary) => summary.id))
+    for (const existing of await dbNative.loadSessionSummaries()) {
+      if (!keep.has(existing.id)) {
+        await dbNative.deleteSession(existing.id)
+      }
+    }
+    for (const summary of summaries) {
+      const session = await idbLoadSession(summary.id)
+      if (!session) {
+        continue
+      }
+      const files: StoredFile[] = []
+      for (const id of storedSummary(session).fileIds) {
+        const blob = await idbLoadFile(id)
+        if (blob) {
+          files.push({ id, blob })
+        }
+      }
+      await dbNative.saveSession(session, files)
+    }
+  } catch (error) {
+    reportStorageError('sync native store')(error)
+  }
 }
 
 /** 本地存储失败不打断对话，只在控制台留痕 */

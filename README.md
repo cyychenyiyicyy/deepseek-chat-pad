@@ -126,6 +126,11 @@ node tools/build-catalog.mjs
 - 长会话渐进式加载（首屏 24 条，按需补 40 条，保位置不跳）
 - 修 `apkRequired` 恒为 true（`version.properties` 被算作原生改动）
 
+## v1.7.3 变更
+
+- Tavily 网络层失败重试一次；错误提示是可读的一句话（`upstream_failed` 是本地代理的错误码）
+- 会话列表分页（首屏 60 + 显示更多）；长会话渐进加载（24 + 40）
+
 ## 已知限制
 
 - 联网搜索 / 文件上传 / URL 阅读由 DeepSeek 的服务端能力提供，自定义模型下走客户端代取；

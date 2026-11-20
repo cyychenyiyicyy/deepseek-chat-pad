@@ -1,8 +1,8 @@
 {
-  "generatedAt": "2026-11-20T12:57:45.620Z",
+  "generatedAt": "2026-11-20T14:19:05.353Z",
   "root": "C:\\Users\\Administrator\\Desktop\\harness workspace\\projects\\deepseek-tablet\\android",
   "summary": {
-    "pass": 7,
+    "pass": 8,
     "fail": 0,
     "info": 0
   },
@@ -10,7 +10,7 @@
     {
       "level": "PASS",
       "name": "java.structure",
-      "detail": "8 个 Java 文件括号/字面量全部配平"
+      "detail": "10 个 Java 文件括号/字面量全部配平"
     },
     {
       "level": "PASS",
@@ -41,6 +41,11 @@
       "level": "PASS",
       "name": "features",
       "detail": "49 项需求断言全部命中"
+    },
+    {
+      "level": "PASS",
+      "name": "sqlite.native",
+      "detail": "12 项原生 SQLite 断言全部命中"
     }
   ]
 }
