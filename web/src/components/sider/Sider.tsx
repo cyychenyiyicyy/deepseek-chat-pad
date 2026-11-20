@@ -4,6 +4,7 @@ import { useTranslate } from '../../i18n/index.js'
 import { IconPanelLeftOutline16, IconSearchOutline16, IconSettingsOutline16, NewChatIcon } from '../base/icons.js'
 import { setSiderCollapsed } from '../../services/settings.js'
 import { groupSessions } from '../../services/chat/sessionGroups.js'
+import { forgetPin, togglePin, usePins } from '../../services/chat/pins.js'
 import { newChat, removeSession, useChatStore } from '../../services/chat/store.js'
 import type { SessionSummary } from '../../services/chat/types.js'
 import { Button } from '../base/Button.js'
@@ -33,8 +34,10 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
 
   const [deletePending, setDeletePending] = useState(false)
 
+  const pinnedIds = usePins((state) => state.ids)
   const groups = useMemo(() => {
-    const all = groupSessions(sessions, now, t)
+    const pinned = new Set(pinnedIds)
+    const all = groupSessions(sessions, now, t, (id) => pinned.has(id))
     const query = keyword.trim().toLowerCase()
     if (!query) return all
     return all
@@ -43,7 +46,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
         sessions: group.sessions.filter((session) => (session.title || '').toLowerCase().includes(query)),
       }))
       .filter((group) => group.sessions.length > 0)
-  }, [sessions, now, t, keyword])
+  }, [sessions, now, t, keyword, pinnedIds])
 
   /** 按 limit 铺开所有分组，剩下的留给「显示更多」 */
   const totalSessions = groups.reduce((count, group) => count + group.sessions.length, 0)
@@ -133,6 +136,8 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
                   key={session.id}
                   session={session}
                   active={session.id === activeId}
+                  pinned={pinnedIds.includes(session.id)}
+                  onTogglePin={() => togglePin(session.id)}
                   onDelete={() => setDeleting(session)}
                 />
               ))}
@@ -186,6 +191,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
                   setDeletePending(true)
                   try {
                     if (await removeSession(deleting.id)) {
+                      forgetPin(deleting.id)
                       setDeleting(null)
                     } else {
                       showToast({ key: 'sessionDeleteFailed', type: 'error' })
