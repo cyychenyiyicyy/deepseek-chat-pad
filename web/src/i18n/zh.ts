@@ -223,6 +223,7 @@ export const zh = {
   balanceInsufficient: '余额不足',
   balanceRefresh: '刷新余额',
   siderSearchPlaceholder: '搜索对话内容',
+  siderLoadMore: '显示更多（还有 {count} 条）',
   siderPinned: '置顶',
   siderModelEntry: '模型',
   stopReadingAloud: '停止朗读',

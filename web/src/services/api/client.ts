@@ -27,6 +27,18 @@ const isErrorBody = (value: unknown): value is ApiErrorBody =>
   'error' in value &&
   typeof (value as ApiErrorBody).error?.message === 'string'
 
+/**
+ * 本地壳的错误体是 {error: "upstream_failed", message: "连不上..."}，
+ * 与厂商的 {error:{message}} 不同。这里两种都认，优先拿可读的那句话。
+ */
+const readLocalError = (value: unknown): string | null => {
+  if (typeof value !== 'object' || value === null) return null
+  const record = value as { message?: unknown; error?: unknown }
+  if (typeof record.message === 'string' && record.message.trim()) return record.message
+  if (typeof record.error === 'string' && record.error.trim()) return record.error
+  return null
+}
+
 const readErrorResponse = async (
   response: Response,
   kind: 'http' | 'protocol' = 'http',
@@ -38,6 +50,10 @@ const readErrorResponse = async (
     const body: unknown = JSON.parse(text)
     if (isErrorBody(body)) {
       message = body.error.message
+    } else {
+      // 本地代理的错误：把可读的那句话拿出来，而不是甩一坨 JSON
+      const local = readLocalError(body)
+      if (local) message = local
     }
   } catch {
     // 非 JSON 响应体直接展示原文

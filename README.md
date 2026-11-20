@@ -120,6 +120,12 @@ node tools/build-catalog.mjs
 - **第三方多模态模型支持图片**：图片转 data URL 直发，不再要求 DeepSeek 模型
 - **Tavily 搜索渠道**：设置里可切换 DeepSeek / Tavily
 
+## v1.7.1 / v1.7.2
+
+- Tavily 搜索失败不再中断对话，真实原因写进上下文；鉴权同时带 Bearer 头
+- 长会话渐进式加载（首屏 24 条，按需补 40 条，保位置不跳）
+- 修 `apkRequired` 恒为 true（`version.properties` 被算作原生改动）
+
 ## 已知限制
 
 - 联网搜索 / 文件上传 / URL 阅读由 DeepSeek 的服务端能力提供，自定义模型下走客户端代取；

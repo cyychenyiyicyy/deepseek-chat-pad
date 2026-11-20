@@ -27,10 +27,11 @@ const hostOf = (url: string): string | null => {
   }
 }
 
-export const tavilySearch = async (
+/** 连不上时重试一次：代理规则偶发抽风很常见，重试往往就过了 */
+const requestSearch = async (
   apiKey: string,
   query: string,
-  options: { maxResults?: number; signal?: AbortSignal } = {}
+  options: { maxResults?: number; signal?: AbortSignal }
 ): Promise<SearchResult[]> => {
   const res = await apiFetch(TAVILY_ENDPOINT, {
     method: 'POST',
@@ -86,4 +87,31 @@ export const tavilySearch = async (
         rerank_score: item.score ?? 0,
       }
     })
+}
+
+/**
+ * 对外入口：网络层失败（本地代理返回的 upstream_failed / 连接被拒）重试一次。
+ * 仍然失败时给出能直接照做的提示，而不是一句 upstream_failed。
+ */
+export const tavilySearch = async (
+  apiKey: string,
+  query: string,
+  options: { maxResults?: number; signal?: AbortSignal } = {}
+): Promise<SearchResult[]> => {
+  try {
+    return await requestSearch(apiKey, query, options)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    const networkLike = /upstream_failed|连接|network|timeout|failed to connect|Unable to resolve/i.test(message)
+    if (!networkLike || options.signal?.aborted) {
+      throw error
+    }
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    try {
+      return await requestSearch(apiKey, query, options)
+    } catch (retryError) {
+      const detail = retryError instanceof Error ? retryError.message : String(retryError)
+      throw new Error(`连不上 api.tavily.com（${detail}）。如果开了代理，确认代理规则允许该域名；也可以先关掉代理再试。`)
+    }
+  }
 }

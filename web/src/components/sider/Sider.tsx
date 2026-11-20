@@ -19,13 +19,18 @@ import styles from './Sider.module.css'
  * 展开的侧边栏：搜索框、新建对话、按时间分组的会话列表、底部模型与设置入口。
  * 移动端放在抽屉里，收起按钮关闭抽屉。
  */
+/** 一屏先渲染这么多，其余点「显示更多」再补 —— 会话几百条时首屏才不卡 */
+const LIST_PAGE = 60
+
 export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   const t = useTranslate()
   const sessions = useChatStore((state) => state.sessions)
   const activeId = useChatStore((state) => state.activeId)
   const [now, setNow] = useState(Date.now)
   const [keyword, setKeyword] = useState('')
+  const [limit, setLimit] = useState(LIST_PAGE)
   const [deleting, setDeleting] = useState<SessionSummary | null>(null)
+
   const [deletePending, setDeletePending] = useState(false)
 
   const groups = useMemo(() => {
@@ -39,6 +44,21 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
       }))
       .filter((group) => group.sessions.length > 0)
   }, [sessions, now, t, keyword])
+
+  /** 按 limit 铺开所有分组，剩下的留给「显示更多」 */
+  const totalSessions = groups.reduce((count, group) => count + group.sessions.length, 0)
+  let budget = limit
+  const visibleGroups = groups
+    .map((group) => {
+      const take = Math.min(budget, group.sessions.length)
+      budget -= take
+      return { ...group, sessions: group.sessions.slice(0, take) }
+    })
+    .filter((group) => group.sessions.length > 0)
+  const hiddenCount = Math.max(0, totalSessions - Math.min(limit, totalSessions))
+
+  // 搜索词变了就回到第一页
+  useEffect(() => setLimit(LIST_PAGE), [keyword])
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>
@@ -105,7 +125,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
 
       <div className={styles.listWrap}>
         <div className={styles.list}>
-          {groups.map((group) => (
+          {visibleGroups.map((group) => (
             <div key={group.key} className={styles.section}>
               <div className={styles.sectionHeader}>{group.label}</div>
               {group.sessions.map((session) => (
@@ -118,6 +138,15 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
               ))}
             </div>
           ))}
+          {hiddenCount > 0 ? (
+            <button
+              type="button"
+              className={styles.loadMore}
+              onClick={() => setLimit((value) => value + LIST_PAGE)}
+            >
+              {t('siderLoadMore', { count: hiddenCount })}
+            </button>
+          ) : null}
         </div>
       </div>
 

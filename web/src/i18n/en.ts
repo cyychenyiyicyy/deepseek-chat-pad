@@ -233,6 +233,7 @@ export const en = {
   balanceInsufficient: 'Insufficient balance',
   balanceRefresh: 'Refresh balance',
   siderSearchPlaceholder: 'Search chats',
+  siderLoadMore: 'Show more ({count} left)',
   siderPinned: 'Pinned',
   siderModelEntry: 'Models',
   stopReadingAloud: 'Stop reading',

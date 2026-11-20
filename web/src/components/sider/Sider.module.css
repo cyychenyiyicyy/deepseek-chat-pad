@@ -386,3 +386,22 @@
     transition-duration: 1ms;
   }
 }
+
+/* 侧栏「显示更多」 */
+.loadMore {
+  display: block;
+  width: 100%;
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-specific-sidebar-nav-item-hover);
+  }
+}
