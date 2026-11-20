@@ -102,7 +102,12 @@ final class WebBundle {
         String installed = readVersion(new File(webRoot, VERSION_FILE));
         if (installed != null && compareVersion(installed, BuildConfig.VERSION_NAME) < 0) {
             Log.i(TAG, "丢弃比 APK 旧的网页包：" + installed + " < " + BuildConfig.VERSION_NAME);
-            deleteRecursively(webRoot);
+            try {
+                deleteRecursively(webRoot);
+            } catch (IOException ignored) {
+                // 删不掉也不能影响启动：下面照样回退内置资源
+                Log.w(TAG, "旧网页包删除失败", ignored);
+            }
             clearVersion();
             return null;
         }
