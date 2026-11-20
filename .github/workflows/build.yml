@@ -179,7 +179,8 @@ jobs:
             echo "首个版本，需要 APK"
             exit 0
           fi
-          if git diff --quiet "$prev" HEAD -- android/; then
+          # 版本号文件每次发版都会变，不能算作「原生改动」
+          if git diff --quiet "$prev" HEAD -- android/ ':(exclude)android/version.properties'; then
             echo "required=false" >> "$GITHUB_OUTPUT"
             echo "自 $prev 起 android/ 没有变化，本次只需要更新网页包"
           else
