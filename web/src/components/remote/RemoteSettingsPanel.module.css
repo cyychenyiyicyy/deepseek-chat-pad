@@ -213,6 +213,13 @@
   overflow-wrap: anywhere;
 }
 
+/* 倒计时：贴在「已用系统浏览器打开…」后面，用等宽数字，秒数跳动时不抖 */
+.waitingCountdown {
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-primary);
+}
+
 /* ── 二维码：左图右文，窄屏自动改成上下 ─────────────────────────────── */
 .qrBlock {
   display: flex;

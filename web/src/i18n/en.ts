@@ -346,8 +346,11 @@ export const en = {
   remoteLoginWith: 'Sign in with {provider}',
   remoteLoginStarting: 'Starting sign-in…',
   remoteLoginProviderHint:
-    'Opens the authorization page in the system browser or in-app; no password needed on this device',
-  remoteLoginPageOpened: 'Login page opened — you connect automatically once you authorize',
+    'Opens the authorization page in your system browser — no password needed on this device',
+  remoteLoginPageOpened: 'Opened in the system browser — you connect automatically once you authorize',
+  remoteLoginWaitingAuth: 'Waiting for authorization… ({time} left)',
+  remoteLoginResumeHint:
+    'Even if the system closes the app, coming back resumes this sign-in — no need to start over',
   remoteLoginQr: 'Sign in with QR code',
   remoteLoginQrHint: 'Scan with a phone that is already signed in',
   remoteLoginQrRemaining: '{time} left',
@@ -366,6 +369,7 @@ export const en = {
   remoteCapabilitiesEmpty: 'not advertised',
   remotePhaseIdle: 'Not connected',
   remotePhaseAuthing: 'Signing in…',
+  remotePhaseWaitingAuth: 'Waiting for authorization…',
   remotePhaseConnecting: 'Opening secure channel…',
   remotePhaseReady: 'Connected',
   remotePhaseError: 'Connection failed',

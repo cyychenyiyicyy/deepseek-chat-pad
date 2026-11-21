@@ -20,9 +20,13 @@ import styles from './RemoteSettingsPanel.module.css'
  *     或桥是旧 APK 时，整排第三方入口禁用并给出原因 —— 邮箱密码不受影响。
  *     注意 `probeAuthBridge()` 返回的是 `'ready' | 'missing' | 'outdated'`（不是布尔），
  *     `missing` = 不在壳里，`outdated` = 在壳里但 APK 太旧。
- *   - **轮询在 UI 侧排**：`startProviderLogin()` 只负责建会话（browser 模式顺带打开授权页），
- *     之后由本组件的 2s 定时器调 `pollProviderLogin()`；启动路径上**不等结果、不轮询**，
- *     否则一次失败的登录会把设置弹窗卡住十几秒。
+ *   - **授权页在系统浏览器里**（K2）：主按钮点下去会把授权页交给系统浏览器，所以用户
+ *     「切走 → 回后台 → 进程可能被杀」。因此这里只做三件事：
+ *       ① 挂载时调一次 `resumeLogin()`（续上被杀进程前的那次登录）；
+ *       ② `visibilitychange → visible` 时再调一次，并**立刻补一拍**轮询
+ *          （后台的 `setTimeout` 会被系统节流，2s 定时器可能整段停摆）；
+ *       ③ 有 `pendingLogin` 就显示「等待授权…（剩余 mm:ss）」+ 取消。
+ *     判断「授权成功」只看轮询结果，**绝不**看 `authPageState().open`（external 下恒 false）。
  *   - 状态区把 `phase / transport / capabilities` 与**错误原文**（`code: message`）都摊开，
  *     远程链路的失败原因没法靠一句「连接失败」定位。
  */
@@ -74,6 +78,8 @@ export const RemoteSettingsPanel = () => {
   const error = useRemoteStore((state) => state.error)
   const providers = useRemoteStore((state) => state.oauthProviders)
   const qr = useRemoteStore((state) => state.qr)
+  /** 待完成登录（可能是**上个进程**留下的：`resumeLogin()` 会把它从 localStorage 恢复出来） */
+  const pendingLogin = useRemoteStore((state) => state.pendingLogin)
   const { availability, retry } = useRemoteAvailability()
   // 预填上次用过的服务器与邮箱（storage 里已有的那份），没有就用默认值
   const [server, setServer] = useState(() => loadServers()[0]?.url ?? DEFAULT_SERVER)
@@ -92,7 +98,7 @@ export const RemoteSettingsPanel = () => {
   const serverRef = useRef(server)
   serverRef.current = server
 
-  const busy = phase === 'authing' || phase === 'connecting' || starting !== null
+  const busy = phase === 'authing' || phase === 'connecting' || phase === 'waiting-auth' || starting !== null
   const connected = phase === 'ready'
   const blocked = availability !== 'ready'
   const bridgeProbing = bridge === 'probing'
@@ -134,7 +140,8 @@ export const RemoteSettingsPanel = () => {
    * 停止条件全由状态驱动，不需要额外的取消标志：
    *   - `complete` / `expired` / `cancelled` / `error` → `status` 不再是 pending；
    *   - 连上之后 `phase === 'ready'`，`qr` 早就是 complete；
-   *   - 组件卸载（用户关掉设置弹窗）→ cleanup 里 clearInterval，绝不留后台定时器。 */
+   *   - 组件卸载（用户关掉设置弹窗）→ cleanup 里 clearInterval，绝不留后台定时器。
+   * 恢复流程（`resumeLogin()`）在跑的时候数据层会自己让路（只允许一个轮询在飞）。 */
   const qrPending = qr !== null && qr.status === 'pending'
   useEffect(() => {
     if (!qrPending) { return undefined }
@@ -144,17 +151,38 @@ export const RemoteSettingsPanel = () => {
     return () => clearInterval(timer)
   }, [qrPending])
 
-  /* ── 4. 二维码倒计时：只在「有一个在等的会话」时每秒推一次
-   *     `complete` / `expired` / `cancelled` 之后倒计时就没有意义了（也不会再画二维码），
-   *     定时器必须一起停掉：否则设置弹窗开着的时候会每秒白白重渲染一次。 ── */
+  /* ── 3b. 会话恢复（K2）+ 回前台补拍 ──────────────────────────────────
+   * 用户授权时要切到系统浏览器，App 进后台，进程随时可能被系统杀掉。所以：
+   *   ① 挂载就调一次 `resumeLogin()`：若是被杀进程前发起的那次登录，这里直接续上
+   *      （`dsp.remote.pending-login.v1` 里有 qrId，服务端会话跟进程无关）；
+   *   ② `visibilitychange → visible`（用户从浏览器切回来）调 `onAppForeground()`：
+   *      续登录 + **立刻补一拍**轮询（后台的 setTimeout 会被系统节流，别等 2s 定时器）
+   *      + 保活服务自检（系统可能在后台把它杀掉）。
+   * 两条路径都是幂等的（数据层单飞），重复触发不会多发请求。 */
+  useEffect(() => {
+    fireAndForget(() => useRemoteStore.getState().resumeLogin())
+    if (typeof document === 'undefined') { return undefined }
+    const onVisible = (): void => {
+      if (document.visibilityState !== 'visible') { return }
+      fireAndForget(() => useRemoteStore.getState().onAppForeground())
+      setNow(Date.now())
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [])
+
+  /* ── 4. 倒计时：`complete` / `expired` / `cancelled` 之后就没有意义了
+   *     `pendingLogin` 也算在内 —— 它可能来自上个进程，倒计时必须跟着走。 ── */
   const qrId = qr?.qrId ?? null
   const qrTicking = qr !== null && qr.status === 'pending'
+  const pendingExpiresAt = pendingLogin?.expiresAt ?? null
+  const ticking = qrTicking || pendingExpiresAt !== null
   useEffect(() => {
-    if (qrId === null || !qrTicking) { return undefined }
+    if (!ticking) { return undefined }
     setNow(Date.now())
     const timer = setInterval(() => setNow(Date.now()), COUNTDOWN_INTERVAL_MS)
     return () => clearInterval(timer)
-  }, [qrId, qrTicking])
+  }, [ticking, qrId, pendingExpiresAt])
 
   /* ── 5. 二维码图片：只在 `mode === 'qr'` 时生成，渲染失败不炸整块面板 ── */
   const qrMode = qr?.mode ?? null
@@ -216,9 +244,17 @@ export const RemoteSettingsPanel = () => {
 
   /* ── 活动登录会话的展示 ─────────────────────────────────────────────── */
 
-  // 浏览器授权：只在 pending 时提示「已打开登录页…」，授权成功自动切到连接态
-  const browsing = qr !== null && qr.mode === 'browser' && qr.status === 'pending'
-  // 扫码：`qr.mode === 'qr'` 才画二维码（浏览器模式的 scanUrl 已经交给原生容器了）
+  /* 浏览器授权（系统浏览器）：
+   *   - 首选 `pendingLogin`：它可能来自**上个进程**（用户授权时 App 被杀，回来就靠它续上）；
+   *   - 退路是 `qr`：同一进程内刚发起、`pendingLogin` 还没来得及写（例如 localStorage 不可用）。
+   * 判断「授权成功」只看轮询结果 —— `external` 模式下 `authPageState().open` 恒为 false，
+   * 拿它当取消信号会在打开浏览器的瞬间误判。 */
+  const loginMode = pendingLogin?.mode ?? (qr?.status === 'pending' ? qr.mode : null)
+  const waitingExpiresAt = pendingLogin?.expiresAt ?? (qr?.status === 'pending' ? qr.expiresAt : null)
+  const waitingSeconds = waitingExpiresAt === null ? 0 : Math.max(0, Math.ceil((waitingExpiresAt - now) / MILLIS_PER_SECOND))
+  const waitingAuth = !connected && loginMode === 'browser' && waitingExpiresAt !== null && now < waitingExpiresAt
+  const waitingProvider = pendingLogin?.providerId ?? qr?.providerId ?? null
+  // 扫码：`qr.mode === 'qr'` 才画二维码（浏览器模式的 scanUrl 已经交给系统浏览器了）
   const scanning = qr !== null && qr.mode === 'qr' && qr.status !== 'complete' && qr.status !== 'cancelled'
   const expiredByClock = qr !== null && now >= qr.expiresAt
   const qrExpired = qr !== null && (qr.status === 'expired' || (qr.status === 'pending' && expiredByClock))
@@ -383,18 +419,22 @@ export const RemoteSettingsPanel = () => {
         </div>
       )}
 
-      {/* ── 浏览器授权等待中：文案 + 取消（授权页在原生容器里，这边只等轮询） ── */}
-      {browsing ? (
+      {/* ── 浏览器授权等待中：已交给系统浏览器，这边只等轮询（可以随时取消） ── */}
+      {waitingAuth ? (
         <div className={styles.waiting} role="status">
           <span className={styles.waitingText}>
             {t('remoteLoginPageOpened')}
-            {qr === null ? '' : ` · ${providerName(qr.providerId)}`}
+            <span className={styles.waitingCountdown}>
+              {t('remoteLoginWaitingAuth', { time: formatCountdown(waitingSeconds) })}
+            </span>
+            {waitingProvider === null ? '' : ` · ${providerName(waitingProvider)}`}
           </span>
           <Button variant="outlined" size="s" onClick={cancelLogin}>
             {t('remoteLoginCancel')}
           </Button>
         </div>
       ) : null}
+      {waitingAuth ? <div className={styles.description}>{t('remoteLoginResumeHint')}</div> : null}
 
       {/* ── 扫码：二维码只在 `qr.mode === 'qr'` 时出现 ── */}
       {scanning && qr !== null ? (
@@ -510,6 +550,7 @@ const StatusChip = ({
 /** `phase` → 文案 key；未知取值按「未连接」处理（不猜状态） */
 const phaseLabel = (phase: string): TranslationKey => {
   if (phase === 'authing') return 'remotePhaseAuthing'
+  if (phase === 'waiting-auth') return 'remotePhaseWaitingAuth'
   if (phase === 'connecting') return 'remotePhaseConnecting'
   if (phase === 'ready') return 'remotePhaseReady'
   if (phase === 'error') return 'remotePhaseError'

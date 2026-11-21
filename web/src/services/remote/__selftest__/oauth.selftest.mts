@@ -391,12 +391,14 @@ check('accountMe：Bearer 账号 token，返回账号名', async () => {
 check('startProviderLogin(browser)：建会话 → 原生 /__ds_auth/open {url,serverUrl,mode}', async () => {
   const mock = createMock({
     handler: happyHandler([]),
-    native: () => ({ body: { ok: true, open: true, mode: 'inline', id: 1, url: SCAN_URL } }),
+    // K2 起默认交给系统浏览器：原生回 `{ok:true, open:false, launched:true}`，open:false 不是失败
+    native: () => ({ body: { ok: true, open: false, mode: 'external', launched: true, id: 1, url: SCAN_URL } }),
   })
   const session = await startProviderLogin(BASE, ZHIHU, 'browser', { deps: mock.deps, title: '知乎登录' })
   assertEqual(session.mode, 'browser', 'mode')
   assertEqual(session.qrId, QR_ID, 'qrId')
   assertEqual(session.scanUrl, SCAN_URL, 'scanUrl')
+  assertEqual(session.notice, undefined, 'open:false 不该触发降级提示')
   assertTrue(session.expiresAt > Date.now() + 500_000, 'expiresAt 按秒换算成毫秒')
 
   const open = mock.nativeCalls.filter((call) => call.path === NATIVE_AUTH_OPEN_PATH)
@@ -405,7 +407,7 @@ check('startProviderLogin(browser)：建会话 → 原生 /__ds_auth/open {url,s
   // 原生态：url + serverUrl（同源闸门）+ title + mode；缺 serverUrl 时自建服务器会 403
   assertEqual(
     open[0]!.body,
-    { url: SCAN_URL, serverUrl: BASE, title: '知乎登录', mode: 'inline' },
+    { url: SCAN_URL, serverUrl: BASE, title: '知乎登录', mode: 'external' },
     'open 的 body',
   )
   assertContains(String(open[0]!.headers['Content-Type'] ?? ''), 'application/json', 'CSRF 闸门要求的 Content-Type')
@@ -417,24 +419,33 @@ check('startProviderLogin(browser)：建会话 → 原生 /__ds_auth/open {url,s
   )
 })
 
-check('startProviderLogin(browser)：Google 自动走 mode:"external"（Google 拒绝 WebView）', async () => {
-  const google: OAuthProvider = {
-    id: 'google',
-    displayName: 'Google',
-    startUrl: '/api/v1/auth/oauth/google/start',
-    qrStartUrl: '/api/v1/auth/oauth/qr/start?provider=google',
-  }
+check('startProviderLogin(browser)：默认方式一律 external（含非 Google），可用 authMode 覆盖回 inline', async () => {
+  // 非 Google 的 provider 也必须走系统浏览器：应用内 WebView 有「授权时进程被杀」的真机坑
   const mock = createMock({
     handler: (request) => {
       if (request.path === '/health') return { body: { status: 'ok' } }
-      if (request.path === '/api/v1/auth/oauth/qr/start') return { body: qrSessionBody({ provider: 'google' }) }
+      if (request.path === '/api/v1/auth/oauth/qr/start') return { body: qrSessionBody() }
       return { body: { ok: true } }
     },
     native: () => ({ body: { ok: true } }),
   })
-  await startProviderLogin(BASE, google, 'browser', { deps: mock.deps })
+  await startProviderLogin(BASE, ZHIHU, 'browser', { deps: mock.deps })
   const open = mock.nativeCalls.find((call) => call.path === NATIVE_AUTH_OPEN_PATH)
-  assertEqual((open?.body as { mode?: string }).mode, 'external', 'google → external')
+  assertEqual((open?.body as { mode?: string }).mode, 'external', 'zhihu → external')
+
+  // 显式覆盖（排障 / 老设备）仍然生效，且只传原生态认的两个值
+  const inline = createMock({
+    handler: (request) => {
+      if (request.path === '/health') return { body: { status: 'ok' } }
+      if (request.path === '/api/v1/auth/oauth/qr/start') return { body: qrSessionBody() }
+      return { body: { ok: true } }
+    },
+    native: () => ({ body: { ok: true } }),
+  })
+  const session = await startProviderLogin(BASE, ZHIHU, 'browser', { deps: inline.deps, authMode: 'inline' })
+  const inlineOpen = inline.nativeCalls.find((call) => call.path === NATIVE_AUTH_OPEN_PATH)
+  assertEqual((inlineOpen?.body as { mode?: string }).mode, 'inline', 'authMode 覆盖生效')
+  assertEqual(session.authMode, undefined, '覆盖路径不写降级提示')
 })
 
 check('startProviderLogin(browser)：/__ds_auth/open 404 → 「只能在 App 内使用」', async () => {

@@ -32,7 +32,8 @@ import okhttp3.OkHttpClient;
  *       /__ds_db/* 走 {@link DbHandler}（会话存储的原生 SQLite），
  *       /__ds_remote/* 走 {@link RemoteWsHandler}（远程 DSH 的原生 WebSocket 隧道桥），
  *       /__ds_auth/* 走 {@link RemoteAuthHandler}（应用内授权容器：全屏 Dialog + WebView，或交给
- *       系统浏览器；第三方登录在窗口里完成，登录结果由页面按 qrId 轮询服务端拿）</li>
+ *       系统浏览器；第三方登录在窗口里完成，登录结果由页面按 qrId 轮询服务端拿），
+ *       /__ds_keepalive/* 走 {@link KeepAliveHandler}（后台保活前台服务 + 通知/电池权限）</li>
  *   <li>每个连接一个小循环支持 keep-alive，最多 256 个请求；/__ds_remote/ws 升级成 WebSocket 后
  *       整条连接交给 RemoteWsHandler 独占，隧道结束即关闭</li>
  *   <li>工作线程全部是 daemon，Activity 退出时不会把进程挂住</li>
@@ -58,6 +59,9 @@ public final class LocalServer {
     private final DbHandler dbHandler;
     private final RemoteWsHandler remoteWsHandler;
     private final RemoteAuthHandler remoteAuthHandler;
+    private final KeepAliveHandler keepAliveHandler;
+    /** Application context：停服务（RemoteKeepAliveService.stop）也要用它 */
+    private final Context appContext;
     private final ExecutorService workers;
     private final AtomicInteger threadCounter = new AtomicInteger();
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -67,8 +71,10 @@ public final class LocalServer {
     private Thread acceptThread;
 
     public LocalServer(Context context, OkHttpClient httpClient) {
-        Context appContext = context.getApplicationContext();
-        Context base = appContext != null ? appContext : context;
+        Context resolved = context.getApplicationContext();
+        Context base = resolved != null ? resolved : context;
+        // 停服务时要用它（退出应用 = 后台保活也该停）
+        this.appContext = base;
         // 网页包状态只有一份：静态资源与更新接口都读它
         this.webBundle = new WebBundle(base);
         this.assetHandler = new AssetHandler(base, webBundle);
@@ -82,6 +88,9 @@ public final class LocalServer {
         // Activity：MainActivity 传进来的是 Application context，所以它内部自己注册
         // ActivityLifecycleCallbacks 跟踪当前 resumed 的 Activity 来弹全屏 Dialog
         this.remoteAuthHandler = new RemoteAuthHandler(base);
+        // 后台保活（/__ds_keepalive/*）：同样靠 ActivityLifecycleCallbacks 定位当前 Activity
+        // （要弹通知权限框与「忽略电池优化」授权页），所以也传 Application context
+        this.keepAliveHandler = new KeepAliveHandler(base);
         this.workers = Executors.newCachedThreadPool(runnable -> {
             Thread thread = new Thread(runnable, "ds-http-" + threadCounter.incrementAndGet());
             thread.setDaemon(true);
@@ -132,6 +141,12 @@ public final class LocalServer {
 
     /** 关闭监听 socket，取消在途代理请求，停掉线程池（不阻塞调用线程）。 */
     public synchronized void stop() {
+        // 这两件事放在「服务器是否曾启动」的判断之前：都要幂等、都要无条件执行。
+        // 退出应用就该停掉后台保活前台服务，否则用户「关掉应用」之后还剩一条常驻通知，
+        // 进程也会被系统按前台服务优先级养着。RemoteKeepAliveService.stop 内部吞异常，
+        // 服务没跑也不会打断后面的清理。
+        keepAliveHandler.cancelAll();
+        RemoteKeepAliveService.stop(appContext);
         if (!running.getAndSet(false)) {
             return;
         }
@@ -303,6 +318,14 @@ public final class LocalServer {
         // 静态资源之前，否则 /__ds_auth/state 会被 AssetHandler 当成页面路径去 assets 里找。
         if (path.startsWith(RemoteAuthHandler.PATH_PREFIX)) {
             return remoteAuthHandler.handle(method, path, headers, in, out, keepAlive);
+        }
+
+        // 后台保活 + 权限申请（/__ds_keepalive/*）：同样必须排在静态资源判断之前。
+        // 注意 AssetHandler 的 SPA 回落：无扩展名的未知路径会回 index.html（200 HTML），
+        // 所以旧 APK 上这些请求不是 404 —— 页面探测能力请用 /__ds_keepalive/state.json
+        // （带扩展名的路径不会触发回落，旧 APK 上是真 404），见 KeepAliveHandler 类注释。
+        if (path.startsWith(KeepAliveHandler.PATH_PREFIX)) {
+            return keepAliveHandler.handle(method, path, headers, in, out, keepAlive);
         }
 
         // 更新接口必须排在静态资源判断之前，否则会被当成页面路径去 assets 里找。

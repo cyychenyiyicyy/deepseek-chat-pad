@@ -7,6 +7,17 @@
     <!-- 分体式更新：下载完新 APK 后拉起系统安装器（仍需用户在系统里允许"未知来源"） -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- 后台保活：远程会话在后台继续跑，不被系统当普通后台进程回收 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14（API 34）起前台服务必须声明具体类型对应的权限，否则 startForeground 直接抛异常 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Android 13（API 33）起常驻通知要用户授权：没有它服务能跑，但通知不显示 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 只是声明给页面用：保活服务自己不开 WakeLock（费电），页面临时需要时才能申请 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 拉起系统「忽略电池优化」授权页（data=package:<pkg> 那条 ACTION 需要它） -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
@@ -28,6 +39,19 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            后台保活前台服务（/__ds_keepalive/* 调起来的那一个）。
+
+            * exported="false"：只有本应用能起它，外部 App 不能拿它当免死金牌
+            * foregroundServiceType="dataSync"：与 RemoteKeepAliveService.startForegroundCompat()
+              里传的 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC 必须一致；
+              Android 14（API 34）上不一致或缺失会抛 MissingForegroundServiceTypeException
+        -->
+        <service
+            android:name=".RemoteKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- 安装器进程读不到应用私有目录：apk 必须包成带授权的 content:// URI 交给它 -->
         <provider
