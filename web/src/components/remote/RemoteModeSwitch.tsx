@@ -5,17 +5,16 @@ import { useTranslate } from '../../i18n/index.js'
 import styles from './RemoteModeSwitch.module.css'
 
 /**
- * 「本机 / 远程」双态切换。
+ * 侧栏顶部的「本机 / 远程」胶囊切换。
  *
- * 远程模式依赖 `services/remote/core` 的本机原生桥（`/__ds_remote/ws`，由
- * `android/.../RemoteWsHandler.java` 提供），只有 Chat Pad App（Android 壳）里才有这条通道。
- * 浏览器预览 / `rspack serve` 下没有，所以这里照 `services/api/transport.ts` 的 `detectShell()`
- * 范式做一次**按需**能力探测：探不到就禁用「远程」并给一句解释。
+ * 两种模式用的是**同一套布局**：左栏会话列表 + 右栏会话详情。
+ * 这个胶囊只决定左栏读哪一份列表、右栏渲染哪个会话页，不新开一层页面。
  *
- * 两条纪律（见 `work/2026-11-21-chatpad接入DSH远程/input-C-chatpad-integration.md` §7.2-③）：
- *   1. **绝不在启动路径上探测** —— `web/src/index.html` 的 8 秒看门狗会把慢启动当成坏包回滚，
- *      所以探测只在本模块的 hook 首次挂载时发生（用户点进远程模式 / 打开远程设置才挂载）。
- *   2. **探测失败必须降级**，不能让模块顶层抛错把起始页带崩（`getUserMedia` 的教训）。
+ * 两条纪律：
+ *   1. **胶囊自己不探测**。它常驻侧栏，一探测就落在启动路径上，而
+ *      `web/src/index.html` 的 8 秒看门狗会把慢启动当成坏包回滚。
+ *      原生桥可用性由右栏（`RemoteChatView`）和设置面板按需探测。
+ *   2. 非壳环境也**允许切过去**：右栏会显示「只能在 App 内使用」，不白屏、不弹红条。
  */
 
 /** 对话模式：本机（现有链路）或远程（远端 DSH 主机）。 */
@@ -94,7 +93,7 @@ const ensureProbed = (): Promise<void> => {
     try {
       value = await detectRemote()
     } catch {
-      // 探测自身出错一律按「浏览器里」处理：禁用入口，绝不抛给上层
+      // 探测自身出错一律按「浏览器里」处理：给出降级提示，绝不抛给上层
       value = 'browser'
     }
     useRemoteAvailabilityState.setState({ value })
@@ -103,7 +102,8 @@ const ensureProbed = (): Promise<void> => {
 }
 
 /**
- * 远程桥可用性。**首次挂载时**才发起探测（调用点必须永远是用户触发的界面）。
+ * 远程桥可用性。**首次挂载时**才发起探测 —— 调用点必须永远是用户触发的界面
+ * （远程会话页 / 远程设置面板），不能是 App、Sider 这类启动即挂载的地方。
  * `retry` 用于「用户刚装完 APK 回来重试」的场景。
  */
 export const useRemoteAvailability = (): {
@@ -124,49 +124,28 @@ export const useRemoteAvailability = (): {
   }
 }
 
-/**
- * 双态切换控件。`hint` 为假时不在控件下方重复解释（设置面板自带整块说明）。
- */
-export const RemoteModeSwitch = ({ hint = true }: { hint?: boolean }) => {
+/** 两段式胶囊：左本机、右远程。选中态沿用主题的 ghost-active 配色。 */
+export const RemoteModeSwitch = () => {
   const t = useTranslate()
   const mode = useRemoteMode((state) => state.mode)
-  const { availability, retry } = useRemoteAvailability()
-  // 已经身处远程模式时不置灰（否则当前态看起来像坏了）；切过去之前才要求桥可用
-  const remoteDisabled = availability !== 'ready' && mode !== 'remote'
-
   return (
-    <div className={styles.wrapper}>
-      <div role="group" aria-label={t('remoteModeLabel')} className={styles.switch}>
-        <button
-          type="button"
-          aria-pressed={mode === 'local'}
-          className={clsx(styles.option, mode === 'local' && styles.optionActive)}
-          onClick={exitRemoteMode}
-        >
-          {t('remoteModeLocal')}
-        </button>
-        <button
-          type="button"
-          aria-pressed={mode === 'remote'}
-          aria-disabled={remoteDisabled}
-          disabled={remoteDisabled}
-          className={clsx(styles.option, mode === 'remote' && styles.optionActive)}
-          onClick={enterRemoteMode}
-        >
-          {t('remoteModeRemote')}
-        </button>
-      </div>
-      {hint && availability === 'browser' ? (
-        <div className={styles.hint}>{t('remoteRequiresApp')}</div>
-      ) : null}
-      {hint && availability === 'outdated' ? (
-        <div className={styles.hint}>
-          {t('remoteBridgeOutdated')}
-          <button type="button" className={styles.retry} onClick={retry}>
-            {t('retry')}
-          </button>
-        </div>
-      ) : null}
+    <div role="group" aria-label={t('remoteModeLabel')} className={styles.switch}>
+      <button
+        type="button"
+        aria-pressed={mode === 'local'}
+        className={clsx(styles.option, mode === 'local' && styles.optionActive)}
+        onClick={exitRemoteMode}
+      >
+        {t('remoteModeLocal')}
+      </button>
+      <button
+        type="button"
+        aria-pressed={mode === 'remote'}
+        className={clsx(styles.option, mode === 'remote' && styles.optionActive)}
+        onClick={enterRemoteMode}
+      >
+        {t('remoteModeRemote')}
+      </button>
     </div>
   )
 }

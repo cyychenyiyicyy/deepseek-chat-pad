@@ -1,43 +1,9 @@
-/* 远程会话列表：平板布局下的左栏；移动端作为抽屉内容时由 .drawerPanel 覆盖宽度/边框 */
-.panel {
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  box-sizing: border-box;
-  width: clamp(220px, 24vw, 300px);
-  height: 100%;
-  padding: 0 8px;
-  border-right: 1px solid var(--dsw-alias-border-l1);
-  background-color: var(--dsw-specific-sidebar-fill);
-}
-
-.header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-shrink: 0;
-  box-sizing: border-box;
-  height: calc(56px + var(--ds-top-offset));
-  padding: var(--ds-top-offset) 4px 0;
-}
-
-.headerTitle {
-  min-width: 0;
-  overflow: hidden;
-  font-size: 14px;
-  line-height: 22px;
-  font-weight: 500;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  color: var(--dsw-alias-label-secondary);
-}
-
+/* 远程会话列表：放进 Sider 的列表区，只负责滚动；外框/背景/右边框都由 Sider 提供 */
 .list {
   flex: 1;
   min-height: 0;
-  margin: 0 -4px;
-  padding: 0 4px 12px;
+  margin: 0 -2px;
+  padding: 0 2px 12px;
   overflow-y: auto;
   scrollbar-color: var(--scroll-color) transparent;
 }
@@ -131,23 +97,20 @@
 }
 
 @media (min-width: 768px) {
-  .headerTitle {
-    font-size: 15px;
-  }
-
   .item {
-    min-height: 48px;
+    min-height: 46px;
     font-size: 15px;
   }
 }
 
-@media not all and (min-width: 768px) {
-  .panel {
-    width: 100%;
-    padding: 0 12px;
-    border-right: none;
+@media (min-width: 1024px) {
+  .item {
+    min-height: 50px;
+    font-size: 16px;
   }
+}
 
+@media not all and (min-width: 768px) {
   .item {
     min-height: 48px;
     border-radius: 16px;

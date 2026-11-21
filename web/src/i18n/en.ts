@@ -353,7 +353,6 @@ export const en = {
   remoteTransportP2p: 'P2P',
   remoteTransportTurn: 'TURN',
   remoteTransportUnknown: 'unknown',
-  remoteSessionListTitle: 'Remote chats',
   remoteSessionEmpty: 'No chats on the host yet',
   remoteSessionUntitled: 'Untitled chat',
   remoteTimeJustNow: 'just now',
@@ -365,8 +364,7 @@ export const en = {
   remoteNotConnectedHint:
     'Fill in the server URL and account under Settings → Remote DSH, then connect.',
   remoteOpenSettings: 'Open settings',
-  remotePickSession: 'Pick a chat on the left',
-  remotePickSessionShort: 'Pick a chat to start',
+  remotePickSession: 'Pick a chat to open',
   remoteListButton: 'Remote chats',
   remoteTimelineEmpty: 'No messages in this chat yet',
   remoteLoadOlder: 'Load earlier messages',

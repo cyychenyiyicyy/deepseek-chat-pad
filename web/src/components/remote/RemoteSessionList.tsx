@@ -1,16 +1,16 @@
 import clsx from 'clsx'
 import { useTranslate } from '../../i18n/index.js'
 import { useRemoteStore } from '../../services/remote/store.js'
-import { IconPinOutline16, IconRefreshOutline16 } from '../base/icons.js'
-import { IconButton } from '../base/IconButton.js'
+import { IconPinOutline16 } from '../base/icons.js'
 import { formatDate } from '../../utils/format.js'
 import styles from './RemoteSessionList.module.css'
 
 /**
- * 远程会话列表：标题 + 相对时间 + 当前高亮。
+ * 远程会话列表 —— 就是侧栏里那份列表的远程版，和本机列表占同一个位置：
+ * 标题 + 相对时间 + 当前高亮（+ 置顶标记）。
  *
- * 只做「读 store + 调 openSession」一件事，所以既能当平板布局里的左栏，
- * 也能被会话页在移动端塞进抽屉（`className` 用来覆盖宽度/边框）。
+ * 这里**不自带**面板头/边框/背景：外框由 `Sider` 提供，刷新与「连接设置」也在侧栏顶部那一行，
+ * 所以列表只负责滚动本身。`className` 留给调用方（移动端抽屉）覆盖内边距。
  */
 
 const MINUTE = 60_000
@@ -69,54 +69,42 @@ export const RemoteSessionList = ({
   const phase = useRemoteStore((state) => state.phase)
 
   return (
-    <div className={clsx(styles.panel, className)}>
-      <div className={styles.header}>
-        <span className={styles.headerTitle}>{t('remoteSessionListTitle')}</span>
-        <IconButton
-          size="xs"
-          icon={<IconRefreshOutline16 />}
-          tooltip={t('remoteRefreshSessions')}
-          disabled={phase !== 'ready'}
-          onClick={() => fireAndForget(() => useRemoteStore.getState().refreshSessions())}
-        />
-      </div>
-
-      <div className={styles.list}>
-        {sessions.length === 0 ? (
-          <div className={styles.empty}>
-            {t(phase === 'ready' ? 'remoteSessionEmpty' : 'remotePhaseIdle')}
-          </div>
-        ) : (
-          sessions.map((session) => {
-            const active = session.id === activeSessionId
-            const time = relativeTime(t, session.updatedAt)
-            return (
-              <button
-                key={session.id}
-                type="button"
-                aria-current={active ? 'true' : undefined}
-                className={clsx(styles.item, active && styles.itemActive)}
-                onClick={() => {
-                  fireAndForget(() => useRemoteStore.getState().openSession(session.id))
-                  onSelect?.(session.id)
-                }}
-              >
-                <span className={styles.itemMain}>
-                  <span className={styles.itemTitle}>
-                    {session.pinned ? (
-                      <span className={styles.pinMark} aria-hidden>
-                        <IconPinOutline16 />
-                      </span>
-                    ) : null}
-                    {session.title || t('remoteSessionUntitled')}
-                  </span>
-                  {time ? <span className={styles.itemTime}>{time}</span> : null}
+    <div className={clsx(styles.list, className)}>
+      {sessions.length === 0 ? (
+        // 空态就是一行灰字，不占版面、不弹红条（连接状态在右栏说明）
+        <div className={styles.empty}>
+          {t(phase === 'ready' ? 'remoteSessionEmpty' : 'remotePhaseIdle')}
+        </div>
+      ) : (
+        sessions.map((session) => {
+          const active = session.id === activeSessionId
+          const time = relativeTime(t, session.updatedAt)
+          return (
+            <button
+              key={session.id}
+              type="button"
+              aria-current={active ? 'true' : undefined}
+              className={clsx(styles.item, active && styles.itemActive)}
+              onClick={() => {
+                fireAndForget(() => useRemoteStore.getState().openSession(session.id))
+                onSelect?.(session.id)
+              }}
+            >
+              <span className={styles.itemMain}>
+                <span className={styles.itemTitle}>
+                  {session.pinned ? (
+                    <span className={styles.pinMark} aria-hidden>
+                      <IconPinOutline16 />
+                    </span>
+                  ) : null}
+                  {session.title || t('remoteSessionUntitled')}
                 </span>
-              </button>
-            )
-          })
-        )}
-      </div>
+                {time ? <span className={styles.itemTime}>{time}</span> : null}
+              </span>
+            </button>
+          )
+        })
+      )}
     </div>
   )
 }

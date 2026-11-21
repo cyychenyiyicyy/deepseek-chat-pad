@@ -38,7 +38,6 @@ import { stopReadAloud } from '../services/speech/readAloud.js'
 import { closeMobileSider } from '../components/sider/mobileSiderState.js'
 import { MobileSider, Sider } from '../components/sider/Sider.js'
 import { RemoteChatView } from '../components/remote/RemoteChatView.js'
-import { RemoteSessionList } from '../components/remote/RemoteSessionList.js'
 import { useRemoteMode } from '../components/remote/RemoteModeSwitch.js'
 import styles from './App.module.css'
 
@@ -183,11 +182,8 @@ export const App = () => {
           ) : null}
           <div className={styles.content}>
             {chatMode === 'remote' ? (
-              // 远程模式：平板上左栏会话列表 + 右栏会话页；移动端列表收在会话页的抽屉里
-              <div className={styles.remote}>
-                {isMobile ? null : <RemoteSessionList />}
-                <RemoteChatView />
-              </div>
+              // 远程模式不另开页面：左栏仍是侧栏（列表换成远程会话），右栏换成远程会话页
+              <RemoteChatView />
             ) : !ready || (activeId !== null && !session) ? (
               <div className={styles.loadingView}>
                 {isMobile ? <MobileHeader /> : null}

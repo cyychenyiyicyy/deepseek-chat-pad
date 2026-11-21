@@ -625,3 +625,267 @@ export const needsReauth = (error: unknown): boolean => {
   const code = errorCodeOf(error)
   return code === 'AUTH_REQUIRED' || code === 'AUTH_INVALID' || code === 'TOKEN_EXPIRED'
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * 多方式登录：健康探活 / OAuth 提供方 / 扫码登录 / 账号资料
+ *
+ * 协议依据（已与上游 `ds-harness-remote` 核对）：
+ *   `packages/app-core/src/services/api.ts` 的 health / oauthProviders /
+ *   startOAuthQrLogin / pollOAuthQrLogin / accountMe，以及
+ *   `services/login/oauth-redirect-channel.ts` 的 `return_to=dshremote://oauth`。
+ *
+ * 四条不变量：
+ *   1. **OAuth / 扫码拿到的都只是「账号 token」**，它只能用来注册设备
+ *      （`registerDevice`）——与邮箱密码登录拿到的是同一种东西，没有第二套凭据。
+ *   2. **token 不进 URL、不进日志**：URL 里只允许出现 `return_to=dshremote://oauth`
+ *      这种非敏感参数；token 只走 `Authorization` 头（头本身被 base64url 装进 `X-DS-Headers`）。
+ *   3. **发现类响应必须过同源校验**：`startUrl` / `qrStartUrl` 只接受站内
+ *      `/api/v1/auth/` 相对路径，`scanUrl` 必须与 baseUrl 同源且同一路径前缀 ——
+ *      否则一条被篡改的发现响应就能把客户端变成开放请求转发器（上游同款校验）。
+ *   4. **401 / 404 不吞**：老 Server 没有 providers 端点时按上游语义回退到
+ *      per-provider 的 `status` 端点，其余错误一律原样上抛，不猜。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/** OAuth 回调地址：官方 App 的固定 scheme（**Chat Pad 不用它**，见下面的说明） */
+export const OAUTH_RETURN_TO = 'dshremote://oauth'
+
+/** provider id 的形状（Server 决定取值，客户端只做形状校验） */
+const OAUTH_PROVIDER_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/
+
+/** 扫出来的二维码链接必须是「baseUrl + /」开头，挡住跨源与协议相对地址 */
+const sameOriginScanUrl = (value: unknown, baseUrl: string): string | undefined => {
+  if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/u.test(value)) return undefined
+  try {
+    const normalized = new URL(value).href
+    return normalized.startsWith(`${baseUrl}/`) ? normalized : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * `startUrl` / `qrStartUrl` 只允许站内 `/api/v1/auth/` 相对路径。
+ * 上游同名函数的逐条对应：控制字符、空白、反斜杠、`#`、`.`/`..`/百分号编码一律拒。
+ */
+const isAuthEntryPath = (value: unknown): value is string => {
+  if (typeof value !== 'string' || !value.startsWith('/api/v1/auth/')) return false
+  if (/[\u0000-\u001f\u007f\s\\#]/u.test(value)) return false
+  return !(value.split('?')[0] ?? '').split('/').some((segment) => segment === '.' || segment === '..' || segment.includes('%'))
+}
+
+/** Server 侧声明的 OAuth 提供方（`GET /api/v1/auth/oauth/providers` 的一项） */
+export interface OAuthProvider {
+  /** Server 决定的不透明 id（`zhihu` / `github` / …） */
+  id: string
+  displayName: string
+  /** 站内相对路径；浏览器打开时拼成 `${baseUrl}${startUrl}?return_to=…` */
+  startUrl: string
+  /** 扫码登录的建会话路径；缺省 = 该 provider 不支持扫码 */
+  qrStartUrl?: string
+}
+
+/** 扫码会话（`POST ${qrStartUrl}`） */
+export interface OAuthQrSession {
+  /** ≥20 字符；服务端一次性会话 id */
+  qrId: string
+  /** 二维码里要编的链接；必须与 baseUrl 同源 */
+  scanUrl: string
+  /** 有效期（秒） */
+  expiresIn: number
+}
+
+/** 扫码轮询结果：`complete` 时 token **只返回一次**，之后同一 qrId 不会再给 */
+export type OAuthQrPollResult = { status: 'pending' | 'expired' } | { status: 'complete'; token: string }
+
+/** 老 Server 的回退清单（与上游 `oauthProviders()` 的 404 分支一致） */
+const LEGACY_OAUTH_PROVIDERS = [
+  {
+    id: 'zhihu',
+    displayName: '知乎',
+    statusPath: '/api/v1/auth/oauth/status',
+    startUrl: '/api/v1/auth/oauth/start',
+    qrStartUrl: '/api/v1/auth/oauth/qr/start?provider=zhihu',
+  },
+  {
+    id: 'github',
+    displayName: 'GitHub',
+    statusPath: '/api/v1/auth/oauth/github/status',
+    startUrl: '/api/v1/auth/oauth/github/start',
+    qrStartUrl: '/api/v1/auth/oauth/qr/start?provider=github',
+  },
+] as const
+
+/**
+ * GET /health（登录前先探活；docs/protocol.md §6 的通用 REST 只剩这一个匿名端点）
+ *
+ * 只看 `{status:'ok'}`；别的都算「这台服务器现在不能登录」，抛 `CONNECTION_FAILED`。
+ */
+export const health = async (server: RemoteServer, deps: ServerApiDeps = {}): Promise<void> => {
+  const base = normalizeServerUrl(server.url)
+  const body = await request(base, '/health', { method: 'GET' }, deps)
+  if (!isRecord(body) || body.status !== 'ok') {
+    throw new RemoteApiError('CONNECTION_FAILED', '服务器健康检查没通过（/health 没有返回 status: "ok"）', undefined, true)
+  }
+}
+
+const parseOAuthProviders = (items: unknown[]): OAuthProvider[] => {
+  const seen = new Set<string>()
+  const providers: OAuthProvider[] = []
+  for (const entry of items) {
+    if (!isRecord(entry)) throw invalidResponse('OAuth 提供方列表')
+    const { id, displayName, startUrl, qrStartUrl } = entry
+    if (typeof id !== 'string' || !OAUTH_PROVIDER_ID.test(id) || seen.has(id)) throw invalidResponse('OAuth 提供方列表')
+    if (typeof displayName !== 'string' || displayName.trim().length === 0 || displayName.length > 128) {
+      throw invalidResponse('OAuth 提供方列表（displayName 非法）')
+    }
+    if (!isAuthEntryPath(startUrl)) throw invalidResponse('OAuth 提供方列表（startUrl 不是站内 auth 路径）')
+    if (qrStartUrl !== undefined && qrStartUrl !== null && !isAuthEntryPath(qrStartUrl)) {
+      throw invalidResponse('OAuth 提供方列表（qrStartUrl 不是站内 auth 路径）')
+    }
+    seen.add(id)
+    providers.push({
+      id,
+      displayName,
+      startUrl,
+      ...(typeof qrStartUrl === 'string' ? { qrStartUrl } : {}),
+    })
+  }
+  return providers
+}
+
+/** 老 Server：逐个问 per-provider 的 status 端点，`configured:true` 的才列（上游同款） */
+const legacyOAuthProviders = async (base: string, deps: ServerApiDeps): Promise<OAuthProvider[]> => {
+  const providers: OAuthProvider[] = []
+  for (const legacy of LEGACY_OAUTH_PROVIDERS) {
+    try {
+      const status = await request(base, legacy.statusPath, { method: 'GET' }, deps)
+      if (isRecord(status) && status.configured === true) {
+        providers.push({
+          id: legacy.id,
+          displayName: legacy.displayName,
+          startUrl: legacy.startUrl,
+          qrStartUrl: legacy.qrStartUrl,
+        })
+      }
+    } catch (error) {
+      // 老 Server 连这个 provider 都没有：跳过；其余错误照抛（不能把「挂了」当「没配置」）
+      if (isRemoteApiError(error) && error.status === 404) continue
+      throw error
+    }
+  }
+  return providers
+}
+
+/**
+ * GET /api/v1/auth/oauth/providers（Server 声明的登录方式）。
+ *
+ * 404 → 回退到 per-provider 的 `status` 端点（只列 `configured:true`）；
+ * 回退时 `startUrl` / `qrStartUrl` 是按上游约定拼出来的站内路径（见 `LEGACY_OAUTH_PROVIDERS`）。
+ * 返回空数组是合法结果（= 这台服务器只开邮箱密码），**不是**错误。
+ */
+export const oauthProviders = async (server: RemoteServer, deps: ServerApiDeps = {}): Promise<OAuthProvider[]> => {
+  const base = normalizeServerUrl(server.url)
+  let body: unknown
+  try {
+    body = await request(base, '/api/v1/auth/oauth/providers', { method: 'GET' }, deps)
+  } catch (error) {
+    if (!isRemoteApiError(error) || error.status !== 404) throw error
+    return legacyOAuthProviders(base, deps)
+  }
+  if (!isRecord(body) || !Array.isArray(body.items)) throw invalidResponse('OAuth 提供方列表（缺 items 数组）')
+  return parseOAuthProviders(body.items as unknown[])
+}
+
+/**
+ * 拼 OAuth 跳转地址：`${baseUrl}${provider.startUrl}?return_to=dshremote://oauth`
+ *
+ * ⚠️ **仅用于诊断 / 兜底**：Chat Pad 的正式流程走「QR 会话 + 轮询」
+ * （`oauth.ts` 的 `startProviderLogin`），**不用** `return_to` 回调 ——
+ * 服务端只认 `dshremote://oauth` 这一种自定义 scheme，其他 scheme 一律归一化成 `/app`
+ * （`docs/plugin-integration.md:110-112`），而 `dshremote` 是官方 App 的 scheme，
+ * 声明它会**抢回调**，且服务端没有 loopback 回调。
+ *
+ * 保留这个函数是为了：① 在外部浏览器里手工打开授权页排障；② 将来服务端支持
+ * 别的回调形态时复用。`startUrl` 仍要过站内 `/api/v1/auth/` 校验 ——
+ * 发现响应不可信，不能让页面被带去任意地址。
+ */
+export const oauthStartUrl = (server: RemoteServer | string, provider: OAuthProvider): string => {
+  const base = normalizeServerUrl(typeof server === 'string' ? server : server.url)
+  if (!isAuthEntryPath(provider.startUrl)) {
+    throw new RemoteApiError('INVALID_ARGUMENT', `「${provider.displayName}」的登录入口不是站内 auth 路径，已拒绝跳转`)
+  }
+  const url = new URL(`${base}${provider.startUrl}`)
+  url.searchParams.set('return_to', OAUTH_RETURN_TO)
+  return url.toString()
+}
+
+/**
+ * POST `${provider.qrStartUrl}`（body `{}`）→ 建一个短命的扫码会话。
+ *
+ * 校验：qrId ≥20 字符、expiresIn 是正安全整数、`provider` 回显（若有）必须一致、
+ * scanUrl 必须与 baseUrl 同源（`sameOriginScanUrl`）。
+ */
+export const startOAuthQrLogin = async (
+  server: RemoteServer,
+  provider: OAuthProvider,
+  deps: ServerApiDeps = {},
+): Promise<OAuthQrSession> => {
+  const base = normalizeServerUrl(server.url)
+  if (provider.qrStartUrl === undefined) {
+    throw new RemoteApiError('INVALID_ARGUMENT', `「${provider.displayName}」不支持扫码登录`)
+  }
+  const body = await request(base, provider.qrStartUrl, { method: 'POST', body: {} }, deps)
+  if (!isRecord(body)) throw invalidResponse('扫码登录会话')
+  const { qrId, expiresIn, scanUrl, provider: echoed } = body
+  if (typeof qrId !== 'string' || qrId.length < 20) throw invalidResponse('扫码登录会话（qrId 太短）')
+  if (!isPositiveSafeInteger(expiresIn)) throw invalidResponse('扫码登录会话（expiresIn 非法）')
+  if (echoed !== undefined && echoed !== null && echoed !== provider.id) {
+    throw invalidResponse('扫码登录会话（provider 与请求不一致）')
+  }
+  const safeScanUrl = sameOriginScanUrl(scanUrl, base)
+  if (safeScanUrl === undefined) throw invalidResponse('扫码登录会话（scanUrl 与服务器不同源）')
+  return { qrId, scanUrl: safeScanUrl, expiresIn }
+}
+
+/**
+ * GET /api/v1/auth/oauth/qr/{qrId}（扫码轮询）
+ *
+ * `complete` 时 token 只返回一次：拿到就必须立刻走 `registerDevice`，**不许**再 poll。
+ */
+export const pollOAuthQrLogin = async (
+  server: RemoteServer,
+  qrId: string,
+  deps: ServerApiDeps = {},
+): Promise<OAuthQrPollResult> => {
+  const base = normalizeServerUrl(server.url)
+  const id = qrId.trim()
+  if (id.length === 0) throw new RemoteApiError('INVALID_ARGUMENT', '扫码会话 id 不能为空')
+  const body = await request(base, `/api/v1/auth/oauth/qr/${encodeURIComponent(id)}`, { method: 'GET' }, deps)
+  if (!isRecord(body)) throw invalidResponse('扫码登录状态')
+  if (body.status === 'pending' || body.status === 'expired') return { status: body.status }
+  if (body.status !== 'complete' || typeof body.token !== 'string' || body.token.length < 16) {
+    throw invalidResponse('扫码登录状态（complete 但没有有效 token）')
+  }
+  return { status: 'complete', token: body.token }
+}
+
+/**
+ * GET /api/v1/auth/me（带**账号** token）→ `{account}`
+ *
+ * OAuth / 扫码拿到 token 后先调这个：既验证 token 可用，也拿到账号名（注册设备后它仍是
+ * `RemoteAccount.email` 的主键，同服务器 + 同账号算一条记录）。
+ */
+export const accountMe = async (
+  server: RemoteServer,
+  accountToken: string,
+  deps: ServerApiDeps = {},
+): Promise<{ account: string }> => {
+  const base = normalizeServerUrl(server.url)
+  const token = accountToken.trim()
+  if (token.length === 0) throw new RemoteApiError('AUTH_REQUIRED', '缺少账号 token，无法获取账号资料')
+  const body = await request(base, '/api/v1/auth/me', { method: 'GET', token }, deps)
+  if (!isRecord(body) || typeof body.account !== 'string' || body.account.trim().length === 0) {
+    throw invalidResponse('账号资料')
+  }
+  return { account: body.account.trim() }
+}
