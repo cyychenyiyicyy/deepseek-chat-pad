@@ -4,6 +4,17 @@
 
     <string name="pick_file">选择文件</string>
 
+    <!-- 文件来源面板（附件上传：「系统文件 / MT 管理器 / 其他文件管理器」） -->
+    <string name="pick_source_title">选择文件来源</string>
+    <string name="pick_source_system">系统文件（可多选）</string>
+    <string name="pick_source_mt">MT 管理器</string>
+    <string name="pick_source_mt_unavailable">MT 管理器（这个版本没有文件选择入口）</string>
+    <string name="pick_source_other">其他文件管理器</string>
+    <string name="pick_source_cancel">取消</string>
+    <string name="pick_source_failed">没能拉起这个来源，换一个试试</string>
+    <string name="pick_source_fallback">上次用的来源这次拉不起来，重新选一个吧</string>
+    <string name="pick_source_unreadable">这个文件管理器给的是本地路径，应用读不到；请改用「系统文件」选择</string>
+
     <string name="error_server_start">本地服务器启动失败\n\n无法在 127.0.0.1 上分配可用端口，端口可能已被占用。\n\n%1$s\n\n点击屏幕重试</string>
     <string name="error_missing_assets">前端资源缺失\n\n没有找到 assets/www/index.html。\n请在构建前把 Web 产物复制到 android/app/src/main/assets/www/。\n\n点击屏幕重试</string>
     <string name="error_renderer_lost">渲染进程已退出，正在重新加载…</string>

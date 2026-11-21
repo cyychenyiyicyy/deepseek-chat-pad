@@ -253,10 +253,14 @@ const resetNewSession = (): void => {
     agentPresets: [],
     agentPresetsLoaded: false,
     selectedAgentPreset: '',
-    defaultModel: null,
+    modelCatalog: null,
+    modelCatalogLoaded: false,
+    modelPick: null,
+    modelApply: { status: 'idle' },
+    createdSessionId: null,
+    sheet: null,
     creating: false,
     lastCreatedSessionId: null,
-    pathFormOpen: false,
     pathDraft: '',
     pathError: null,
     directory: null,
@@ -273,6 +277,7 @@ const resetNewSession = (): void => {
       directory: true,
       permission: true,
       agentPreset: true,
+      model: true,
       search: true,
       manage: true,
     },
@@ -486,12 +491,48 @@ const FULL_REPLIES: Record<string, Reply> = {
     value: { options: [{ value: 'default', name: '默认' }, { value: 'danger-full-access', name: '完全放开' }], defaultPreset: 'default' },
   },
   'agentPresets/list': { ok: true, value: { presets: [{ id: 'ptc', name: 'PTC' }, { id: 'work', name: '工作模式' }] } },
-  'session/modelCatalog': { ok: true, value: { default: { provider: 'deepseek', model: 'deepseek-v4' }, groups: [] } },
+  'session/modelCatalog': {
+    ok: true,
+    value: {
+      default: { provider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'high' },
+      groups: [
+        {
+          id: 'deepseek',
+          name: 'DeepSeek',
+          models: [
+            {
+              id: 'deepseek-v4',
+              name: 'DeepSeek-V4',
+              description: '通用',
+              reasoning: {
+                efforts: [
+                  { id: 'low', name: '低' },
+                  { id: 'high', name: '高' },
+                  { id: 'max', name: '最高' },
+                ],
+                defaultEffort: 'high',
+              },
+            },
+            { id: 'deepseek-v4-mini', name: 'DeepSeek-V4 Mini' },
+          ],
+        },
+        {
+          id: 'openai',
+          name: 'OpenAI',
+          models: [{ id: 'gpt-x', name: 'GPT X', reasoning_options: ['off', 'low', 'medium'] }],
+        },
+      ],
+    },
+  },
   'session/create': { ok: true, value: { sessionId: 's-new', agentPreset: 'work' } },
+  'session/selectModel': {
+    ok: true,
+    value: { selected: { provider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'max' }, defaultSave: { status: 'saved' } },
+  },
   'commands/execute': { ok: true, value: { result: { kind: 'success' } } },
 }
 
-check('C11：连接就绪后 openPanel() 把工作区 / 预设 / 默认模型都装进 state', async () => {
+check('C11：连接就绪后 refresh() 把工作区 / 预设 / 模型目录都装进 state', async () => {
   resetNewSession()
   const fake = fakeTarget(FULL_REPLIES)
   connectFake(fake)
@@ -504,14 +545,29 @@ check('C11：连接就绪后 openPanel() 把工作区 / 预设 / 默认模型都
   assertEqual(state.permissionOptions.map((option) => option.value), ['default', 'danger-full-access'], '权限选项')
   assertEqual(state.permissionDefault, 'default', 'Host 默认预设')
   assertEqual(state.agentPresets.map((preset) => preset.id), ['ptc', 'work'], 'agent preset 名册')
-  assertEqual(state.defaultModel, { provider: 'deepseek', model: 'deepseek-v4' }, '默认模型（只读展示）')
+  assertEqual(state.modelCatalog?.default, { provider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'high' }, '默认模型')
+  assertEqual(state.modelCatalog?.models.map((model) => `${model.provider}/${model.id}`), [
+    'deepseek/deepseek-v4',
+    'deepseek/deepseek-v4-mini',
+    'openai/gpt-x',
+  ], '模型目录摊平成一行行')
+  assertEqual(
+    state.modelCatalog?.models[0]?.efforts.map((effort) => effort.id),
+    ['low', 'high', 'max'],
+    '思考强度来自 reasoning.efforts',
+  )
+  assertEqual(state.modelCatalog?.models[0]?.defaultEffort, 'high', '模型的默认档位')
+  // 老字段名 `reasoning_options` 也认（裸字符串数组）
+  assertEqual(state.modelCatalog?.models[2]?.efforts.map((effort) => effort.id), ['off', 'low', 'medium'], 'reasoning_options 兼容')
+  assertEqual(state.modelPick, null, '默认继承 Host（不产生写操作）')
+  assertEqual(state.capabilities.model, true, '模型能力打开')
   assertEqual(state.capabilities.create, true, 'create 能力按「先信任」打开')
   assertTrue(fake.streams.includes('workspace/follow'), '探测过 workspace/follow（能力探测）')
   assertEqual(state.selectedWorkspaceId, null, '多个工作区时不替用户选')
   assertEqual(state.error, null, '没有残留错误')
 })
 
-check('C12：createAndOpen 走 session/create → /permission → openSession(newId)', async () => {
+check('C12：createAndOpen 走 session/create → /permission → selectModel → openSession(newId)', async () => {
   resetNewSession()
   const fake = fakeTarget(FULL_REPLIES)
   const observed = connectFake(fake)
@@ -520,12 +576,13 @@ check('C12：createAndOpen 走 session/create → /permission → openSession(ne
   useNewSessionStore.getState().selectWorkspace('ws-1')
   useNewSessionStore.getState().selectAgentPreset('work')
   useNewSessionStore.getState().selectPermission('danger-full-access')
+  useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4', 'max')
 
   const created = await useNewSessionStore.getState().createAndOpen()
   assertEqual(created, 's-new', '返回新会话 id')
 
   const createCall = callAt(fake, fake.calls.findIndex((call) => (call.params as { endpoint?: string }).endpoint === 'session/create'))
-  assertEqual(createCall.args, { request: { workspaceId: 'ws-1', agentPreset: 'work' } }, 'session/create 的参数')
+  assertEqual(createCall.args, { request: { workspaceId: 'ws-1', agentPreset: 'work' } }, 'session/create 的参数（**没有** model 字段）')
 
   const commandCall = fake.calls
     .map((call) => call.params as { endpoint?: string; payload?: { args?: Record<string, unknown> } })
@@ -536,9 +593,19 @@ check('C12：createAndOpen 走 session/create → /permission → openSession(ne
     submittedAttachments: [],
   }, '权限预设走 /permission 斜杠命令')
 
+  const modelCall = callAt(
+    fake,
+    fake.calls.findIndex((call) => (call.params as { endpoint?: string }).endpoint === 'session/selectModel'),
+  )
+  assertEqual(modelCall.args, {
+    request: { sessionId: 's-new', provider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'max' },
+  }, '模型 + 思考强度走 session/selectModel')
+
   assertEqual(observed.opened, ['s-new'], '建完就进会话')
   assertEqual(useNewSessionStore.getState().open, false, '建完关面板')
   assertEqual(useNewSessionStore.getState().lastCreatedSessionId, 's-new', '记住新建的 id')
+  assertEqual(useNewSessionStore.getState().modelApply.status, 'idle', '模型应用成功')
+  assertEqual(useNewSessionStore.getState().modelApply.via, 'select', '先走 selectModel')
 })
 
 check('C13：能力缺失时整块关掉，createAndOpen 一个 create 请求都不发', async () => {
@@ -692,7 +759,7 @@ check('C18：probeCapabilities 先等连接对象出现，再一次性把能力�
   // 连接对象还没被任何业务调用记下来（`store.ts` 里 phase=ready 早于第一次业务调用）
   observeRemoteTarget(null)
   useRemoteStore.setState({ phase: 'ready', openSession: async () => undefined, refreshSessions: async () => undefined })
-  useNewSessionStore.setState({ capabilities: { workspace: false, create: false, directory: false, permission: false, agentPreset: false, search: false, manage: false } })
+  useNewSessionStore.setState({ capabilities: { workspace: false, create: false, directory: false, permission: false, agentPreset: false, model: false, search: false, manage: false } })
 
   const fake = fakeTarget(FULL_REPLIES)
   // 150ms 后才「出现」连接对象（模拟 $events / session/list 稍后才发出）
@@ -714,7 +781,7 @@ check('C18：probeCapabilities 先等连接对象出现，再一次性把能力�
   useRemoteStore.setState({ phase: 'idle' })
   resetNewSession()
   useNewSessionStore.setState({
-    capabilities: { workspace: false, create: false, directory: false, permission: false, agentPreset: false, search: false, manage: false },
+    capabilities: { workspace: false, create: false, directory: false, permission: false, agentPreset: false, model: false, search: false, manage: false },
   })
   const startedAt = Date.now()
   await useNewSessionStore.getState().probeCapabilities()
@@ -756,6 +823,137 @@ check('D17：可选端点的解析（目录 / 权限目录 / agent preset / 默�
   assertEqual((await fetchPermissionCatalog(catalog.target)).options, [{ value: 'default', name: '默认' }], '权限目录过滤坏行')
   assertEqual((await fetchAgentPresets(catalog.target)).map((preset) => preset.id), ['ptc'], 'agent preset 过滤坏行')
   assertEqual(await fetchDefaultModel(catalog.target), null, '默认模型缺 model → null')
+})
+
+/* ────────────────────────────────────────────────────────────────────────
+ * E. 模型 + 思考强度：建完之后怎么应用（本轮新增）
+ * ──────────────────────────────────────────────────────────────────────── */
+
+check('E19：selectModel 不可用 → 退回 initializeDefaultModel，会话照样进得去', async () => {
+  resetNewSession()
+  const fake = fakeTarget({
+    ...FULL_REPLIES,
+    'session/selectModel': { ok: false, code: 'METHOD_NOT_FOUND', message: 'no such endpoint' },
+    'session/initializeDefaultModel': {
+      ok: true,
+      value: { selected: { provider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'max' } },
+    },
+  })
+  const observed = connectFake(fake)
+  await useNewSessionStore.getState().refresh()
+  useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4', 'max')
+
+  assertEqual(await useNewSessionStore.getState().createAndOpen(), 's-new', '仍然建成功')
+  assertEqual(endpointCount(fake, 'session/selectModel'), 1, '先试了 selectModel')
+  assertEqual(endpointCount(fake, 'session/initializeDefaultModel'), 1, '再退到 initializeDefaultModel')
+  assertEqual(
+    callAt(fake, fake.calls.findIndex((call) => (call.params as { endpoint?: string }).endpoint === 'session/initializeDefaultModel')).args,
+    { request: { sessionId: 's-new', provider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'max' } },
+    'initializeDefaultModel 的参数形状',
+  )
+  assertEqual(useNewSessionStore.getState().modelApply.via, 'initialize', '记住走的是哪条路')
+  assertEqual(observed.opened, ['s-new'], '照常进会话')
+})
+
+check('E20：两条模型路都失败 → 失败可见（面板停住）+ 跳过 / 重试 两条出路', async () => {
+  resetNewSession()
+  let selectModelOk = false
+  const fake = fakeTarget({
+    ...FULL_REPLIES,
+    'session/selectModel': () => (selectModelOk
+      ? { ok: true, value: { selected: { provider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'max' }, defaultSave: { status: 'saved' } } }
+      : { ok: false, code: 'AGENT_BUSY', message: '不能切' }),
+    'session/initializeDefaultModel': { ok: false, code: 'METHOD_NOT_FOUND', message: 'no such endpoint' },
+  })
+  const observed = connectFake(fake)
+  await useNewSessionStore.getState().refresh()
+  useNewSessionStore.setState({ open: true })
+  useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4', 'max')
+
+  const created = await useNewSessionStore.getState().createAndOpen()
+  assertEqual(created, 's-new', '会话建出来了')
+  const failed = useNewSessionStore.getState()
+  assertEqual(failed.modelApply.status, 'failed', '失败状态可见')
+  assertTrue((failed.modelApply.error ?? '').length > 0, '带上了原因')
+  assertEqual(failed.createdSessionId, 's-new', '记住这个已建好的会话')
+  assertEqual(failed.open, true, '面板**没有**关（让用户看见失败）')
+  assertEqual(observed.opened, [], '还没进会话')
+
+  // 重试一次就通
+  selectModelOk = true
+  await useNewSessionStore.getState().retryModelApply()
+  assertEqual(observed.opened, ['s-new'], '重试成功后进会话')
+  assertEqual(useNewSessionStore.getState().open, false, '这时才关面板')
+  assertEqual(useNewSessionStore.getState().modelApply.status, 'idle', '状态复位')
+})
+
+check('E21：跳过模型选择 → 用默认模型直接进会话，并留一句提示', async () => {
+  resetNewSession()
+  const fake = fakeTarget({
+    ...FULL_REPLIES,
+    'session/selectModel': { ok: false, code: 'AGENT_BUSY', message: '不能切' },
+    'session/initializeDefaultModel': { ok: false, code: 'METHOD_NOT_FOUND', message: 'no such endpoint' },
+  })
+  const observed = connectFake(fake)
+  await useNewSessionStore.getState().refresh()
+  useNewSessionStore.setState({ open: true })
+  useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4')
+
+  await useNewSessionStore.getState().createAndOpen()
+  assertEqual(useNewSessionStore.getState().open, true, '失败后面板还开着')
+
+  await useNewSessionStore.getState().skipModelAndOpen()
+  assertEqual(observed.opened, ['s-new'], '跳过之后进会话')
+  assertEqual(useNewSessionStore.getState().open, false, '面板关掉')
+  assertEqual(useNewSessionStore.getState().createdSessionId, null, '失败态清掉')
+})
+
+check('E22：defaultSave 失败 ≠ 模型没切成：会话照常进，但提示「默认没存上」', async () => {
+  resetNewSession()
+  const fake = fakeTarget({
+    ...FULL_REPLIES,
+    'session/selectModel': {
+      ok: true,
+      value: {
+        selected: { provider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'max' },
+        defaultSave: { status: 'failed', message: 'settings locked' },
+      },
+    },
+  })
+  const observed = connectFake(fake)
+  await useNewSessionStore.getState().refresh()
+  useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4', 'max')
+
+  await useNewSessionStore.getState().createAndOpen()
+  assertEqual(observed.opened, ['s-new'], '模型切好了，会话照常进')
+  assertEqual(useNewSessionStore.getState().modelApply.defaultSave, 'failed', '记住 defaultSave 失败了')
+  const notice = useNewSessionStore.getState().notice ?? ''
+  assertTrue(notice.length > 0, '有一句提示（不静默）')
+  assertTrue(notice.includes('默认'), '提示里点名了「默认」')
+})
+
+check('E23：继承 Host 默认（modelPick=null）→ 一个模型端点都不发；切模型会清掉旧档位', async () => {
+  resetNewSession()
+  const fake = fakeTarget(FULL_REPLIES)
+  const observed = connectFake(fake)
+  await useNewSessionStore.getState().refresh()
+
+  // 不选模型 = 继承 Host 默认
+  await useNewSessionStore.getState().createAndOpen()
+  assertEqual(observed.opened, ['s-new'], '照常进会话')
+  assertEqual(endpointCount(fake, 'session/selectModel'), 0, '没有发 selectModel')
+  assertEqual(endpointCount(fake, 'session/initializeDefaultModel'), 0, '也没有发 initializeDefaultModel')
+
+  // 选模型 + 档位；换成没有档位的模型时旧档位必须丢掉（否则会发一个不存在的 effort）
+  useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4', 'max')
+  assertEqual(useNewSessionStore.getState().modelPick, { provider: 'deepseek', model: 'deepseek-v4', effort: 'max' }, '选模型 + 档位')
+  useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4-mini')
+  assertEqual(useNewSessionStore.getState().modelPick, { provider: 'deepseek', model: 'deepseek-v4-mini' }, '换模型丢掉旧档位')
+
+  // 只点档位（没选模型时从「当前生效的模型」落成一份显式选择）
+  useNewSessionStore.setState({ modelPick: null })
+  useNewSessionStore.getState().pickEffort('low')
+  assertEqual(useNewSessionStore.getState().modelPick, { provider: 'deepseek', model: 'deepseek-v4', effort: 'low' }, '点档位 = 显式选模型')
 })
 
 /* ── 跑 ───────────────────────────────────────────────────────────────── */

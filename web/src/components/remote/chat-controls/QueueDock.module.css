@@ -1,10 +1,10 @@
-/* 排队提示条：贴在输入框上方的一条窄条，行内是「预览 + 立即发送 + 删除」 */
+/* 排队提示条：贴在输入框上方的一条窄条，行内是「序号 + 预览 + 立即发送 + 删除」 */
 .dock {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
   margin-bottom: 6px;
-  padding: 6px 8px;
+  padding: 5px 8px 6px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 14px;
   background-color: var(--dsw-alias-interactive-bg-hover);
@@ -14,7 +14,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 4px 4px;
+  padding: 0 4px 3px;
 }
 
 .title {
@@ -43,6 +43,18 @@
   align-items: center;
   gap: 6px;
   padding: 2px 0 2px 4px;
+}
+
+/* 序号：让「排在第三条」这件事一眼可见，不用去数行数 */
+.index {
+  flex-shrink: 0;
+  width: 14px;
+  font-size: 10px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary);
+  text-align: right;
+  user-select: none;
 }
 
 .preview {

@@ -186,27 +186,9 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
-/* ---------- 运行中的骨架 ---------- */
+/* ---------- 运行中的骨架 / 图片加载中的骨架 ---------- */
 
-.skeleton {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 2px 10px 10px 36px;
-}
-
-.skeletonBar {
-  height: 8px;
-  border-radius: 4px;
-  background-color: var(--dsw-alias-bg-skeleton);
-  animation: toolCardPulse 1.6s ease-in-out infinite;
-}
-
-.skeletonBar:nth-child(2) {
-  width: 62%;
-  animation-delay: 0.2s;
-}
-
+/* 收起状态下**不再**给运行中的卡长骨架：只在图片缩略图里用它（见 .thumbSkeleton）。 */
 @keyframes toolCardPulse {
   0%,
   100% {
@@ -600,11 +582,25 @@
   border-radius: 10px;
   background-color: var(--dsw-alias-markdown-code-block);
   overflow: hidden;
+}
+
+/* 只有「加载成功」这一态可点：按钮铺满整个缩略图框，点哪里都能进全屏 */
+.thumbButton {
+  position: absolute;
+  inset: 0;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
   cursor: zoom-in;
 
   &:focus-visible {
     outline: 2px solid var(--dsw-alias-brand-primary);
-    outline-offset: 2px;
+    outline-offset: -3px;
+    border-radius: 9px;
   }
 }
 
@@ -615,18 +611,55 @@
   object-fit: cover;
 }
 
-/* 拿不到像素时的占位：图标 + 文件名，不留空框 */
+/* 加载中：骨架条，不留空框也不画裂图 */
+.thumbSkeleton {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+.thumbSkeletonBar {
+  height: 8px;
+  border-radius: 4px;
+  background-color: var(--dsw-alias-bg-skeleton);
+  animation: toolCardPulse 1.6s ease-in-out infinite;
+}
+
+.thumbSkeletonBar:nth-child(2) {
+  width: 62%;
+  animation-delay: 0.2s;
+}
+
+/* 拿不到像素时的占位：图标 + 文件名 + 原因 / 重试，不留空框 */
 .thumbPlaceholder {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 3px;
+  box-sizing: border-box;
   width: 100%;
   height: 100%;
-  padding: 4px;
-  box-sizing: border-box;
+  padding: 6px;
   color: var(--dsw-alias-label-tertiary);
+  text-align: center;
+}
+
+.thumbFailed {
+  display: flex;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.thumbUnavailable {
+  display: flex;
+  color: var(--dsw-alias-label-caption);
 }
 
 .thumbName {
@@ -636,6 +669,35 @@
   line-height: 14px;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.thumbReason {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 10px;
+  line-height: 13px;
+  color: var(--dsw-alias-label-caption);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.thumbRetry {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-brand-text);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 15px;
+  cursor: pointer;
+
+  &:active {
+    background-color: var(--dsw-alias-interactive-bg-active);
+  }
 }
 
 /* ---------- 全屏查看层 ---------- */
@@ -693,6 +755,33 @@
   }
 }
 
+/* 「下载」：与关闭按钮同一排，放在它左边（右上角） */
+.viewerDownload {
+  position: absolute;
+  top: calc(12px + var(--ds-top-offset));
+  right: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background-color: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+
+  &:active {
+    background-color: rgba(255, 255, 255, 0.22);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+
 /* ---------- 窄屏 ---------- */
 
 @media not all and (min-width: 768px) {
@@ -702,7 +791,6 @@
   }
 
   .body,
-  .skeleton,
   .images {
     padding-left: 8px;
   }

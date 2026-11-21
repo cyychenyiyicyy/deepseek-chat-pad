@@ -11,6 +11,13 @@
   background-color: var(--dsw-alias-bg-base);
 }
 
+/* 已失效（超时 / Host 撤回 / 没有句柄）：描边压灰，卡片还在但一眼看出不能答 */
+.card[data-status='expired'],
+.card[data-status='stale'],
+.card[data-status='cancelled'] {
+  border-style: dashed;
+}
+
 .head {
   display: flex;
   align-items: flex-start;
@@ -24,8 +31,16 @@
   color: var(--dsw-alias-brand-text);
 }
 
+.iconMuted {
+  display: inline-flex;
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--dsw-alias-label-dimmed);
+}
+
 .headCopy {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 1px;
   min-width: 0;
@@ -50,10 +65,45 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
+.statusDone {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 3px;
+  color: var(--dsw-alias-brand-text);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.statusDead {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 3px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 20px;
+}
+
 .block {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.questionRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 多条问题时给个序号：选项一多，人能对上是第几条 */
+.questionIndex {
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 22px;
 }
 
 .question {
@@ -73,12 +123,20 @@
   user-select: text;
 }
 
+/* 单选 / 可多选：别让人猜（多选时尤其要说明，不然没人会想到点第二个） */
+.modeHint {
+  color: var(--dsw-alias-label-caption);
+  font-size: 11px;
+  line-height: 16px;
+}
+
 .option {
   display: flex;
   align-items: flex-start;
   gap: 8px;
   box-sizing: border-box;
   width: 100%;
+  min-height: 34px;
   padding: 7px 10px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 10px;
@@ -119,7 +177,22 @@
   color: var(--dsw-alias-brand-text);
 }
 
-.dotChosen {
+/* 多选画方框（复选框），单选画圆点（单选钮）——形状本身就是提示 */
+.box {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 4px;
+  color: var(--dsw-alias-brand-text);
+}
+
+.markChosen {
   border-color: var(--dsw-alias-button-ghost-active-border);
 }
 
@@ -138,6 +211,13 @@
   font-size: 11px;
   line-height: 16px;
   color: var(--dsw-alias-label-tertiary);
+}
+
+.customWrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .custom {
@@ -162,6 +242,21 @@
   }
 }
 
+.counter {
+  align-self: flex-end;
+  color: var(--dsw-alias-label-caption);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* 到顶了：换成错误色，比单纯灰字更能拦住「怎么打不上去了」 */
+.counterFull {
+  align-self: flex-end;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
 .error {
   font-size: 12px;
   line-height: 18px;
@@ -171,29 +266,33 @@
 
 .actions {
   display: flex;
-  justify-content: flex-end;
-}
-
-/* 已应答 / 已结束：一行灰色小字，不再占卡片 */
-.resolved {
-  display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 6px;
-  margin-bottom: 10px;
-  padding: 6px 10px;
-  border-radius: 10px;
-  background-color: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
-  line-height: 18px;
+  align-items: flex-end;
 }
 
-.resolvedIcon {
-  display: inline-flex;
-  color: var(--dsw-alias-brand-text);
-}
-
-.resolvedIconMuted {
-  display: inline-flex;
+.pendingHint {
+  align-self: flex-start;
   color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.submit {
+  min-height: 36px;
+}
+
+@media not all and (min-width: 768px) {
+  /* 手机：选项行与提交按钮都至少 44px 高（触控要求），提交占满一行 */
+  .option {
+    min-height: 44px;
+  }
+
+  .actions {
+    align-items: stretch;
+  }
+
+  .submit {
+    min-height: 44px;
+  }
 }

@@ -155,7 +155,8 @@ const knownClasses = new Set([
   'UpdateHandler',
   'ApkUpdater',
   'ChatDatabase',
-  'DbHandler'
+  'DbHandler',
+  'RemoteDownloadHandler'
 ])
 const javaProblems = []
 const stringCollisions = []
@@ -359,13 +360,24 @@ const expected = [
   // 只声明给页面临时申请，保活服务自己不开 WakeLock
   'android.permission.WAKE_LOCK',
   // 拉起系统「忽略电池优化」授权页（data=package:<pkg>）
-  'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'
+  'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+  // 保存到「下载」目录：只在 Android 9（API 28）需要，29+ 走 MediaStore.Downloads
+  'android.permission.WRITE_EXTERNAL_STORAGE'
 ]
 for (const permission of expected) {
   if (!declaredPermissions.includes(permission)) manifestProblems.push(`清单缺少权限 ${permission}`)
 }
 for (const permission of declaredPermissions) {
   if (!expected.includes(permission)) manifestProblems.push(`清单多了不该有的权限 ${permission}`)
+}
+// WRITE_EXTERNAL_STORAGE 必须带 maxSdkVersion="28"：29+ 声明它既没用又会触发
+// 「访问所有照片/媒体」之类的敏感权限提示（/__ds_download/save 在 29+ 走 MediaStore）
+if (
+  !/android:name="android\.permission\.WRITE_EXTERNAL_STORAGE"\s*\n\s*android:maxSdkVersion="28"/.test(
+    manifest
+  )
+) {
+  manifestProblems.push('WRITE_EXTERNAL_STORAGE 没有 maxSdkVersion="28"（29+ 一律不允许声明它）')
 }
 if (!/android:networkSecurityConfig="@xml\/network_security_config"/.test(manifest)) {
   manifestProblems.push('清单没有引用 networkSecurityConfig')
@@ -405,7 +417,7 @@ if (!filePaths) {
   }
 }
 if (manifestProblems.length === 0) {
-  ok('manifest.security', '仅 INTERNET/ACCESS_NETWORK_STATE/REQUEST_INSTALL_PACKAGES + 保活那 5 项（FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC、POST_NOTIFICATIONS、WAKE_LOCK、REQUEST_IGNORE_BATTERY_OPTIMIZATIONS），明文只放行回环，FileProvider 范围精确')
+  ok('manifest.security', '仅 INTERNET/ACCESS_NETWORK_STATE/REQUEST_INSTALL_PACKAGES + 保活那 5 项（FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC、POST_NOTIFICATIONS、WAKE_LOCK、REQUEST_IGNORE_BATTERY_OPTIMIZATIONS）+ 下载目录写入（WRITE_EXTERNAL_STORAGE，锁死 28），明文只放行回环，FileProvider 范围精确')
 } else fail('manifest.security', manifestProblems.join('\n       '))
 
 // ---------------------------------------------------------------- 5. 关键实现断言（防止写漏需求点）
@@ -422,6 +434,24 @@ const httpUtil = readJava('HttpUtil')
 const update = readJava('UpdateHandler')
 const webBundle = readJava('WebBundle')
 const apkUpdater = readJava('ApkUpdater')
+const keepAlive = readJava('KeepAliveHandler')
+const keepAliveService = readJava('RemoteKeepAliveService')
+const notify = readJava('RemoteNotifyHandler')
+const download = readJava('RemoteDownloadHandler')
+// R7 的 Web 侧落点：下载服务 + 两处挂点 + i18n 文案
+const WEB_SRC = path.resolve(ROOT, '..', 'web', 'src')
+const readWebFile = (relative) => {
+  const file = path.join(WEB_SRC, relative)
+  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
+}
+const webDownload = readWebFile('services/remote/download.ts')
+// 两处挂点：抽屉顶部（WorkspacePane 的 IconButton，长按换来源在 AttachmentButton）与
+// 工具卡全屏层（ToolCard 的 ImageViewer）
+const workspacePaneSource = readWebFile('components/remote/workspace/WorkspacePane.tsx')
+const attachmentButtonSource = readWebFile('components/remote/workspace/AttachmentButton.tsx')
+const toolCardSource = readWebFile('components/remote/tool/ToolCard.tsx')
+const zhMessages = readWebFile('i18n/zh.ts')
+const enMessages = readWebFile('i18n/en.ts')
 // 仓库名只允许出现在一处常量里，硬编码到多处会让换仓库变成手工对齐
 const allJava = javaFiles.map((file) => fs.readFileSync(file, 'utf8')).join('\n')
 
@@ -492,7 +522,169 @@ const featureChecks = [
     && /vnd\.android\.package-archive/.test(apkUpdater) && /ACTION_VIEW/.test(apkUpdater)
     && /FLAG_GRANT_READ_URI_PERMISSION/.test(apkUpdater)],
   ['install-apk：错误码 not_downloaded / no_installer', /"not_downloaded"/.test(apkUpdater)
-    && /"no_installer"/.test(apkUpdater)]
+    && /"no_installer"/.test(apkUpdater)],
+
+  // ---- R3 通知中心（/__ds_notify/*）：权限判定不许假成功 + 三类通知 ----
+  // 权限判定三层（A 段）：33+ 运行时权限 && 26+ 总开关 && 三条渠道都不是 NONE/缺失
+  ['权限判定：三层都算（权限 + 总开关 + 渠道），不再只看总开关',
+    /static boolean isNotificationVisible\(/.test(keepAlive)
+    && /manager\.areNotificationsEnabled\(\)/.test(keepAlive)
+    && /checkSelfPermission\(Manifest\.permission\.POST_NOTIFICATIONS\)/.test(keepAlive)
+    && /getNotificationChannel\(channelId\)/.test(keepAlive)
+    && /IMPORTANCE_NONE/.test(keepAlive)
+    && /Build\.VERSION_CODES\.TIRAMISU/.test(keepAlive)],
+  ['权限判定：不再用反射调 areNotificationsEnabled',
+    !/getMethod\("areNotificationsEnabled"\)/.test(keepAlive)],
+  ['canRequest：33+ 且未授予，且不是「拒绝且不再询问」（看 rationale + 落盘标志）',
+    /canRequestCore\(/.test(keepAlive)
+    && /shouldShowRequestPermissionRationale/.test(keepAlive)
+    && /hasAskedNotificationPermission/.test(keepAlive)
+    && /markNotificationPermissionAsked/.test(keepAlive)
+    && /PREFS_NOTIFY = "dsp\.notify\.v1"/.test(keepAlive)],
+  ['MainActivity 真的发起 requestPermissions（等窗口焦点、只问一次、回调记真值）',
+    /requestPermissions\(new String\[\] \{Manifest\.permission\.POST_NOTIFICATIONS\}/.test(mainActivity)
+    && /onRequestPermissionsResult/.test(mainActivity)
+    && /hasWindowFocus\(\)/.test(mainActivity)
+    && /markNotificationPermissionAsked/.test(mainActivity)
+    && /scheduleNotificationPermissionRequest/.test(mainActivity)],
+  ['通知中心：三条路由 + 带扩展名的探测别名',
+    /PATH_PREFIX = "\/__ds_notify\/"/.test(notify)
+    && /"\/__ds_notify\/work"/.test(notify)
+    && /"\/__ds_notify\/clear"/.test(notify)
+    && /"\/__ds_notify\/state\.json"/.test(notify)],
+  ['通知中心：两个渠道 chatpad.work(LOW) / chatpad.alert(HIGH) + 同一通知组 chatpad',
+    /CHANNEL_WORK = "chatpad\.work"/.test(notify)
+    && /CHANNEL_ALERT = "chatpad\.alert"/.test(notify)
+    && /IMPORTANCE_LOW/.test(notify) && /IMPORTANCE_HIGH/.test(notify)
+    && /GROUP_KEY = "chatpad"/.test(notify)
+    && /setGroup\(RemoteNotifyHandler\.GROUP_KEY\)/.test(keepAliveService)],
+  ['进行中：InboxStyle 汇总 + setNumber + 超过 3 条只留 3 条「等 N 个」',
+    /Notification\.InboxStyle/.test(notify)
+    && /setNumber\(total\)/.test(notify)
+    && /MAX_RUNNING_LINES = 3/.test(notify)
+    && /"等 " \+ total \+ " 个任务"/.test(notify)],
+  ['完成/出错：独立通知 + autoCancel；待审批：ongoing + 高优先级，且**不用** fullScreenIntent',
+    /setAutoCancel\(true\)/.test(notify)
+    && /setOngoing\(true\)/.test(notify)
+    && /CATEGORY_REMINDER/.test(notify)
+    && !/\.setFullScreenIntent\(/.test(notify)],
+  ['点通知回 App：PendingIntent FLAG_IMMUTABLE + sessionId extra + 按会话区分 requestCode',
+    /PendingIntent\.FLAG_IMMUTABLE/.test(notify)
+    && /EXTRA_SESSION_ID/.test(notify)
+    && /putExtra\(EXTRA_SESSION_ID/.test(notify)
+    && /REQUEST_OPEN_BASE/.test(notify)],
+  ['通知 id 与前台服务 id 不重叠，/clear 不会撤掉常驻通知',
+    /ID_SUMMARY = 0x44530101/.test(notify)
+    && /ID_EVENT_BASE = 0x44531000/.test(notify)
+    && /ID_APPROVAL_BASE = 0x44532000/.test(notify)
+    && /NOTIFICATION_ID = 0x44530001/.test(keepAliveService)],
+  ['Android 9 兼容：不用 12+ 的 setForegroundServiceBehavior、渠道先建后发',
+    !/\.setForegroundServiceBehavior\(/.test(notify)
+    && !/\.setForegroundServiceBehavior\(/.test(keepAliveService)
+    && /static void ensureChannels\(Context context\)/.test(notify)
+    && /createNotificationChannel/.test(notify)
+    && /NotificationChannel channel = manager\.getNotificationChannel/.test(notify)],
+  ['常驻通知带上任务数（「正在保持远程连接 · N 个任务」）',
+    /WORK_SUFFIX_FORMAT = " · %d 个任务"/.test(keepAliveService)
+    && /setActiveWorkCount/.test(keepAliveService)
+    && /setActiveWorkCount\(app, running\.size\(\)\)/.test(notify)],
+  ['通知中心挂在静态资源之前，且退出时不清工作通知',
+    localServer.includes('notifyHandler.handle(')
+    && localServer.indexOf('notifyHandler.handle(') < localServer.indexOf('assetHandler.handle(')
+    && !/notifyHandler\.cancelAll\(\)/.test(localServer)],
+
+  // ---- R7 附件上传的来源面板（系统文件 / MT 管理器 / 其他应用） ----
+  ['来源面板：平台 AlertDialog 三选一（系统 / MT / 其他）',
+    /new AlertDialog\.Builder\(this\)/.test(mainActivity)
+    && /SOURCE_SYSTEM = "system"/.test(mainActivity)
+    && /SOURCE_MT = "mt"/.test(mainActivity)
+    && /SOURCE_CHOOSER = "chooser"/.test(mainActivity)
+    && /builder\.setItems\(/.test(mainActivity)
+    && /R\.string\.pick_source_other/.test(mainActivity)],
+  ['系统文件：ACTION_OPEN_DOCUMENT + EXTRA_ALLOW_MULTIPLE',
+    /new Intent\(Intent\.ACTION_OPEN_DOCUMENT\)/.test(mainActivity)
+    && /document\.addCategory\(Intent\.CATEGORY_OPENABLE\)/.test(mainActivity)
+    && /Intent\.EXTRA_ALLOW_MULTIPLE, true/.test(mainActivity)],
+  ['MT 管理器：GET_CONTENT + setType("*/*") + setPackage("bin.mt.plus")，先 resolveActivity 再跳',
+    /MT_PACKAGE = "bin\.mt\.plus"/.test(mainActivity)
+    && /intent\.setPackage\(MT_PACKAGE\)/.test(mainActivity)
+    && /intent\.resolveActivity\(getPackageManager\(\)\) == null/.test(mainActivity)
+    && /MT 管理器没有注册 GET_CONTENT，不硬跳/.test(mainActivity)],
+  ['其他应用：createChooser(GET_CONTENT)，且**不**加 CATEGORY_OPENABLE（否则 MT 进不了候选）',
+    /launchOtherAppsPicker/.test(mainActivity)
+    && /return startForFileChooser\(Intent\.createChooser\(intent, getString\(R\.string\.pick_file\)\)\)/.test(mainActivity)
+    && !/new Intent\(Intent\.ACTION_GET_CONTENT\)[\s\S]{0,400}?CATEGORY_OPENABLE/.test(mainActivity)],
+  ['来源记忆落 SharedPreferences（下次直接走上次那个）',
+    /PREFS_PICKER = "dsp\.picker\.v1"/.test(mainActivity)
+    && /rememberPickerSource\(/.test(mainActivity)
+    && /rememberedPickerSource\(\)/.test(mainActivity)
+    && /\.putString\(KEY_PICKER_SOURCE, source\)/.test(mainActivity)],
+  ['长按换来源：DSNativePicker.reset() 原生桥',
+    /addJavascriptInterface\(new PickerBridge\(\), "DSNativePicker"\)/.test(mainActivity)
+    && /public void reset\(\)/.test(mainActivity)
+    && /forgetPickerSource\(\)/.test(mainActivity)],
+  ['取消选择回 null（空数组会让页面「+」一直挂住），且 onDestroy 收尾',
+    /callback\.onReceiveValue\(null\)/.test(mainActivity)
+    && /cancelFileChooser\(\);\s*\n\s*if \(server != null\)/m.test(mainActivity)],
+  ['只收 content://（WebView 关着 allowFileAccess，file:// 进去等于没反应）',
+    /isReadablePickedUri/.test(mainActivity)
+    && /"content"\.equalsIgnoreCase\(scheme\)/.test(mainActivity)
+    && /pick_source_unreadable/.test(mainActivity)],
+
+  // ---- R7 保存到系统「下载」目录（/__ds_download/*） ----
+  ['下载路由：save / state(.json 探测) / permission 三条都在',
+    /PATH_SAVE = "\/__ds_download\/save"/.test(download)
+    && /PATH_STATE = "\/__ds_download\/state"/.test(download)
+    && /PATH_STATE_PROBE = "\/__ds_download\/state\.json"/.test(download)
+    && /PATH_PERMISSION = "\/__ds_download\/permission"/.test(download)],
+  ['下载路由挂在静态资源之前（否则会被当成页面路径）',
+    localServer.includes('downloadHandler.handle(')
+    && localServer.indexOf('downloadHandler.handle(') < localServer.indexOf('assetHandler.handle(')],
+  ['Android 10+：MediaStore.Downloads + RELATIVE_PATH + IS_PENDING',
+    /MediaStore\.Downloads\.getContentUri\(MediaStore\.VOLUME_EXTERNAL_PRIMARY\)/.test(download)
+    && /MediaStore\.MediaColumns\.RELATIVE_PATH/.test(download)
+    && /MediaStore\.MediaColumns\.IS_PENDING/.test(download)
+    && /Environment\.DIRECTORY_DOWNLOADS/.test(download)],
+  ['Android 9：直接写公共下载目录 + MediaScanner 扫描',
+    /getExternalStoragePublicDirectory/.test(download)
+    && /MediaScannerConnection\.scanFile/.test(download)
+    && /mkdirs\(\)/.test(download)],
+  ['单文件 32 MiB 上限（超限 413 too_large），请求体另设上限',
+    /MAX_FILE_BYTES = 32 \* 1024 \* 1024/.test(download)
+    && /MAX_BODY_BYTES = 48 \* 1024 \* 1024/.test(download)
+    && /new HttpError\(413, "too_large"\)/.test(download)],
+  ['文件名净化：去路径分隔符 / 去 .. / 去控制字符 / 限长保留扩展名',
+    /sanitizeName\(/.test(download)
+    && /name\.lastIndexOf\('\\\\'\)/.test(download)
+    && /replace\("\.\.", "\."\)/.test(download)
+    && /MAX_NAME_CHARS/.test(download)],
+  ['可读错误码：bad_name / bad_body / too_large / permission_denied / io_error',
+    /"bad_name"/.test(download) && /"bad_body"/.test(download)
+    && /"permission_denied"/.test(download) && /"io_error"/.test(download)],
+  ['state 回 canWrite / dir / sdkInt，28 上 canWrite 看运行时权限',
+    /json\.put\("canWrite", canWrite\(\)\)/.test(download)
+    && /"sdkInt", Build\.VERSION\.SDK_INT/.test(download)
+    && /checkSelfPermission\(Manifest\.permission\.WRITE_EXTERNAL_STORAGE\)/.test(download)],
+  ['Android 9 运行时权限申请（靠 ActivityLifecycleCallbacks 找当前 Activity）',
+    /REQ_WRITE_STORAGE = 4714/.test(download)
+    && /requestPermissions\(\s*\n?\s*new String\[\] \{Manifest\.permission\.WRITE_EXTERNAL_STORAGE\}/.test(download)
+    && /ActivityLifecycleCallbacks/.test(download)
+    && /resumedActivity\(\)/.test(download)],
+  ['32 MiB 的 base64 不走 String 解析（按字节定位字段，避免两份 UTF-16 副本）',
+    /findStringField\(body, "dataBase64"\)/.test(download)
+    && /Base64\.decode\(body, range\[0\], length, Base64\.DEFAULT\)/.test(download)],
+  ['Web：services/remote/download.ts 调 save + state，成功/失败都给 toast',
+    /\/__ds_download\/save/.test(webDownload) && /\/__ds_download\/state\.json/.test(webDownload)
+    && /saveToDownloads/.test(webDownload)
+    && /showToast/.test(webDownload)
+    && /\/__ds_download\/permission/.test(webDownload)],
+  ['Web：预览与工具卡都挂上了下载按钮（只加挂点，不动布局）',
+    /downloadAction/.test(workspacePaneSource)
+    && /downloadWorkspacePath|downloadFromUrl/.test(workspacePaneSource)
+    && /downloadAction/.test(toolCardSource)
+    && /downloadFromUrl/.test(toolCardSource)
+    && /DSNativePicker/.test(attachmentButtonSource)
+    && /downloadSaved/.test(zhMessages) && /downloadSaved/.test(enMessages)]
 ]
 const featureProblems = featureChecks.filter(([, pass]) => !pass).map(([label]) => label)
 if (featureProblems.length === 0) ok('features', `${featureChecks.length} 项需求断言全部命中`)

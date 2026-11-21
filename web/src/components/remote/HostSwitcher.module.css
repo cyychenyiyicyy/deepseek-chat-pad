@@ -1,0 +1,234 @@
+/*
+ * Host 下拉（R14）：顶栏里的一粒「当前电脑」胶囊 + 挂在 body 上的菜单。
+ *
+ * 视觉沿用顶栏既有那套语言：胶囊 = ghost 填充 + 100px 圆角（与 `RemoteModeSwitch` 的胶囊、
+ * `RemoteChatView` 的 transport 徽标同一档字号 11-12px），菜单 = 与 `SessionList` 的
+ * 「⋯」菜单同款浮层（底色 layer-2、边框 l2、8px 圆角、4px 内边距）。
+ * 所有颜色都走 token，深色/浅色两套主题自动跟随。
+ */
+
+.wrap {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  min-width: 0;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  box-sizing: border-box;
+  padding: 2px 8px 2px 7px;
+  border: 1px solid transparent;
+  border-radius: 100px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.trigger:hover {
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.trigger:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+/* 连接还没 ready（未连接 / 正在建链）：胶囊暗一档，但**不隐藏** —— 用户要知道自己在哪台机器上 */
+.triggerDim {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 切换中：胶囊自己是「正在连接…」的唯一可见位置，所以给它一点底 */
+.triggerBusy {
+  border-color: var(--dsw-alias-button-ghost-active-border);
+  background-color: var(--dsw-alias-button-ghost-active-fill);
+  color: var(--dsw-alias-brand-text);
+  cursor: progress;
+}
+
+.trigger:disabled {
+  cursor: progress;
+}
+
+.triggerText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 窄屏（手机宽度）：顶栏同时要放标题 / 控制胶囊 / 通道徽标，这里先把自己收窄 */
+@media (max-width: 520px) {
+  .trigger {
+    max-width: 132px;
+  }
+}
+
+.caret {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  opacity: 0.6;
+}
+
+/* 在线点：8px 圆点。绿色是「活着」，灰点是「离线/未知」 */
+.dot {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.dotOnline {
+  background-color: var(--dsw-static-green-500);
+  box-shadow: 0 0 0 2px var(--dsw-static-green-100);
+}
+
+.dotOffline {
+  background-color: var(--dsw-alias-label-dimmed);
+}
+
+/* ---- 菜单 ---- */
+
+.menu {
+  position: fixed;
+  z-index: 240;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-sizing: border-box;
+  width: 260px;
+  max-height: 320px;
+  padding: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background-color: var(--dsw-alias-bg-layer-2);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 18px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.row:hover:not(:disabled) {
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rowActive {
+  background-color: var(--dsw-alias-button-ghost-active-fill);
+}
+
+/* 离线 / 身份不符：标灰 + 不可点（原因写在下方的 rowHint 里） */
+.rowBlocked {
+  color: var(--dsw-alias-label-dimmed);
+  cursor: not-allowed;
+}
+
+.rowBlocked .dot {
+  opacity: 0.5;
+}
+
+.rowMain {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.rowName {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowMeta {
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowHint {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: normal;
+}
+
+.check {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  margin-top: 1px;
+  color: var(--dsw-alias-brand-text);
+}
+
+.empty {
+  padding: 10px 8px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.separator {
+  height: 1px;
+  margin: 4px 2px;
+  background-color: var(--dsw-alias-border-l2);
+}
+
+.refresh {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.refresh:hover:not(:disabled) {
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.refresh:disabled {
+  color: var(--dsw-alias-label-dimmed);
+  cursor: progress;
+}
+
+.refreshIcon {
+  display: inline-flex;
+  align-items: center;
+}

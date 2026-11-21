@@ -1,33 +1,97 @@
+import clsx from 'clsx'
 import { useRef } from 'react'
 import { useTranslate } from '../../../i18n/index.js'
 import { IconPaperclipOutline16 } from '../../base/icons.js'
+import { showToast } from '../../base/toastState.js'
+import { uploadReasonText } from './uploadCopy.js'
 import { useWorkspacePane } from './workspacePaneStore.js'
 import styles from './AttachmentTray.module.css'
 
+/** 长按判定的毫秒数：短于这个的按下就是普通点击 */
+const LONG_PRESS_MS = 550
+
+/** 原生桥：只有 `MainActivity` 注册了才会是对象（旧 APK 上是 undefined） */
+type PickerBridge = { reset?: () => void }
+
 /**
- * 输入框旁的「+」：选文件 → `fileUploads/upload`（带进度）→ 收据进附件条。
+ * 输入框旁的「+」：选文件 → 上传（带进度）→ 凭据进附件条。
  *
- * 门禁：`uploadSupported === false`（Host 回过 `METHOD_NOT_FOUND`）时**整个按钮不渲染**；
- * `null`（还没试过）时先画出来 —— 与 `newSessionStore` 的「先信任、失败即关」同一条约定，
- * 否则第一次点之前没有任何办法知道 Host 有没有这个端点（它没有专属 capability）。
+ * ## 能力门禁（R15 改过，别再退回两态）
+ *
+ * `uploadSupported` 是三态的：
+ *   - `null`（还没试过）→ 照常渲染 —— 没有专属 capability 能提前问，只能「先信任、失败即关」；
+ *   - `true`（至少一条通道成功过）→ 照常；
+ *   - `false`（**两条**都明确不可用）→ **仍然渲染**，但标成不可用：`aria-disabled` +
+ *     tooltip 写原因 + 点一下弹 toast 说原因。
+ *
+ * 为什么不「不渲染就完事」：`fileUploads/upload` 在 Host 0.5.22 上会回 `METHOD_NOT_ALLOWED`，
+ * 老代码把这一下当成「Host 不支持上传」直接把按钮收掉 —— 用户看到的就是「+ 坏了 / 不见了」，
+ * 而这台 Host 其实能通过 `workspace.upload.*` 传文件。**静默消失是 bug，不是降级。**
  *
  * `<input type=file>` 必须留在同一棵子树：`useMobileViewport()` 的
  * `textarea, input:not([type="file"])` 选择器已经把文件输入排除在「跟随软键盘」之外。
+ *
+ * **长按 = 换文件来源**（R7）：原生把上次选的来源记在 `SharedPreferences` 里，下次直接走它；
+ * 长按这里会调 `window.DSNativePicker.reset()` 清掉记忆，于是下一次点「+」重新弹来源面板。
+ * 桥本身是可选的（`typeof` 守卫），没有它也只是「换不了来源」，不影响选文件。
  */
 export const AttachmentButton = ({ disabled = false }: { disabled?: boolean }) => {
   const t = useTranslate()
   const supported = useWorkspacePane((state) => state.uploadSupported)
+  const unavailableReason = useWorkspacePane((state) => state.uploadUnavailableReason)
+  const unavailableCode = useWorkspacePane((state) => state.uploadUnavailableCode)
   const inputRef = useRef<HTMLInputElement>(null)
-  if (supported === false) return null
+  const longPressTimer = useRef(0)
+
+  const cancelLongPress = (): void => {
+    if (longPressTimer.current !== 0) {
+      window.clearTimeout(longPressTimer.current)
+      longPressTimer.current = 0
+    }
+  }
+
+  const startLongPress = (): void => {
+    cancelLongPress()
+    longPressTimer.current = window.setTimeout(() => {
+      longPressTimer.current = 0
+      const bridge = (globalThis as { DSNativePicker?: PickerBridge }).DSNativePicker
+      if (typeof bridge?.reset !== 'function') return
+      try {
+        bridge.reset()
+        showToast({ key: 'downloadPickerReset' })
+      } catch {
+        // 桥内部抛错不能把「+」弄坏（旧 APK / 桥还没就绪）
+      }
+    }, LONG_PRESS_MS)
+  }
+
+  const blocked = supported === false
+  const reasonText = uploadReasonText(unavailableCode, unavailableReason)
+
+  const onPick = (): void => {
+    if (blocked) {
+      // 不可用也要**说出原因**（这是「+ 坏了」这个 bug report 的正解）
+      showToast({ key: 'uploadRemoteUnavailableToast', params: { reason: reasonText } })
+      return
+    }
+    inputRef.current?.click()
+  }
+
   return (
     <>
       <button
         type="button"
-        className={styles.plus}
-        aria-label={t('workspacePaneAttach')}
-        title={t('workspacePaneAttach')}
+        className={clsx(styles.plus, blocked && styles.plusBlocked)}
+        aria-label={blocked ? `${t('workspacePaneAttach')} — ${reasonText}` : t('workspacePaneAttach')}
+        title={blocked ? reasonText : t('workspacePaneAttach')}
+        aria-disabled={blocked}
+        data-upload-state={blocked ? 'unavailable' : supported === true ? 'available' : 'unknown'}
         disabled={disabled}
-        onClick={() => inputRef.current?.click()}
+        onPointerDown={blocked ? undefined : startLongPress}
+        onPointerUp={cancelLongPress}
+        onPointerLeave={cancelLongPress}
+        onPointerCancel={cancelLongPress}
+        onClick={onPick}
       >
         <IconPaperclipOutline16 />
       </button>

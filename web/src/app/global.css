@@ -1,9 +1,10 @@
 :root {
   /**
-   * 顶部安全区（状态栏高度）。
+   * 顶部安全区（状态栏高度，**CSS 像素**）。
    * Android WebView 里 env(safe-area-inset-top) 恒为 0，所以壳会用
    * evaluateJavascript 把真实高度写进 --ds-safe-top；浏览器里回退到 env()。
-   * 注意壳写的就是**状态栏本身的高度**，没有额外叠加，前端只消费一次。
+   * 壳那边已经做过 物理像素 ÷ density 的换算（见 MainActivity.publishSafeTop），
+   * 写进来的就是**状态栏本身的高度**，没有额外叠加，前端只消费一次。
    */
   --ds-safe-top: env(safe-area-inset-top, 0px);
   /**
@@ -17,8 +18,12 @@
    * 两栏都用 `height: calc(var(--ds-topbar-h) + var(--ds-top-offset))` +
    * `padding-top: var(--ds-top-offset)`，内容区恰好剩 topbar-h，居中之后
    * logo 中心 = 标题中心 = offset + topbar-h / 2（平板与手机同值）。
+   *
+   * 56px → 48px（真机反馈「还能再往上挪」）。行内内容只有 22px 行高，
+   * 56px 会在上下各留 17px 死白；48px 留 13px，仍是 ≥48dp 的常规触控行高，
+   * 不动任何一条公式 —— 四块顶栏都读这个 token，所以对齐关系天然保持。
    */
-  --ds-topbar-h: 56px;
+  --ds-topbar-h: 48px;
   --message-list-max-width: 840px;
   --message-list-padding-horizontal: 44px;
 }

@@ -41,14 +41,35 @@
  * `fileUploads/upload` 是**单帧 base64**（`{agentId, request:{data,name}}` → `{receiptId, file}`，
  * 见 `docs/protocol.md`、Dart `session_api.dart:497-510`），协议上没有字节级回执，
  * 所以进度只能分三段：`encoding`（本地 base64，有真实进度）→ `uploading`（单帧在飞，不定进度）
- * → `done`。真要字节级进度得等 P2 的 `workspace.upload.v1`（chunk + ack）。
+ * → `done`。真要字节级进度得走 `workspace.upload.v1`（chunk + ack），那条路在
+ * `upload.ts`（R15 的分级策略），不在本文件。
  * 单帧建议上限 30 MiB（`session_api.dart:475-478`：base64 会把内存放大几倍）。
+ *
+ * ## 三·补、R15：`fileUploads/upload` 在 Host 0.5.22 上**不存在**，405 不是「UI 关闭信号」
+ *
+ * 定案证据（本机装的就是 0.5.22，直接读它的产物）：
+ *
+ * | 证据 | 结论 |
+ * |---|---|
+ * | `%USERPROFILE%\.dsh\profiles\desktop\node_modules\ds-harness-remote\package.json` = `0.5.22` | 就是我们的 Host 版本 |
+ * | 同包 `dist/harness-remote-bridge.js:59-145` 的 `HARNESS_REMOTE_ALLOWLIST` **没有** `fileUploads/upload` | 走 `harness.remote.call` 会被拒 |
+ * | 同文件 `:446-447`：不在 allowlist → `RpcError('METHOD_NOT_ALLOWED')` | **我们收到的就是 `METHOD_NOT_ALLOWED`** |
+ * | 同包 `dist/rpc-router.js:40-43` + `dist/workspace-upload.js` 有 `workspace.upload.open|chunk|commit|abort` | 0.5.22 的正解是工作区上传 |
+ * | 同包 `dist/service.js:374`：`hostCapabilities()` **恒**含 `workspace.upload.v1` | 每台 0.5.22 都能做工作区上传 |
+ * | `ds-harness-remote@0.6.6` 快照的 `harness-remote-bridge.ts:172` **有** `fileUploads/upload` | 这条路是 0.6.x 才加的；`input-B` §2.8.2(a) 引的是新版本 |
+ *
+ * 所以本文件只负责**首选**通道，并且在它不可用时抛一个**可判定**的错误；
+ * 「换哪条路」由 `upload.ts` 的 `shouldFallbackToWorkspaceUpload()` / `uploadAttachment()` 决定。
+ * **`isMissingEndpoint()` 不许再用来门禁上传入口**：`METHOD_NOT_ALLOWED` 只说明
+ * 「这条通道不认」，不代表「这台 Host 传不了东西」——把它当关闭信号正是「+ 不见了」的根因。
  *
  * ## 四、能力门禁
  *
- * 工作区文件与附件上传都**没有专属 capability 字符串**（input-B §1.4.2），只能按调用结果判断：
+ * 工作区文件读取**没有专属 capability 字符串**（input-B §1.4.2），只能按调用结果判断：
  * Host 没有端点时回 `METHOD_NOT_FOUND` / `METHOD_NOT_ALLOWED`，`isMissingEndpoint()` 认这几个码，
  * 面板据此把整块 UI 收起来（与 `newSessionStore.ts` 的「先信任、失败即关」同一套）。
+ *
+ * 上传**不适用**这条规则：`fileUploads/upload` 失败只说明该通道不可用，见 §三·补。
  */
 
 import { RemoteApiError, isRemoteApiError } from './serverApi.js'
@@ -84,8 +105,50 @@ export const TEXT_PREVIEW_MAX_BYTES = 4 * 1024 * 1024
 export const TEXT_PAGE_LINES = 200
 /** 图片预览默认上限（RN 侧同值；超过就只说「太大」不做解码）。 */
 export const MAX_IMAGE_PREVIEW_BYTES = 8 * 1024 * 1024
-/** `fileUploads/upload` 单帧上限：base64 内联，再大就换 `workspace.upload.v1`（P2）。 */
+/** `fileUploads/upload` 单帧上限：base64 内联，再大就得走 `workspace.upload.v1`。 */
 export const MAX_INLINE_UPLOAD_BYTES = 30 * 1024 * 1024
+/**
+ * 工作区上传（`workspace.upload.v1`）在 **Relay / TURN / 未知传输**上的硬上限：
+ * Host 侧 `workspaceUploadMaxBytes('relay') === 20 MiB`（0.5.22 `dist/workspace-transfer-limits.js`），
+ * 协议 `docs/protocol.md:1653` 同值。超了 Host 回 `UPLOAD_LIMIT`，所以在本地先拦。
+ */
+export const MAX_WORKSPACE_UPLOAD_BYTES = 20 * 1024 * 1024
+/** 同上，但传输路径是 **LAN / P2P**：Host 给 1 GiB（协议 `:1653`，`dist/workspace-transfer-limits.js`）。 */
+export const MAX_WORKSPACE_UPLOAD_BYTES_DIRECT = 1024 * 1024 * 1024
+/** Host 回的 `chunkBytes`：0.5.22 恒为 65536（`dist/workspace-upload.js:9`）；二进制扩展才有 262144。 */
+export const WORKSPACE_UPLOAD_CHUNK_BYTES = 64 * 1024
+
+/**
+ * 这些码意味着「**会话附件通道**不认这次调用」，而不是「这台 Host 传不了东西」：
+ * 见到它们就该换 `workspace.upload.*`，**不要**收掉上传入口。
+ *
+ * - `METHOD_NOT_ALLOWED`：0.5.22 的 allowlist 里没有 `fileUploads/upload`（实测索引见文件头 §三·补）；
+ * - `METHOD_NOT_FOUND` / `NOT_IMPLEMENTED` / `UNSUPPORTED` / `FEATURE_NOT_SUPPORTED` /
+ *   `CAPABILITY_NOT_SUPPORTED`：老 Host 干脆没有这个端点（或能力没协商）；
+ * - `405`：有些宿主把 HTTP 语义码直接透传上来（任务书点名的「405」）；
+ * - `gateway/arguments-invalid` / `gateway/input-invalid`：老 Host 的严格 codec 不认
+ *   `{agentId, request:{data,name}}` 这个形状（与 `session/attachment` 的老 Host 回退同一类）。
+ */
+const UPLOAD_FALLBACK_CODES = new Set([
+  'METHOD_NOT_FOUND',
+  'METHOD_NOT_ALLOWED',
+  '405',
+  'NOT_IMPLEMENTED',
+  'UNSUPPORTED',
+  'FEATURE_NOT_SUPPORTED',
+  'CAPABILITY_NOT_SUPPORTED',
+  'gateway/arguments-invalid',
+  'gateway/input-invalid',
+])
+
+/**
+ * 这次 `fileUploads/upload` 失败是不是「换一条上传通道」的信号。
+ *
+ * 只认上面那张表；`UPLOAD_TOO_LARGE` / `UPLOAD_LIMIT` / 超时 / 网络错误**不算** ——
+ * 那些换条路也一样，应该把原因显示出来（重试或改名、改大小）。
+ */
+export const shouldFallbackToWorkspaceUpload = (error: unknown): boolean =>
+  UPLOAD_FALLBACK_CODES.has(errorCodeOf(error))
 /** 读文件的默认超时（4 MiB base64 在 Relay 上可能要几秒）。 */
 const READ_TIMEOUT_MS = 60_000
 /** 上传的默认超时：官方 HTTP 路由给到 10 分钟，这里给 3 分钟（Relay 单帧）。 */
@@ -883,8 +946,12 @@ export const encodeFileBase64 = async (
  * 拿到 `receiptId` 之后由 `sessionsApi.sendPrompt()` 放进
  * `content: [{type:'file', receiptId}]`（`RemotePromptAttachment` 已经是这个形状）。
  *
- * 失败一律抛 `RemoteApiError`：`UPLOAD_TOO_LARGE`（本地先拦）、`METHOD_NOT_FOUND`（Host 没有
- * 这个端点 ⇒ 整块上传 UI 收起）、其余原样上抛给界面显示可读原因。
+ * **这只是首选通道**（R15）：Host 0.5.22 的 allowlist 里没有这个端点，调用会回
+ * `METHOD_NOT_ALLOWED`。要不要降级、降到哪，交给 `upload.ts` 的 `uploadAttachment()`
+ * ——**界面不要**再拿这里的失败去隐藏「+」（`shouldFallbackToWorkspaceUpload()` 才是判据）。
+ *
+ * 失败一律抛 `RemoteApiError`：`UPLOAD_TOO_LARGE`（本地先拦）、`METHOD_NOT_FOUND` /
+ * `METHOD_NOT_ALLOWED`（通道不认 ⇒ 降级）、其余原样上抛给界面显示可读原因。
  */
 export const uploadSessionFile = async (
   target: RemoteCallTarget,
@@ -1047,19 +1114,87 @@ export const readSessionAttachment = async (
 }
 
 /* ────────────────────────────────────────────────────────────────────────
- * 十一、工具卡图片：`loadToolImage(item)`
+ * 十一、工具卡图片：`toolImageLoader(image, sessionId)`
  *
  * 工具/消息里的图片有两种形态（`adapter.ts` 的 `ChatImage`）：
- *   - `uri`：`data:image/png;base64,…` —— 结果块里带内联像素时才有，直接用；
+ *   - `uri`：`data:image/{png,jpeg,webp,gif};base64,…` —— 结果块里带内联像素时才有；
  *   - `attachmentId` + `sessionId`：**持久引用**，没有像素 —— 必须走 `session/attachment`。
  *
- * 本函数就是补第二条路的：给 `components/remote/tool/**` 的封装位一个纯函数入口，
- * 内部做数据 URL 缓存（工具卡滚动时会反复渲染同一张图）。
+ * ## 为什么不能把 `image.uri` 直接塞进 `<img src>`（真机「裂图」的根因）
+ *
+ * 页面在 WebView 里的 origin 是 `http://127.0.0.1:18888`
+ * （`android/.../LocalServer.java:49`，`PREFERRED_PORT = 18888`），于是**相对地址**
+ * 会被解析成 `http://127.0.0.1:18888/<相对路径>` —— 本地服务只有打包好的静态资源，
+ * 那个路径必然 404，浏览器就画一张裂图；`file:` / `content:` 被 WebView 拦住（连错误
+ * 事件都可能不派发，裂图会一直挂着），`data:` 的 MIME 不是图片时同样画不出东西。
+ * 所以这里**逐个分类**，不合法的值不进 `<img>`：
+ *
+ * | uri 前缀 | 判定 | 能否直接当 `<img src>` |
+ * |---|---|---|
+ * | `data:image/{png,jpeg,webp,gif};base64,…` | `data` | 能（唯一的内联像素形态） |
+ * | `data:` 但 MIME 不是上面四个 / 没有 `;base64` / 空载荷 | `invalid-data` | **不能** |
+ * | `blob:` | `blob` | 能（只对本文档自建的 URL 有效；失效由 `onError` 兜） |
+ * | `http:` / `https:` | `http` | 能（本来就是绝对地址） |
+ * | `file:` | `file` | **不能**（从 http 起页的 WebView 禁读本地文件） |
+ * | `//host/…`、`a.png`、`/a.png`、`C:\…`、`content:…` | `relative` | **不能** |
+ * | 没有 uri | `absent` | ——（没有像素，界面画占位） |
+ *
+ * 分类结果由 `classifyToolImageUri()` 给出，自测逐条断言（`__selftest__/tool-image.selftest.mts`）。
+ *
+ * ## 三条纪律
+ *   1. **同一 attachment 只取一次**：内存缓存 + 在飞合并（回看时同一张图会反复进渲染）；
+ *   2. **并发上限** `TOOL_IMAGE_CONCURRENCY`：一屏十几张图不能一次把 Relay 打满；
+ *   3. **失败不缓存**：调用方可以原地重试（`{ force: true }` 还会绕过缓存重取）。
  * ──────────────────────────────────────────────────────────────────────── */
+
+/** `uri` 的分类（判定表见上面那段注释）。 */
+export type ToolImageUriKind = 'data' | 'blob' | 'http' | 'file' | 'invalid-data' | 'relative' | 'absent'
+
+/** 内联像素的 MIME 白名单：与 `adapter.ts` 的 `IMAGE_MEDIA_TYPES` 同集合（SVG 不在内，避免脚本）。 */
+const TOOL_IMAGE_DATA_MIME = /^image\/(?:png|jpeg|webp|gif)$/u
+
+/** `data:` 的细分：只有「图片 MIME + base64 + 非空载荷」才算能用。 */
+const classifyDataImageUri = (uri: string): ToolImageUriKind => {
+  const comma = uri.indexOf(',')
+  if (comma < 0) return 'invalid-data'
+  const meta = uri.slice('data:'.length, comma).toLowerCase()
+  const payload = uri.slice(comma + 1)
+  const [mimeType, ...params] = meta.split(';')
+  if (mimeType === undefined || !TOOL_IMAGE_DATA_MIME.test(mimeType)) return 'invalid-data'
+  if (!params.includes('base64')) return 'invalid-data'
+  return payload.length > 0 ? 'data' : 'invalid-data'
+}
+
+/**
+ * 判一个 `uri` 属于哪一类（**只做字符串判定，不发请求、不碰 DOM**）。
+ *
+ * 大小写按 RFC 容忍（`DATA:` / `FILE:` 也认），前后空白先 trim（Host 偶尔带换行）。
+ */
+export const classifyToolImageUri = (uri: string | undefined): ToolImageUriKind => {
+  if (typeof uri !== 'string') return 'absent'
+  const value = uri.trim()
+  if (value.length === 0) return 'absent'
+  if (/^data:/iu.test(value)) return classifyDataImageUri(value)
+  if (/^blob:/iu.test(value)) return 'blob'
+  if (/^https?:\/\//iu.test(value)) return 'http'
+  if (/^file:/iu.test(value)) return 'file'
+  // 其余都当相对/非法：`//host/x`（协议相对，host 会落到 127.0.0.1）、`a.png`、`/a.png`、
+  // `C:\a.png`、`content://…`、`media://…` —— 一律不能直接喂 `<img>`
+  return 'relative'
+}
+
+/** 这一类 `uri` 能不能直接当 `<img src>` 用。 */
+const USABLE_TOOL_IMAGE_URI = new Set<ToolImageUriKind>(['data', 'blob', 'http'])
+
+export const isToolImageUriUsable = (uri: string | undefined): boolean =>
+  USABLE_TOOL_IMAGE_URI.has(classifyToolImageUri(uri))
 
 /** 工具卡图片最多缓存几张 / 多少字节（超了就丢最旧的，避免历史长会话吃内存）。 */
 const TOOL_IMAGE_CACHE_LIMIT = 24
 const TOOL_IMAGE_CACHE_BYTES = 24 * 1024 * 1024
+
+/** 同时在飞的附件读取数。一屏十几张图也不会一次把 Relay 打满。 */
+export const TOOL_IMAGE_CONCURRENCY = 4
 
 interface ToolImageCacheEntry {
   url: string
@@ -1069,13 +1204,72 @@ interface ToolImageCacheEntry {
 const toolImageCache = new Map<string, ToolImageCacheEntry>()
 const toolImageInflight = new Map<string, Promise<string | null>>()
 
-/** 清缓存（换连接 / 退出远程模式时调）。 */
+let activeToolImageLoads = 0
+const toolImageWaiters: Array<() => void> = []
+
+/**
+ * 取一个读取名额。返回**释放函数**（幂等），名额在 `finally` 里转交给下一个等待者 ——
+ * 不是先减再加，避免「刚减完就被新请求抢占，等待者醒来又加一次」把并发冲过上限。
+ */
+const acquireToolImageSlot = async (): Promise<() => void> => {
+  if (activeToolImageLoads < TOOL_IMAGE_CONCURRENCY) {
+    activeToolImageLoads += 1
+  } else {
+    await new Promise<void>((resolve) => {
+      toolImageWaiters.push(resolve)
+    })
+  }
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const next = toolImageWaiters.shift()
+    if (next === undefined) activeToolImageLoads -= 1
+    else next()
+  }
+}
+
+/** 缓存 / 并发计数的一次快照（自测断言用）。 */
+export interface ToolImageLoaderStats {
+  cached: number
+  cachedBytes: number
+  inflight: number
+  active: number
+  waiting: number
+}
+
+export const toolImageLoaderStats = (): ToolImageLoaderStats => {
+  let cachedBytes = 0
+  for (const entry of toolImageCache.values()) cachedBytes += entry.bytes
+  return {
+    cached: toolImageCache.size,
+    cachedBytes,
+    inflight: toolImageInflight.size,
+    active: activeToolImageLoads,
+    waiting: toolImageWaiters.length,
+  }
+}
+
+/** 清缓存（换连接 / 退出远程模式时调；自测里也用它把用例之间的状态隔开）。 */
 export const clearToolImageCache = (): void => {
   toolImageCache.clear()
   toolImageInflight.clear()
 }
 
+/**
+ * 命中缓存并**挪到队尾**（Map 保持插入顺序 = LRU 队列）：
+ * 长会话里反复回看的那几张图不会被淘汰，滚走后再也不会回来的一批先出队。
+ */
+const readCachedToolImage = (key: string): string | undefined => {
+  const entry = toolImageCache.get(key)
+  if (entry === undefined) return undefined
+  toolImageCache.delete(key)
+  toolImageCache.set(key, entry)
+  return entry.url
+}
+
 const rememberToolImage = (key: string, url: string, bytes: number): void => {
+  if (toolImageCache.has(key)) toolImageCache.delete(key)
   toolImageCache.set(key, { url, bytes })
   let total = 0
   for (const entry of toolImageCache.values()) total += entry.bytes
@@ -1088,36 +1282,109 @@ const rememberToolImage = (key: string, url: string, bytes: number): void => {
   }
 }
 
-/**
- * 工具/消息里一张图的真实内容：`uri` 直接返回，只有 `attachmentId` 时走 `session/attachment`
- * 并转成 `data:` URL。
- *
- * 返回 `null` 表示「这张图没有可显示的像素」（不是错误，工具卡画占位就行）。
- * 失败抛 `RemoteApiError`（调用方决定显示原因还是静默）。
- */
-export const loadToolImage = async (
+/** `uri` 不可用时的错误：消息本身就是给用户看的原因（`details.uriKind` 给自测断言）。 */
+const unusableUriError = (kind: ToolImageUriKind, uri: string | undefined): RemoteApiError => {
+  const preview = (uri ?? '').slice(0, 120)
+  const reason =
+    kind === 'file'
+      ? `图片是本地文件地址（${preview}），WebView 从 http://127.0.0.1:18888 起页时读不到本地文件`
+      : kind === 'invalid-data'
+        ? `图片的 data URL 不是可显示的图片（${preview}）`
+        : `图片地址是相对路径（${preview}），会被解析成 http://127.0.0.1:18888/${preview.replace(/^\/+/u, '')}，必然加载不出来`
+  return new RemoteApiError('REMOTE_IMAGE_URI_UNUSABLE', reason, undefined, false, {
+    uriKind: kind,
+    uriPreview: preview,
+  })
+}
+
+/** 没连上远端（`phase !== 'ready'` 或还没有 target）：界面直接画占位，不报错。 */
+export const isRemoteNotReady = (error: unknown): boolean => errorCodeOf(error) === 'REMOTE_NOT_READY'
+
+/** 调用方主动取消（组件卸载 / 换图）：同样不该当失败展示。 */
+export const isRemoteAborted = (error: unknown): boolean => errorCodeOf(error) === 'RPC_ABORTED'
+
+/** 读一张图时可以带的东西。 */
+export interface ToolImageLoadOptions {
+  timeoutMs?: number
+  /** 组件卸载 / 换图时取消（排队中的名额也会被归还）。 */
+  signal?: AbortSignal
+  /** 重试用：跳过缓存重新取一次（同一 attachment 的在飞请求仍然合并）。 */
+  force?: boolean
+}
+
+/** 取当前连接目标；没连上（`phase !== 'ready'` 或还没有 target）就抛 `REMOTE_NOT_READY`。 */
+const lastTargetOrThrow = (): RemoteCallTarget => {
+  const target = targetForFiles()
+  if (target === null) throw new RemoteApiError('REMOTE_NOT_READY', '还没连上远端主机，取不到附件内容')
+  return target
+}
+
+/** 真正的那一次附件读取：抢名额 → 取字节 → 转 data URL → 进缓存。 */
+const runToolImageAttachmentLoad = async (
+  key: string,
+  scope: string,
   image: AttachmentReference,
-  sessionId?: string,
-  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  options: ToolImageLoadOptions,
 ): Promise<string | null> => {
-  if (typeof image.uri === 'string' && image.uri.startsWith('data:')) return image.uri
-  const attachmentId = image.attachmentId
-  if (attachmentId === undefined || attachmentId.length === 0) return null
-  const scope = sessionId ?? image.sessionId
-  if (scope === undefined || scope.length === 0) return null
-  const key = `${scope}:${attachmentId}`
-  const cached = toolImageCache.get(key)
-  if (cached !== undefined) return cached.url
-  const inflight = toolImageInflight.get(key)
-  if (inflight !== undefined) return await inflight
-  const job = (async (): Promise<string | null> => {
-    const target = lastTargetOrThrow()
+  // 用一个取值函数而不是直接读 `options.signal?.aborted`：`await` 前后各判一次，
+  // 直接读会被 TS 收窄成「第二次永不成立」（fetch 期间 signal 是可以变的）
+  const aborted = (): boolean => options.signal?.aborted === true
+  if (aborted()) throw new RemoteApiError('RPC_ABORTED', '已取消读取图片')
+  // 没连上就直接抛 REMOTE_NOT_READY：界面据此画「未连接」占位，不排队、不算失败
+  const target = lastTargetOrThrow()
+  const release = await acquireToolImageSlot()
+  try {
     const attachment = await readSessionAttachment(target, scope, image, options)
+    if (aborted()) throw new RemoteApiError('RPC_ABORTED', '已取消读取图片')
     if (attachment.data.byteLength === 0) return null
     const url = `data:${attachment.mimeType};base64,${encodeBase64(attachment.data)}`
     rememberToolImage(key, url, attachment.data.byteLength)
     return url
-  })()
+  } finally {
+    release()
+  }
+}
+
+/**
+ * 工具/消息里一张图的真实内容 —— **界面唯一入口**（`toolImageLoader` 是它的别名）。
+ *
+ * 返回值：
+ *   - `string`：可以直接塞进 `<img src>` 的 URL（`data:` / `blob:` / `http(s):`）；
+ *   - `null`：这张图没有可显示的像素（没有 uri 也没有 attachmentId），界面画占位；
+ *   - 抛错：`REMOTE_NOT_READY`（没连上）、`REMOTE_IMAGE_URI_UNUSABLE`（uri 是相对路径 /
+ *     `file:` / 非图片 `data:`）、`RPC_ABORTED`（调用方取消），以及 `session/attachment`
+ *     本身的真实失败。
+ *
+ * 缓存键是 `${sessionId}:${attachmentId}`：同一张图无论被多少张卡片渲染都只取一次；
+ * 失败**不进缓存**，所以「点重试」真的会重发一次（`force` 还能覆盖已有缓存）。
+ */
+export const loadToolImage = async (
+  image: AttachmentReference,
+  sessionId?: string,
+  options: ToolImageLoadOptions = {},
+): Promise<string | null> => {
+  const uriKind = classifyToolImageUri(image.uri)
+  if (USABLE_TOOL_IMAGE_URI.has(uriKind)) return (image.uri ?? '').trim()
+
+  const attachmentId = image.attachmentId
+  const scope = sessionId ?? image.sessionId
+  const hasAttachment = attachmentId !== undefined && attachmentId.length > 0
+  if (!hasAttachment || scope === undefined || scope.length === 0) {
+    // 既没有能用的 uri、也没有能补的附件：`absent` 是正常情况（画占位就行），
+    // 其余（相对路径 / file: / 坏 data URL）是「地址不对」，要让界面把原因说出来
+    if (uriKind === 'absent') return null
+    throw unusableUriError(uriKind, image.uri)
+  }
+
+  const key = `${scope}:${attachmentId}`
+  if (options.force !== true) {
+    const cached = readCachedToolImage(key)
+    if (cached !== undefined) return cached
+  }
+  const inflight = toolImageInflight.get(key)
+  if (inflight !== undefined) return await inflight
+
+  const job = runToolImageAttachmentLoad(key, scope, image, options)
   toolImageInflight.set(key, job)
   try {
     return await job
@@ -1127,32 +1394,18 @@ export const loadToolImage = async (
 }
 
 /**
- * 工具卡那批代码的接入点（**我不改 `components/remote/tool/**`**）。
- *
- * 约定的用法（`ToolCard.tsx` 的 `Thumbnail`，现在只读 `image.uri`）：
+ * 组件层用的名字（`ToolCard.tsx` 的缩略图直接调它）。
  *
  * ```tsx
- * const [src, setSrc] = useState(image.uri)
- * useEffect(() => {
- *   if (src !== undefined || image.attachmentId === undefined) return undefined
- *   let alive = true
- *   toolImageLoader(image, image.sessionId)
- *     .then((uri) => { if (alive && uri !== null) setSrc(uri) })
- *     .catch(() => undefined)
- *   return () => { alive = false }
- * }, [image, src])
+ * toolImageLoader(image, image.sessionId, { signal })
+ *   .then((src) => { if (src !== null) setSrc(src) })
+ *   .catch((error) => {
+ *     if (isRemoteNotReady(error) || isRemoteAborted(error)) return  // 占位，不报错
+ *     setFailure(describeToolImageError(error))
+ *   })
  * ```
- *
- * `loadToolImage` 需要一条活连接：内部用 `lastRemoteTarget()`（`sessionsApi.ts` 的观察者），
- * 所以调用前必须 `phase === 'ready'`（否则抛 `REMOTE_NOT_READY`）。
  */
 export const toolImageLoader = loadToolImage
-
-const lastTargetOrThrow = (): RemoteCallTarget => {
-  const target = targetForFiles()
-  if (target === null) throw new RemoteApiError('REMOTE_NOT_READY', '还没连上远端主机，取不到附件内容')
-  return target
-}
 
 /* ────────────────────────────────────────────────────────────────────────
  * 十二、连接目标（与 `newSessionStore.ts` 同一条纪律）

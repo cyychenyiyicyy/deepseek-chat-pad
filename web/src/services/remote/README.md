@@ -74,8 +74,8 @@ startProviderLogin ──► localStorage[dsp.remote.pending-login.v1]
         （**不含 token**；token 的唯一归属仍是 storage.ts）
 
 启动 ──► autoConnectNow()（幂等单飞；装在 RemoteChatView + RemoteSettingsPanel 的挂载 effect 里）
-   ├ 没有记录 / 账号没了 / 还没注册设备 ─► 什么都不做（必要时删记录）
-   ├ refresh token 过期 ─► 删记录 + failed/SESSION_EXPIRED（「登录已过期，请重新登录」，邮箱还在）
+   ├ 没有记录 / 账号没了 / 还没注册设备 ─► 什么都不做（**不删记录**，见 R10）
+   ├ refresh token 过期 ─► failed/SESSION_EXPIRED（「登录已过期，请重新登录」；记录/邮箱都留着）
    ├ access token 快过期（60s 提前量） ─► POST /auth/refresh（原子替换）+ 建链
    └ 其余 ─► 直接建链（优先连回 hostDeviceId 那台）
          成功 ─► 写 last-session + autoConnect=done
@@ -83,9 +83,28 @@ startProviderLogin ──► localStorage[dsp.remote.pending-login.v1]
 ```
 
 - `disconnect()` = **临时断开**：保留 last-session / 账号，下次启动照常自动连；
-  `signOut()` = **退出登录**：清 last-session + 删本机凭据。
-- `retryAutoConnect()`：用户点「重试连接」（远程页 / 设置页的横幅）；`disconnect()` 之后重连也走它。
+  `signOut()` = **退出登录**：清 last-session + 删本机凭据（**唯一**允许清凭据的地方）。
+- `retryAutoConnect()`：用户点「重试连接」（设置页横幅）；`disconnect()` 之后重连也走它。
 - 不在壳里（普通浏览器）直接跳过：没有 `/__ds_proxy`，连也连不上，白打一轮网络请求。
+
+### 掉线自愈（R10）：连接断了 ≠ 凭据失效
+
+真机反馈：「放后台很久重新打开会显示凭据失效，重启一下就好了」「连接失败你就刷新一下就好了呀」。
+
+| 输入 | 分诊（`reconnect.ts`） | 动作 |
+|---|---|---|
+| 没网 / 超时 / `CONNECTION_FAILED` / `CONNECTION_REPLACED` / WS 1006·4001·4009 | `offline` / `unreachable` | 退避 1·2·4·8·16 s 自动重连（最多 5 次），**绝不**提示凭据 |
+| `TOKEN_EXPIRED` / 401·403 / WS 4002 | `token-expired` | 先 `POST /auth/refresh` 再重连（每次恢复只刷一次） |
+| refresh 也 401 / `REFRESH_FAILED` / 没有 refreshToken | `need-login` | 停：红字「登录已过期，请重新登录」 |
+| `DEVICE_REVOKED` / WS 4004 / 身份不符 / 会员 / 版本不兼容 | `blocked` | 停：展示具体码与说明 |
+
+- 触发点：`SecureLink.onState('closed', detail)`（解析出真实 code 与 close code）、
+  `visibilitychange → visible` / `focus`（`installForegroundSelfHeal()`，装在 store 模块上，
+  不依赖页面是否挂载）、用户点「立即重连」（`reconnectNow()`）。
+- **纪律**：这条路径永不 `clearLastSession()` / `removeAccount()`；`disconnect()` 会
+  `cancelReconnect()`（连"下一秒自己连回来"都不许发生）。
+- 成功之后 `restoreActiveSession()` 把上次开着的会话重新打开（否则「会话还在但发不出消息」）。
+- 自测：`__selftest__/reconnect.selftest.mts`（分诊表逐条 / 退避序列 / 刷新只一次 / 不清凭据 / 回前台立即重连）。
 
 ### 原生权限中心（M2）：`/__ds_keepalive/*`
 

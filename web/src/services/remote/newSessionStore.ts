@@ -53,15 +53,18 @@
 
 import { create } from 'zustand'
 
+import { translate } from '../../i18n/index.js'
 import {
   applyPermissionPreset,
+  applySessionModel,
   archiveSession,
   createSession,
   createWorkspace,
   describeRemoteError,
   fetchAgentPresets,
-  fetchDefaultModel,
+  fetchModelCatalog,
   fetchPermissionCatalog,
+  findRemoteModel,
   forkSession,
   lastRemoteTarget,
   listDirectory,
@@ -76,6 +79,8 @@ import {
   type RemoteAgentPreset,
   type RemoteCallTarget,
   type RemoteDirectoryListing,
+  type RemoteModelCatalog,
+  type RemoteModelEntry,
   type RemoteModelSelection,
   type RemotePermissionOption,
   type RemoteSearchHit,
@@ -107,6 +112,8 @@ export interface NewSessionCapabilities {
   permission: boolean
   /** agent preset 可用（`agentPresets/list`）。 */
   agentPreset: boolean
+  /** 模型目录可用（`session/modelCatalog` + `session/selectModel`）。 */
+  model: boolean
   /** 远端 `session/search` 可用（false ⇒ 本地按标题过滤）。 */
   search: boolean
   /** 会话管理可用（`session/rename|fork`、`workspace/*Session` 这一组）。 */
@@ -119,6 +126,7 @@ const CAPABILITIES_OFF: NewSessionCapabilities = {
   directory: false,
   permission: false,
   agentPreset: false,
+  model: false,
   search: false,
   manage: false,
 }
@@ -129,12 +137,45 @@ const CAPABILITIES_ON: NewSessionCapabilities = {
   directory: true,
   permission: true,
   agentPreset: true,
+  model: true,
   search: true,
   manage: true,
 }
 
 /** 工作区列表的来源（`derived` 时「没有会话的工作区」列不出来，见文件头）。 */
 export type WorkspaceSource = 'follow' | 'derived'
+
+/**
+ * 面板里会展开的「短列表」（照 dsh-Go 的做法：每个选项点开一个小 sheet）。
+ *
+ * - `workspace`：工作区列表（末行「新建工作区」）
+ * - `newWorkspace`：新建工作区（路径 + 目录浏览）
+ * - `model`：模型卡片网格 + 思考强度分段
+ * - `preset` / `permission`：agent preset / 权限预设
+ */
+export type NewSessionSheet = 'workspace' | 'newWorkspace' | 'model' | 'preset' | 'permission'
+
+/** 用户选定的模型（`null` = 继承 Host 默认，不产生任何写操作）。 */
+export interface ModelPick {
+  provider: string
+  model: string
+  /** 选定的思考强度；`undefined` = 用模型声明的默认。 */
+  effort?: string
+}
+
+/** 「建完之后设模型」的结果，失败时面板停在这里等用户决定（重试 / 跳过）。 */
+export interface ModelApplyState {
+  status: 'idle' | 'applying' | 'failed'
+  /** 失败原因（中文，直接显示）。 */
+  error?: string
+  /** 最终生效的那条路（诊断用，也会在报告里写清）。 */
+  via?: 'select' | 'initialize'
+  /**
+   * `selectModel` 里「新对话默认」那一步的结果：`failed` 时会额外给一句提示
+   * （会话模型已经切好了，只是下次新建的默认没存上 —— 两件事不能混为一谈）。
+   */
+  defaultSave?: 'failed'
+}
 
 export interface NewSessionSearchState {
   query: string
@@ -195,15 +236,25 @@ export interface NewSessionState {
   /** 这一代连接上 agent preset 名册是否已经问过。 */
   agentPresetsLoaded: boolean
 
-  /** Host 默认模型（**只读展示**；模型切换归 W2）。 */
-  defaultModel: RemoteModelSelection | null
+  /** Host 的模型目录（`session/modelCatalog`）：`null` = 拿不到，就不显示模型这一项。 */
+  modelCatalog: RemoteModelCatalog | null
+  /** 这一代连接上模型目录是否已经问过。 */
+  modelCatalogLoaded: boolean
+  /** 用户选定的模型；`null` = 继承 Host 默认（不产生写操作）。 */
+  modelPick: ModelPick | null
+  /** 「建完之后设模型」的进度 / 失败原因（失败不静默，面板停在这里让用户选）。 */
+  modelApply: ModelApplyState
+  /** 已经建出来、但还没进（模型应用失败时停在这）的会话 id。 */
+  createdSessionId: string | null
+
+  /** 当前展开的短列表（`null` = 都在收起状态）。 */
+  sheet: NewSessionSheet | null
 
   creating: boolean
   /** 刚建出来的会话 id（成功后打开它；自测也断言这个）。 */
   lastCreatedSessionId: string | null
 
   /* ── 新建工作区（路径表单 + 目录浏览） ── */
-  pathFormOpen: boolean
   pathDraft: string
   pathError: string | null
   directory: RemoteDirectoryListing | null
@@ -233,7 +284,16 @@ export interface NewSessionState {
   selectWorkspace(workspaceId: string | null): void
   selectPermission(preset: string): void
   selectAgentPreset(preset: string): void
-  togglePathForm(open?: boolean): void
+  /** 展开 / 收起一个短列表（`null` 全部收起）。 */
+  openSheet(sheet: NewSessionSheet | null): void
+  /** 选模型（`effort` 不给就用模型声明的默认档位）。 */
+  pickModel(provider: string, model: string, effort?: string): void
+  /** 选思考强度（对当前生效的模型）。 */
+  pickEffort(effort: string): void
+  /** 模型应用失败后：再试一次（同一个会话、同一份选择）。 */
+  retryModelApply(): Promise<void>
+  /** 模型应用失败后：跳过，用默认模型直接进会话。 */
+  skipModelAndOpen(): Promise<void>
   setPathDraft(path: string): void
   /** 浏览一层目录（不传 `path` = 家目录）。Host 不支持就把浏览关掉（能力门禁）。 */
   browse(path?: string): Promise<void>
@@ -241,7 +301,10 @@ export interface NewSessionState {
   submitWorkspacePath(): Promise<RemoteWorkspace | null>
   /** 目录浏览器里点「用这个目录」：填进表单并顺手注册。 */
   adoptBrowsedDirectory(path: string): Promise<RemoteWorkspace | null>
-  /** 「创建并进入」：`session/create` →（必要时）`/permission <preset>` → `openSession(id)`。 */
+  /**
+   * 「创建并进入」：`session/create` →（必要时）`/permission <preset>` →
+   * （必要时）`session/selectModel`→ 退回 `session/initializeDefaultModel` → `openSession(id)`。
+   */
   createAndOpen(): Promise<string | null>
   /** 搜会话：先试远端 `session/search`，不可用就本地按标题过滤。 */
   runSearch(query: string): Promise<void>
@@ -418,6 +481,56 @@ const refreshRemoteSessions = (): void => {
 }
 
 /**
+ * 新会话收尾：刷列表 → 打开会话 → 关面板。
+ *
+ * `notice` 用来把「跳过了模型 / 权限没生效」这类**已完成但打了折扣**的事实带出去
+ * （面板关了，用户还能在会话页看到它；不静默吞掉）。
+ */
+const finishOpen = async (sessionId: string, notice: string | null): Promise<void> => {
+  useNewSessionStore.setState({
+    creating: false,
+    lastCreatedSessionId: sessionId,
+    createdSessionId: null,
+    sheet: null,
+    // `modelApply` 不在这里清：调用方刚写进去的 `via` / `defaultSave` 是诊断信息，
+    // 留给下一次 `openPanel()` / `closePanel()` 复位（它不影响任何 UI 判定）。
+  })
+  refreshRemoteSessions()
+  // 先刷列表再进会话：`openSession` 只依赖 id，但列表里有这一行体验才对。
+  await Promise.resolve(useRemoteStore.getState().refreshSessions()).catch(() => undefined)
+  await useRemoteStore.getState().openSession(sessionId)
+  useNewSessionStore.setState({ open: false, notice })
+}
+
+/**
+ * 建完之后核对模型到底生效了没（`projections.values.modelSelection`，`client-core:1929-1945`）。
+ *
+ * 老 Host 不投影这一项 → 跳过核对（不臆测）。投影对不上 → 返回一句人话给 `notice`。
+ */
+const verifyAppliedModel = async (
+  target: RemoteCallTarget,
+  sessionId: string,
+  wanted: RemoteModelSelection,
+): Promise<string | null> => {
+  try {
+    const rows = await listSessions(target)
+    const row = rows.find((item) => item.sessionId === sessionId)
+    const actual = row?.modelSelection
+    if (actual === undefined) return null
+    if (actual.provider !== wanted.provider || actual.model !== wanted.model) {
+      return translate('newSessionModelNotConfirmed', { model: `${actual.provider}/${actual.model}` })
+    }
+    if (wanted.reasoningEffort !== undefined && actual.reasoningEffort !== undefined
+      && actual.reasoningEffort !== wanted.reasoningEffort) {
+      return translate('newSessionEffortNotConfirmed', { effort: actual.reasoningEffort })
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
  * 会话管理类动作（改名 / 置顶 / 归档 / 派生）失败时的统一收尾。
  *
  * 两种失败分开处理：**没有这个端点** ⇒ 把 `manage` 关掉（列表里的「⋯」整块消失）；
@@ -433,6 +546,7 @@ const manageFailed = (error: unknown): void => {
 }
 
 const initialSearch: NewSessionSearchState = { query: '', searching: false, hits: null, local: false }
+const initialModelApply: ModelApplyState = { status: 'idle' }
 
 const INITIAL_STATE = {
   open: false,
@@ -453,10 +567,14 @@ const INITIAL_STATE = {
   agentPresets: [] as RemoteAgentPreset[],
   selectedAgentPreset: '',
   agentPresetsLoaded: false,
-  defaultModel: null,
+  modelCatalog: null as RemoteModelCatalog | null,
+  modelCatalogLoaded: false,
+  modelPick: null as ModelPick | null,
+  modelApply: initialModelApply,
+  createdSessionId: null as string | null,
+  sheet: null as NewSessionSheet | null,
   creating: false,
   lastCreatedSessionId: null,
-  pathFormOpen: false,
   pathDraft: '',
   pathError: null,
   directory: null,
@@ -467,6 +585,43 @@ const INITIAL_STATE = {
   busySessionId: null,
   actionError: null,
   search: initialSearch,
+}
+
+/* ── 模型选择的派生值（界面与「建后应用」共用同一套判断） ─────────────── */
+
+/**
+ * 当前生效的模型选择：用户选的那份，否则 Host 的默认。
+ *
+ * 注意两者语义不同：`modelPick === null` 表示「继承 Host 默认」—— 建完**不写**任何东西。
+ */
+export const effectiveModelSelection = (
+  catalog: RemoteModelCatalog | null,
+  pick: ModelPick | null,
+): RemoteModelSelection | null => {
+  if (pick !== null) {
+    return { provider: pick.provider, model: pick.model, ...(pick.effort === undefined ? {} : { reasoningEffort: pick.effort }) }
+  }
+  return catalog?.default ?? null
+}
+
+/** 当前生效模型在目录里的那一行（拿不到就是 `undefined`）。 */
+export const effectiveModelEntry = (
+  catalog: RemoteModelCatalog | null,
+  pick: ModelPick | null,
+): RemoteModelEntry | undefined => findRemoteModel(catalog, effectiveModelSelection(catalog, pick))
+
+/**
+ * 要发给 Host 的选择：只包含**真正需要写**的部分。
+ *
+ * `null` = 继承 Host 默认（不调用任何模型端点）。
+ */
+export const modelSelectionToApply = (pick: ModelPick | null): RemoteModelSelection | null => {
+  if (pick === null) return null
+  return {
+    provider: pick.provider,
+    model: pick.model,
+    ...(pick.effort === undefined ? {} : { reasoningEffort: pick.effort }),
+  }
 }
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -511,7 +666,8 @@ const loadInventory = async (target: RemoteCallTarget): Promise<void> => {
       permissionLoaded: false,
       agentPresets: [],
       agentPresetsLoaded: false,
-      defaultModel: null,
+      modelCatalog: null,
+      modelCatalogLoaded: false,
       error: null,
     })
   }
@@ -609,12 +765,33 @@ const loadAgentPresets = async (target: RemoteCallTarget): Promise<void> => {
   }
 }
 
-/** 默认模型：纯展示，失败一律 `null`（面板就不带具体名字）。 */
-const loadDefaultModel = async (target: RemoteCallTarget): Promise<void> => {
+/**
+ * 模型目录（`session/modelCatalog`）：拿不到就整块隐藏。
+ *
+ * 目录里带每个模型支持的思考强度档位，所以「模型 + 思考强度」两个控件共用这一次请求。
+ */
+const loadModelCatalog = async (target: RemoteCallTarget): Promise<void> => {
   try {
-    useNewSessionStore.setState({ defaultModel: await fetchDefaultModel(target) })
-  } catch {
-    useNewSessionStore.setState({ defaultModel: null })
+    const catalog = await fetchModelCatalog(target)
+    useNewSessionStore.setState({
+      modelCatalog: catalog,
+      modelCatalogLoaded: true,
+      capabilities: {
+        ...useNewSessionStore.getState().capabilities,
+        model: catalog.models.length > 0,
+      },
+    })
+  } catch (error) {
+    if (isMissingEndpoint(error)) {
+      useNewSessionStore.setState({
+        modelCatalog: null,
+        modelCatalogLoaded: true,
+        capabilities: { ...useNewSessionStore.getState().capabilities, model: false },
+      })
+      return
+    }
+    // 网络类失败：不把能力关掉（下次打开面板还会再试），只在面板里记一笔
+    useNewSessionStore.setState({ modelCatalogLoaded: true, error: errorText(error) })
   }
 }
 
@@ -631,16 +808,25 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       error: null,
       notice: null,
       actionError: null,
-      pathFormOpen: false,
+      sheet: null,
       pathError: null,
       directory: null,
       directoryError: null,
+      modelApply: initialModelApply,
+      createdSessionId: null,
     })
     void useNewSessionStore.getState().refresh()
   },
 
   closePanel: (): void => {
-    useNewSessionStore.setState({ open: false, menuSessionId: null, renameTarget: null })
+    useNewSessionStore.setState({
+      open: false,
+      menuSessionId: null,
+      renameTarget: null,
+      sheet: null,
+      createdSessionId: null,
+      modelApply: initialModelApply,
+    })
   },
 
   refresh: async (): Promise<void> => {
@@ -674,7 +860,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       await Promise.all([
         loadPermissionCatalog(target),
         loadAgentPresets(target),
-        loadDefaultModel(target),
+        loadModelCatalog(target),
       ])
       useNewSessionStore.setState({ loading: false })
     })()
@@ -736,13 +922,78 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
     useNewSessionStore.setState({ selectedAgentPreset: preset })
   },
 
-  togglePathForm: (open?: boolean): void => {
-    const next = open ?? !useNewSessionStore.getState().pathFormOpen
+  openSheet: (sheet: NewSessionSheet | null): void => {
+    const current = useNewSessionStore.getState()
+    // 换工作区时把目录浏览状态清掉：那是上一个路径的
     useNewSessionStore.setState({
-      pathFormOpen: next,
+      sheet,
       pathError: null,
-      ...(next ? {} : { directory: null, directoryError: null }),
+      ...(sheet === 'newWorkspace' ? {} : { directory: null, directoryError: null }),
+      ...(sheet === null ? { selectedWorkspaceId: current.selectedWorkspaceId } : {}),
     })
+  },
+
+  pickModel: (provider: string, model: string, effort?: string): void => {
+    const state = useNewSessionStore.getState()
+    const catalog = state.modelCatalog
+    const entry = findRemoteModel(catalog, { provider, model })
+    // 换模型时旧的档位可能不存在（例如从有 4 档的模型换到只有 2 档的）：只在「同模型」时才继承。
+    const sameModel = state.modelPick?.provider === provider && state.modelPick.model === model
+    const inherited = sameModel ? state.modelPick?.effort : undefined
+    const keep = effort ?? inherited
+    const valid = keep !== undefined && (entry?.efforts ?? []).some((item) => item.id === keep)
+    useNewSessionStore.setState({
+      modelPick: {
+        provider,
+        model,
+        ...(valid ? { effort: keep } : {}),
+      },
+      sheet: null,
+      modelApply: initialModelApply,
+    })
+  },
+
+  pickEffort: (effort: string): void => {
+    const state = useNewSessionStore.getState()
+    const effective = effectiveModelSelection(state.modelCatalog, state.modelPick)
+    if (effective === null) return
+    useNewSessionStore.setState({
+      modelPick: {
+        provider: effective.provider,
+        model: effective.model,
+        ...(effort.length === 0 ? {} : { effort }),
+      },
+      modelApply: initialModelApply,
+    })
+  },
+
+  retryModelApply: async (): Promise<void> => {
+    const state = useNewSessionStore.getState()
+    const sessionId = state.createdSessionId
+    const target = targetFor()
+    if (sessionId === null || target === null) return
+    const selection = modelSelectionToApply(state.modelPick)
+    if (selection === null) {
+      await useNewSessionStore.getState().skipModelAndOpen()
+      return
+    }
+    useNewSessionStore.setState({ modelApply: { status: 'applying' } })
+    try {
+      const applied = await applySessionModel(target, sessionId, selection)
+      useNewSessionStore.setState({ modelApply: { status: 'idle', via: applied.via } })
+      await finishOpen(sessionId, applied.via === 'select' ? null : null)
+    } catch (error) {
+      useNewSessionStore.setState({
+        modelApply: { status: 'failed', error: errorText(error) },
+      })
+    }
+  },
+
+  skipModelAndOpen: async (): Promise<void> => {
+    const sessionId = useNewSessionStore.getState().createdSessionId
+    if (sessionId === null) return
+    useNewSessionStore.setState({ modelApply: { status: 'idle' } })
+    await finishOpen(sessionId, translate('newSessionSkippedModel'))
   },
 
   setPathDraft: (path: string): void => {
@@ -790,7 +1041,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
         creating: false,
         workspaces: mergeWorkspaces(state.workspaces, [workspace]),
         selectedWorkspaceId: workspace.workspaceId,
-        pathFormOpen: false,
+        sheet: null,
         pathDraft: '',
         pathError: null,
         directory: null,
@@ -827,22 +1078,28 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
     const state = useNewSessionStore.getState()
     if (state.creating || !state.capabilities.create) return null
 
-    useNewSessionStore.setState({ creating: true, error: null, notice: null })
+    useNewSessionStore.setState({
+      creating: true,
+      error: null,
+      notice: null,
+      modelApply: initialModelApply,
+      sheet: null,
+    })
     try {
       const created = await createSession(target, {
         ...(state.selectedWorkspaceId === null ? {} : { workspaceId: state.selectedWorkspaceId }),
         ...(state.selectedAgentPreset.length === 0 ? {} : { agentPreset: state.selectedAgentPreset }),
       })
 
-      // 权限预设只能通过 `/permission <preset>` 生效（input-B §2.10），且要在进会话前设好，
-      // 免得第一轮就跑在错的权限下。它失败不该让「新建」失败 —— 记成 notice。
+      // ── ① 权限预设：只能通过 `/permission <preset>` 生效（input-B §2.10），必须在进会话前设好，
+      //      免得第一轮就跑在错的权限下。失败不该让「新建」失败 —— 记成 notice。
       const wanted = state.selectedPermission
       let notice: string | null = null
       if (wanted.length > 0 && wanted !== state.permissionDefault) {
         try {
           await applyPermissionPreset(target, created.sessionId, wanted)
         } catch (error) {
-          notice = `${describeRemoteError(error).text}（会话已建好，权限预设未生效）`
+          notice = `${describeRemoteError(error).text}（${translate('newSessionPermissionNotApplied')}）`
           if (isMissingEndpoint(error)) {
             useNewSessionStore.setState({
               capabilities: { ...useNewSessionStore.getState().capabilities, permission: false },
@@ -851,15 +1108,50 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
         }
       }
       if (state.selectedAgentPreset.length > 0 && created.agentPreset !== state.selectedAgentPreset) {
-        notice = '会话已建好，但 agent preset 没有生效'
+        notice = translate('newSessionPresetNotApplied')
       }
 
-      useNewSessionStore.setState({ creating: false, lastCreatedSessionId: created.sessionId, notice })
-      refreshRemoteSessions()
-      // 先刷列表再进会话：`openSession` 只依赖 id，但列表里有这一行体验才对。
-      await Promise.resolve(useRemoteStore.getState().refreshSessions()).catch(() => undefined)
-      await useRemoteStore.getState().openSession(created.sessionId)
-      useNewSessionStore.setState({ open: false })
+      // ── ② 模型 + 思考强度：`session/create` 没有这两个字段，只能建完后设
+      //      （`session/selectModel` → 退回 `session/initializeDefaultModel`，见 sessionsApi）。
+      const selection = modelSelectionToApply(state.modelPick)
+      if (selection !== null) {
+        useNewSessionStore.setState({
+          creating: false,
+          createdSessionId: created.sessionId,
+          modelApply: { status: 'applying' },
+        })
+        try {
+          const applied = await applySessionModel(target, created.sessionId, selection)
+          const mismatch = await verifyAppliedModel(target, created.sessionId, applied.selection)
+          // `defaultSave` 失败 ≠ 会话模型没切：只是「新对话默认」没存上，单独提示一句。
+          const defaultSaveFailed = applied.defaultSave?.status === 'failed'
+          useNewSessionStore.setState({
+            modelApply: {
+              status: 'idle',
+              via: applied.via,
+              ...(defaultSaveFailed ? { defaultSave: 'failed' } : {}),
+            },
+          })
+          await finishOpen(
+            created.sessionId,
+            mismatch ?? notice ?? (defaultSaveFailed ? translate('newSessionDefaultSaveFailed') : null),
+          )
+          return created.sessionId
+        } catch (error) {
+          // 失败**不静默**：面板停在错误态，给「重试」与「跳过，用默认模型」两条路。
+          if (isMissingEndpoint(error)) {
+            useNewSessionStore.setState({
+              capabilities: { ...useNewSessionStore.getState().capabilities, model: false },
+            })
+          }
+          useNewSessionStore.setState({
+            modelApply: { status: 'failed', error: errorText(error) },
+          })
+          return created.sessionId
+        }
+      }
+
+      await finishOpen(created.sessionId, notice)
       return created.sessionId
     } catch (error) {
       if (isMissingEndpoint(error)) {
@@ -947,7 +1239,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
     if (target === null || rename === null) return
     const title = rename.title.trim()
     if (title.length === 0) {
-      useNewSessionStore.setState({ actionError: '标题不能为空' })
+      useNewSessionStore.setState({ actionError: translate('newSessionTitleRequired') })
       return
     }
     useNewSessionStore.setState({ busySessionId: rename.sessionId, actionError: null })

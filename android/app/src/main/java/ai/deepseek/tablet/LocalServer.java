@@ -34,7 +34,11 @@ import okhttp3.OkHttpClient;
  *       /__ds_auth/* 走 {@link RemoteAuthHandler}（应用内授权容器：全屏 Dialog + WebView，或交给
  *       系统浏览器；第三方登录在窗口里完成，登录结果由页面按 qrId 轮询服务端拿），
  *       /__ds_keepalive/* 走 {@link KeepAliveHandler}（后台保活前台服务 + 通用设置的权限中心：
- *       通知 / 省电 / 自启动 / 精确闹钟 / 悬浮窗 / 应用详情 / 流量 的状态与跳转）</li>
+ *       通知 / 省电 / 自启动 / 精确闹钟 / 悬浮窗 / 应用详情 / 流量 的状态与跳转），
+ *       /__ds_notify/* 走 {@link RemoteNotifyHandler}（通知中心：进行中汇总、完成/出错/待审批
+ *       三类事件通知；页面推快照，原生负责渲染），
+ *       /__ds_download/* 走 {@link RemoteDownloadHandler}（保存到系统「下载」目录：Android 10+
+ *       用 MediaStore.Downloads，Android 9 直接写公共目录 + 媒体扫描）</li>
  *   <li>每个连接一个小循环支持 keep-alive，最多 256 个请求；/__ds_remote/ws 升级成 WebSocket 后
  *       整条连接交给 RemoteWsHandler 独占，隧道结束即关闭</li>
  *   <li>工作线程全部是 daemon，Activity 退出时不会把进程挂住</li>
@@ -61,6 +65,10 @@ public final class LocalServer {
     private final RemoteWsHandler remoteWsHandler;
     private final RemoteAuthHandler remoteAuthHandler;
     private final KeepAliveHandler keepAliveHandler;
+    /** 通知中心（/__ds_notify/*）：页面推「谁在跑」，原生渲染通知 */
+    private final RemoteNotifyHandler notifyHandler;
+    /** 保存到系统「下载」目录（/__ds_download/*）：图片 / 文本预览右下角的「下载」 */
+    private final RemoteDownloadHandler downloadHandler;
     /** Application context：停服务（RemoteKeepAliveService.stop）也要用它 */
     private final Context appContext;
     private final ExecutorService workers;
@@ -92,6 +100,12 @@ public final class LocalServer {
         // 后台保活 + 权限中心（/__ds_keepalive/*）：同样靠 ActivityLifecycleCallbacks 定位当前
         // Activity（要弹通知权限框、要拉系统权限设置页），所以也传 Application context
         this.keepAliveHandler = new KeepAliveHandler(base);
+        // 通知中心（/__ds_notify/*）：不需要 Activity（通知是进程级资源），只要 Application context。
+        // 构造时就会把两条渠道建好 —— 渠道是 8.0+ 发通知的硬前提，越早建越不容易「静默丢通知」
+        this.notifyHandler = new RemoteNotifyHandler(base);
+        // 保存到「下载」目录（/__ds_download/*）：要能请求 Android 9 的存储写权限，
+        // 所以和上面两个一样靠 ActivityLifecycleCallbacks 定位当前 Activity
+        this.downloadHandler = new RemoteDownloadHandler(base);
         this.workers = Executors.newCachedThreadPool(runnable -> {
             Thread thread = new Thread(runnable, "ds-http-" + threadCounter.incrementAndGet());
             thread.setDaemon(true);
@@ -328,6 +342,21 @@ public final class LocalServer {
         // 带点的路径不会触发回落，旧 APK 上是真 404，见 KeepAliveHandler 类注释。
         if (path.startsWith(KeepAliveHandler.PATH_PREFIX)) {
             return keepAliveHandler.handle(method, path, headers, in, out, keepAlive);
+        }
+
+        // 通知中心（/__ds_notify/*）：同样必须排在静态资源判断之前，理由与上面一模一样的
+        // SPA 回落问题 —— 页面探测能力请用 /__ds_notify/state.json（带点，旧 APK 真 404）。
+        // 注意它**不**在 LocalServer.stop() 里清理：这几条通知就是「退出界面之后还要提醒用户」的，
+        // 退出时清掉等于功能没了；真不要了由页面调 POST /__ds_notify/clear。
+        if (path.startsWith(RemoteNotifyHandler.PATH_PREFIX)) {
+            return notifyHandler.handle(method, path, headers, in, out, keepAlive);
+        }
+
+        // 保存到系统「下载」目录（/__ds_download/*）：同样必须排在静态资源判断之前。
+        // 它要读 POST 的 JSON（name / mime / dataBase64），所以 in 一起传；
+        // 页面探测能力请用 /__ds_download/state.json（带点，旧 APK 上是真 404）。
+        if (path.startsWith(RemoteDownloadHandler.PATH_PREFIX)) {
+            return downloadHandler.handle(method, path, headers, in, out, keepAlive);
         }
 
         // 更新接口必须排在静态资源判断之前，否则会被当成页面路径去 assets 里找。

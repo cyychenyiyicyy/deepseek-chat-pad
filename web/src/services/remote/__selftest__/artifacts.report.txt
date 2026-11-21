@@ -1,0 +1,27 @@
+[PASS] A1 looksLikeFilePath：URL / data: / 目录 / 空 / 多行 都不认
+[PASS] A2 normalizeArtifactPath：反斜杠归一、去行号、去 ./、保 UNC
+[PASS] A3 名称 / 目录 / 扩展名 拆分
+[PASS] A4 toWorkspaceRelative：相对原样、绝对按 root 削前缀、越界/未知 root → null
+[PASS] B1 write（file_path）→ 新建产物；名称/目录正确
+[PASS] B2 write（path 键，短名带前缀）→ 产物；一次写多个 files[] → 全部
+[PASS] B3 edit：参数抽不到路径时，用结果 diff 里的「文件: …」
+[PASS] B4 diff 里旧文件是「(新文件)」→ 记为新建
+[PASS] B5 read / read_image / grep / glob / 终端：一个产物都不给
+[PASS] B6 失败 / 进行中的写工具不算产物
+[PASS] B7 str_replace_editor 按 command 分流：view 是读，create 新建，str_replace 修改
+[PASS] B8 apply_patch：只认 *** Add / *** Update / *** Move to，Delete 不算
+[PASS] B9 名字里没有写动词的 MCP 工具 / 建目录 / 删除 → 不算
+[PASS] B10 只给中文展示标题（没有 toolKey）时，仍按标题动词认
+[PASS] B11 子函数自证：pathsFromArgs / pathsFromDiffText / pathsFromPatchText
+[PASS] C1 两轮对话：只有已结束、且有产物的轮才有面板；endIndex 指向该轮最后一行
+[PASS] C2 最后一轮：流式结束（streaming=false）后出现；turnEnd 一到即使 streaming 也能出现
+[PASS] C3 没有 turn 字段的历史数据：按用户消息切轮，且同一轮同名路径只算一次
+[PASS] C4 一轮里有工具还在跑（turnEnd 没到）→ 不显示
+[PASS] C5 已结束但没有产物的轮：不产生空面板
+[PASS] D1 会话汇总：跨轮去重（保留最新）、按时间倒序
+[PASS] D2 会话汇总只算已结束的轮（流式中的那一轮不进来）
+[PASS] E1 全部下载：严格串行、每次先报进度、失败跳过继续
+[PASS] E2 全部下载：shouldStop 之后不再发新请求
+[PASS] E3 空列表：不报错、不信口开河
+
+总计 25 项，25 PASS / 0 FAIL

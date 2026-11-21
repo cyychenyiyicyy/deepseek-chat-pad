@@ -1,0 +1,212 @@
+/*
+ * 输入框底部那一行（胶囊 + 发送 / 停止）。
+ *
+ * 只引仓库已有的 token（`--dsw-alias-*`），不新增颜色：发送键与
+ * 本机聊天 `chatInput/ChatInput.module.css` 的 `.sendButton` 同尺寸同色
+ * （34px 圆 / 移动端 40px），两个模式之间来回切不会觉得是两个 App。
+ */
+
+.row {
+  display: flex;
+  align-items: center;
+  /*
+   * 必须允许换行：390px 竖屏放不下「胶囊 + 插话/排队 + 发送 + 停止」这么多东西，
+   * 不允许换行就会把整页撑出横向滚动（真机表现：右侧按钮被切掉、时间线也跟着溢出）。
+   * 换行时 `.actions` 靠 `margin-left:auto` 自己贴右，停止键的位置依然稳定在右下角。
+   */
+  flex-wrap: wrap;
+  gap: 6px;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 4px 10px 9px;
+}
+
+/* 胶囊组：窄屏时**自己换行**，不把文字挤成省略号；不抢剩余空间（留给提示语） */
+.pills {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* 提示语：说明性文案，桌面才有位置 */
+.hint {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+/* 生成中那条提示要留下（它说的是「你现在的消息会排队」），空间不够就自己收窄 */
+.hintBusy {
+  display: block;
+}
+
+.actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* ---------- 次要按钮：生成中的「仍然能发」 ---------- */
+
+/* 生成中主位是停止，这个是「照样能发」的入口：描边圆钮，比主按钮小一号 */
+.secondarySend {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 50%;
+  background-color: transparent;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+
+  &:not(.disabled):hover {
+    border-color: var(--dsw-alias-button-ghost-active-border);
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+/* ---------- 插话 / 排队 切换（只在生成中出现） ---------- */
+
+.modeToggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  box-sizing: border-box;
+  height: 26px;
+  padding: 2px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  background-color: transparent;
+}
+
+.modeOption {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 100px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+
+  &:hover {
+    color: var(--dsw-alias-label-primary);
+  }
+}
+
+.modeOptionActive {
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-brand-text);
+  font-weight: 500;
+}
+
+/* 数据层还没接 steer 时的降级标注（点了也只会排队） */
+.modeOptionDim {
+  opacity: 0.55;
+}
+
+/* ---------- 主按钮：发送 / 停止 ---------- */
+
+.primary {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-static-neutral-bluish-00);
+  cursor: pointer;
+  transition: background 0.2s ease;
+
+  &:not(.disabled):hover {
+    background: var(--dsw-alias-button-primary-hover);
+  }
+}
+
+/* 停止态：形状不变、位置不变，只换图标与色（用户靠位置点，不靠颜色找） */
+.stop {
+  background: var(--dsw-alias-label-primary);
+  color: var(--dsw-alias-bg-base);
+
+  &:hover {
+    background: var(--dsw-alias-label-secondary);
+  }
+}
+
+.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ---------- 移动端 ---------- */
+
+@media not all and (min-width: 768px) {
+  .row {
+    gap: 4px;
+    padding: 2px 8px 8px;
+  }
+
+  /* 手机上提示语没有位置；`hintBusy` 例外，靠 flex 自己收窄 */
+  .hint {
+    display: none;
+  }
+
+  .primary {
+    width: 38px;
+    height: 38px;
+  }
+
+  /* 次要发送键：比主按钮小一号，别抢主位的重量 */
+  .secondarySend {
+    width: 34px;
+    height: 34px;
+  }
+
+  /* 竖屏放不下两段文字：切换器收窄，靠 aria-label 说明完整语义 */
+  .modeOption {
+    padding: 0 6px;
+    font-size: 10px;
+  }
+}
+
+/* 横屏 + 软键盘弹起：输入区总高受挤压时，把提示与胶囊的留白再收一档 */
+@media (max-height: 460px) {
+  .row {
+    padding: 2px 8px 6px;
+  }
+
+  .hint {
+    display: none;
+  }
+}

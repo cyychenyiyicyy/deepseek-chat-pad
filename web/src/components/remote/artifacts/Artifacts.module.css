@@ -1,0 +1,591 @@
+/*
+ * 交付文件（R12）：时间线里「本次产出 N 个文件」那一块 + 顶栏「本次会话的交付文件」抽屉。
+ *
+ * 三段各自的定位：
+ *   `.inline*`  一轮回复下方的那一行（默认展开这一行、详情默认收起）；
+ *   `.chip*`    文件 chip（图标 + 文件名 + 目录相对路径），手机窄屏横向滚动不换行；
+ *   `.entry*` / `.drawer*` 顶栏入口与会话级抽屉（形态照搬工作区抽屉：右栏 / 手机整屏）。
+ *
+ * 颜色一律走 `theme.css` 的 dsw-* 变量（暗色 / 亮色自动跟随），尺寸沿用本工程既有节奏：
+ * chip 24px、行高 18px、12 号字；抽屉标题 15/600、副标题 11。
+ */
+
+/* ────────────────────────── 一、时间线里那一行 ────────────────────────── */
+
+.inline {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-sizing: border-box;
+  margin: -6px 0 14px;
+  padding: 6px 10px 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 12px;
+  background-color: var(--dsw-alias-bg-base);
+}
+
+.inlineHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 左边那枚「本次产出 N 个文件」：整块可点，点了就折叠 / 展开 chips */
+.inlineToggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.inlineGlyph {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.inlineTitle {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.inlineChevron {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+  transition: transform 0.15s ease;
+}
+
+/* 收起时箭头指右边（展开 = 往下） */
+.inline[data-open='false'] .inlineChevron {
+  transform: rotate(-90deg);
+}
+
+/* 「详情」：一行里最轻的那个按钮 */
+.inlineDetail {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border: none;
+  border-radius: 100px;
+  background: none;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 18px;
+  cursor: pointer;
+  user-select: none;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+    color: var(--dsw-alias-label-secondary);
+  }
+}
+
+.inlineDetail[aria-expanded='true'] {
+  color: var(--dsw-alias-brand-text);
+}
+
+/* ────────────────────────── 二、文件 chips ────────────────────────── */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chip {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 5px;
+  box-sizing: border-box;
+  max-width: 260px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+
+  &:hover {
+    border-color: var(--dsw-alias-border-l1);
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.chip[data-missing='true'] {
+  border-style: dashed;
+  border-color: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* 文件图标：`FileIcon` 本身是 28×28 的 SVG，这里按 14px 摆 */
+.chipGlyph {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+
+  & > svg {
+    width: 14px;
+    height: 14px;
+    display: block;
+  }
+}
+
+.chipName {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 目录相对路径：比文件名淡一档，长目录先被截掉 */
+.chipDir {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-caption);
+
+  &::before {
+    content: '·';
+    margin-right: 4px;
+    color: var(--dsw-alias-label-caption);
+  }
+}
+
+.chipMissing {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* 详情：竖排一行一个，目录与来源写在右边 */
+.detailList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 2px 0 0;
+  padding: 6px 0 0;
+  border-top: 1px dashed var(--dsw-alias-border-l1);
+  list-style: none;
+}
+
+.detailRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 2px 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.detailName {
+  flex-shrink: 0;
+  max-width: 50%;
+  overflow: hidden;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.detailDir {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: ltr;
+  user-select: text;
+}
+
+.detailOrigin {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 100px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ────────────────────────── 三、顶栏入口 ────────────────────────── */
+
+/* 与 `⋯`（chat-controls 的 .iconPill）同尺寸同观感：26px 圆形，hover 才亮 */
+.entry {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+/* 有交付物时右上角一个小数字：不点开也知道这次会话产出了东西 */
+.entryBadge {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 100px;
+  background-color: var(--dsw-alias-brand-text);
+  color: var(--dsw-static-neutral-bluish-00);
+  font-size: 9px;
+  line-height: 14px;
+  font-weight: 600;
+  text-align: center;
+  user-select: none;
+}
+
+/* ────────────────────────── 四、会话级抽屉 ────────────────────────── */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 41;
+  display: flex;
+  justify-content: flex-end;
+  background-color: rgb(0 0 0 / 28%);
+  animation: artifacts-fade-in var(--ds-transition-duration, 120ms) var(--ds-ease-in-out, ease-out);
+}
+
+.overlayMobile {
+  justify-content: stretch;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-height: 0;
+  background-color: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  box-shadow: -8px 0 32px rgb(0 0 0 / 18%);
+  animation: artifacts-slide-in var(--ds-transition-duration, 120ms) var(--ds-ease-in-out, ease-out);
+}
+
+/* 平板 / 桌面：右栏，比工作区抽屉窄一点（一行一个文件名，不需要 380） */
+.panelSide {
+  width: min(360px, 92vw);
+  height: 100%;
+  border-top-left-radius: 20px;
+  border-bottom-left-radius: 20px;
+}
+
+.panelMobile {
+  width: 100%;
+  height: 100%;
+}
+
+.drawerHead {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  padding: 12px 10px 10px 16px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.drawerTitleWrap {
+  flex: 1;
+  min-width: 0;
+}
+
+.drawerTitle {
+  font-size: 15px;
+  line-height: 22px;
+  font-weight: 600;
+}
+
+.drawerSubtitle {
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.drawerBar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+/* 「全部下载」：与输入区主按钮同一档的轻量按钮 */
+.downloadAll {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.progressWrap {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.progressText {
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.progressTrack {
+  height: 3px;
+  border-radius: 100px;
+  background-color: var(--dsw-alias-border-l1);
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: 100px;
+  background-color: var(--dsw-alias-brand-text);
+  transition: width 0.2s ease;
+}
+
+.list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  padding: 6px 8px 12px;
+  scrollbar-color: var(--scroll-color) transparent;
+}
+
+.listRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.listRow[data-missing='true'] {
+  cursor: default;
+
+  &:hover {
+    background: transparent;
+  }
+}
+
+.listIcon {
+  display: inline-flex;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+
+  & > svg {
+    width: 22px;
+    height: 22px;
+    display: block;
+  }
+}
+
+.listCopy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.listName {
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 19px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-primary);
+}
+
+.listDir {
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: ltr;
+  user-select: text;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.listTail {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.listRow[data-missing='true'] .listName {
+  color: var(--dsw-alias-label-tertiary);
+  text-decoration: line-through;
+}
+
+.listMissing {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.empty {
+  padding: 28px 16px;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.hint {
+  flex-shrink: 0;
+  box-sizing: border-box;
+  padding: 8px 16px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-caption);
+}
+
+@keyframes artifacts-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes artifacts-slide-in {
+  from {
+    transform: translateX(16px);
+  }
+
+  to {
+    transform: translateX(0);
+  }
+}
+
+/* ────────────────────────── 五、手机窄屏 ────────────────────────── */
+
+/*
+ * 用户点名的规则：**窄屏 chips 横向滚动，不换行挤压**。
+ * 这里用 `nowrap + overflow-x: auto`，并让每个 chip 自己 `flex: 0 0 auto`；
+ * 滚动条藏起来（触屏上它本来也不显示，桌面窄窗口下也不该出现一条灰杠）。
+ */
+@media not all and (min-width: 768px) {
+  .chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar {
+      display: none;
+    }
+  }
+
+  .chip {
+    max-width: 74vw;
+  }
+
+  .inline {
+    margin-bottom: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel,
+  .overlay {
+    animation: none;
+  }
+
+  .inlineChevron {
+    transition: none;
+  }
+}

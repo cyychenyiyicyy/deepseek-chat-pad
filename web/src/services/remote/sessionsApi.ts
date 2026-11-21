@@ -45,8 +45,33 @@
  * | `pinSession` / `unpinSession` | `workspace/pinSession` / `workspace/unpinSession` | call | `{request:{sessionId}}` | §2.1 |
  * | `fetchPermissionCatalog` | `permissionPresets/catalog` | call | `{}` | §2.10 |
  * | `fetchAgentPresets` | `agentPresets/list` | call | `{}` | §2.10 |
- * | `fetchModelCatalog` | `session/modelCatalog` | call | `{}` | §2.10（**只读**：模型切换归 W2） |
+ * | `fetchModelCatalog` | `session/modelCatalog` | call | `{}` | §2.10（目录：groups/models/reasoning.efforts） |
+ * | `applySessionModel` | **`session/selectModel` → 退回 `session/initializeDefaultModel`** | call | `{request:{sessionId,provider,model,reasoningEffort?}}` | `harness-remote-bridge.ts:187/191`、`client-core:469-483`、dsh-Go `session_api.dart:757-777`；`session/create` 里没有 model 字段，所以模型只能建完再设 |
  * | `applyPermissionPreset` | `commands/execute` | call | `{agentId,line:'/permission <preset>',submittedAttachments:[]}` | §2.10（切预设只能走这条） |
+ *
+ * ## 2·补、工作区上传是**顶层 RPC**，不是 Gateway endpoint（R15 定案）
+ *
+ * `workspace.upload.open|chunk|commit|abort` 走的是 `rpc.request` 的**方法名**，
+ * 参数直接是 open/chunk 自己的对象，**不能**包成 `harness.remote.call` 的
+ * `{endpoint, payload:{args}}` —— 包了就 `METHOD_NOT_FOUND`（Host 的方法表里没有
+ * 名叫 `harness.remote.call` 的 `workspace.upload.*`）。证据：
+ *
+ * - Host 侧：`ds-harness-remote@0.5.22` 的 `dist/rpc-router.js:40-43` 把它们列在
+ *   `apiMethods`（顶层方法表）里，`case 'workspace.upload.open'` 直接把 `params`
+ *   交给 `workspaceUpload.call(method, params)`；
+ * - 官方 RN 客户端：`app-core/src/screens/chat-files.ts:281-335` 用 `rpc('workspace.upload.open', …)`
+ *   （它不是 `callValue` 的 Gateway 封装）；
+ * - dsh-Go：`tunnel_carrier.dart:650-698` 同样 `session.rpc.call('workspace.upload.open', …)`；
+ * - 协议：`docs/protocol.md:1616-1667`（§ Workspace upload，`rpc.request` envelope，每次调用独立 request ID）。
+ *
+ * 另外三条**必须照做**的边界（照 0.5.22 的 `dist/workspace-upload.js` 抄的，写错就是白跑）：
+ *
+ * 1. `uploadId` 必须是 **UUID**（`z.string().uuid()`），open 之前生成；
+ * 2. `chunk.data` 必须是**规范 base64**（Host 会 `data.toString('base64') !== p.data` 对比，
+ *    padding 不能省、不能带空白），解码后 ≤ `chunkBytes`（0.5.22 恒为 65536），
+ *    `offset` 必须严格等于上一块的 `receivedBytes`；
+ * 3. `totalBytes` 上限看传输路径：`LAN` / `P2P` 1 GiB，其余（Relay / TURN / 未知）**20 MiB**
+ *    （`dist/workspace-transfer-limits.js`）；超过就在本地拦，别发上去被 `UPLOAD_LIMIT` 打回。
  *
  * ## 3. 三条硬约束
  *
@@ -110,6 +135,8 @@ export const RemoteEndpoints = {
   agentPresetsList: 'agentPresets/list',
   agentPresetsSelect: 'agentPresets/select',
   modelCatalog: 'session/modelCatalog',
+  sessionSelectModel: 'session/selectModel',
+  sessionInitializeDefaultModel: 'session/initializeDefaultModel',
   commandsExecute: 'commands/execute',
 } as const
 
@@ -417,6 +444,44 @@ export const callEndpoint = async <T>(
 }
 
 /* ────────────────────────────────────────────────────────────────────────
+ * 四·零、工作区上传（`workspace.upload.v1`）—— 顶层 RPC，不是 Gateway endpoint
+ *
+ * 只用 `target.rpc(method, params)`：**没有** `{endpoint,payload:{args}}` 包装，
+ * 也**没有** `{ok,value}` envelope（那是 `harness.remote.call` 自己的壳）。
+ * 详见文件头 §2·补。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** 工作区上传的四个顶层方法（`docs/protocol.md:1646-1651`）。 */
+export const WorkspaceUploadMethods = {
+  open: 'workspace.upload.open',
+  chunk: 'workspace.upload.chunk',
+  commit: 'workspace.upload.commit',
+  abort: 'workspace.upload.abort',
+} as const
+
+export type WorkspaceUploadMethod = (typeof WorkspaceUploadMethods)[keyof typeof WorkspaceUploadMethods]
+
+/** Host 必须在 `harness.transport.describe` 里声明它，客户端才能发这四个 RPC（协议硬要求）。 */
+export const WORKSPACE_UPLOAD_CAPABILITY = 'workspace.upload.v1'
+
+/**
+ * 发一个 `workspace.upload.*` 顶层 RPC。
+ *
+ * 返回的就是 Host 的 result 对象本身（`{uploadId, chunkBytes}` / `{uploadId, receivedBytes}` /
+ * `{name, path, bytes}` / `{aborted:true}`）；Host 的拒绝以 `RemoteLinkError` 抛出，
+ * `error.code` 是稳定码（`UPLOAD_LIMIT` / `UPLOAD_INVALID_CHUNK` / `UPLOAD_INCOMPLETE`…）。
+ */
+export const callWorkspaceUpload = async <T>(
+  target: RemoteCallTarget,
+  method: WorkspaceUploadMethod,
+  params: Record<string, unknown>,
+  timeoutMs = DEFAULT_CALL_TIMEOUT_MS,
+): Promise<T> => {
+  observeRemoteTarget(target)
+  return await target.rpc<T>(method, params, { timeoutMs })
+}
+
+/* ────────────────────────────────────────────────────────────────────────
  * 四·补、连接观察者（给 W1 的独立 store 复用现有连接，不动 store.ts）
  * ──────────────────────────────────────────────────────────────────────── */
 
@@ -461,6 +526,8 @@ export interface RemoteSessionRow {
   origin?: string
   cwd?: string
   agentPreset?: string
+  /** 这个会话当前的模型（Host 的 `projections.values.modelSelection`）。 */
+  modelSelection?: RemoteModelSelection
   pinned?: boolean
 }
 
@@ -485,6 +552,9 @@ export const parseSessionRow = (value: unknown): RemoteSessionRow | null => {
     ? values.workspaceId
     : typeof value.workspaceId === 'string' ? value.workspaceId : undefined
   const pinned = typeof values?.pinned === 'boolean' ? values.pinned : undefined
+  // `projections.values.modelSelection` 是这个会话**当前**的模型（Host 投影，`client-core:1929-1945`）：
+  // 新建会话选完模型靠它确认到底生效没（见 `newSessionStore.createAndOpen`）。
+  const modelSelection = parseSelection(values?.modelSelection) ?? undefined
   return {
     sessionId: value.sessionId,
     ...(title === undefined ? {} : { title }),
@@ -496,6 +566,7 @@ export const parseSessionRow = (value: unknown): RemoteSessionRow | null => {
     ...(typeof value.origin === 'string' ? { origin: value.origin } : {}),
     ...(typeof value.cwd === 'string' ? { cwd: value.cwd } : {}),
     ...(typeof value.agentPreset === 'string' ? { agentPreset: value.agentPreset } : {}),
+    ...(modelSelection === undefined ? {} : { modelSelection }),
     ...(pinned === undefined ? {} : { pinned }),
   }
 }
@@ -600,6 +671,66 @@ export const pageHistory = async (
 }
 
 /* ────────────────────────────────────────────────────────────────────────
+ * 六·补、工作区文件的「引用令牌」（R15）
+ *
+ * `fileUploads/upload` 拿回的是 `receiptId`；`workspace.upload.*` 拿回的是**工作区路径**
+ * （`./name`）。后者不能塞进 `{type:'file', receiptId}`（Host 只认收据），官方 RN 客户端
+ * 的做法是把它变成正文里的 `@name` 引用（`app-core/src/screens/chat-files.ts:403-429`
+ * 的 `formatUploadedFilesReferencePrompt`）。
+ *
+ * 为了**不把附件在发送时丢掉**，路径用一个显式令牌穿过附件数组：
+ *
+ *   `readyReceipts()` 对工作区附件返回 `workspace-ref:./a.png` → UI 照常组
+ *   `{type:'file', receiptId}` → `sendPrompt()` 把它挑出来转成正文 `@a.png`。
+ *
+ * 三天后回头看这段代码必须还能看懂：**令牌不是 receiptId**，它只在客户端内部流转，
+ * 永远不会出现在 `content` 的 `file` 块里（那些块只放真收据）。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** 工作区引用令牌的前缀（`workspace-ref:` + Host 回显的 `path`）。 */
+export const WORKSPACE_REFERENCE_PREFIX = 'workspace-ref:'
+
+/** 把一个工作区路径包成令牌（放进 `readyReceipts()` 的返回值里）。 */
+export const workspaceReferenceToken = (path: string): string => `${WORKSPACE_REFERENCE_PREFIX}${path}`
+
+/** 这个字符串是不是工作区引用令牌（而不是真收据）。 */
+export const isWorkspaceReferenceToken = (value: string): boolean => value.startsWith(WORKSPACE_REFERENCE_PREFIX)
+
+/** 令牌 → 工作区路径（`workspace-ref:./a.png` → `./a.png`）。 */
+export const pathOfWorkspaceReference = (token: string): string => token.slice(WORKSPACE_REFERENCE_PREFIX.length)
+
+/** 去掉 `./` 前缀（引用里写成 `@a.png` 更干净，与官方格式化函数一致）。 */
+const stripLeadingDotSlash = (path: string): string => {
+  let value = path
+  while (value.startsWith('./')) value = value.slice(2)
+  return value
+}
+
+/**
+ * 一个路径 → 正文里的引用写法：带空白或引号就用 `@"…"`，否则 `@…`。
+ *
+ * 规则照 `formatUploadedFilesReferencePrompt()`（RN 上游）：引号内的 `"` 反斜杠转义。
+ */
+export const formatWorkspaceReference = (path: string): string => {
+  const clean = stripLeadingDotSlash(path)
+  const target = clean.length > 0 ? clean : path
+  if (/[\s"]/u.test(target)) return `@"${target.replace(/"/gu, '\\"')}"`
+  return `@${target}`
+}
+
+/** 一组路径 → 一行引用（空格分隔）。 */
+export const formatWorkspaceReferences = (paths: readonly string[]): string =>
+  paths.map(formatWorkspaceReference).join(' ')
+
+/** 把引用行接到正文末尾（正文为空就只发引用行）。 */
+export const appendWorkspaceReferences = (text: string, paths: readonly string[]): string => {
+  if (paths.length === 0) return text
+  const refLine = formatWorkspaceReferences(paths)
+  const trimmed = text.replace(/\s+$/u, '')
+  return trimmed.length === 0 ? refLine : `${trimmed}\n\n${refLine}`
+}
+
+/* ────────────────────────────────────────────────────────────────────────
  * 七、发消息 / 中断
  * ──────────────────────────────────────────────────────────────────────── */
 
@@ -607,6 +738,9 @@ export const pageHistory = async (
  * `session/prompt` 的一个 content 块。
  * - `file` 的 `receiptId` 来自 `fileUploads/upload`（P1）；
  * - `image` 的 `data` 是**标准 base64**（不是 base64url）。
+ *
+ * `receiptId` 里也允许出现「工作区引用令牌」（`workspace-ref:./a.png`，见 §六·补）：
+ * `sendPrompt()` 会把它从 `file` 块里摘出来、转成正文 `@a.png`，**不进** `content`。
  */
 export type RemotePromptAttachment =
   | { type: 'file'; receiptId: string }
@@ -625,6 +759,10 @@ export interface SendPromptOptions {
  *
  * **返回空值**：真正的结果全部走 `session/follow` 的事件（`turn/start` → 流式 → `turn/end`）。
  * `requestId` 幂等：同 id 重试不会重复执行，并且会被回显成 `user/message.source.rpcId`。
+ *
+ * 附件数组里的**工作区引用令牌**（`workspace-ref:./a.png`）在这里被摘出来，改成正文末尾的
+ * `@a.png` —— 这是 Host 0.5.22 上唯一能把「已落盘的附件」带进这一轮消息的办法
+ * （它的 allowlist 里没有 `fileUploads/upload`，没有收据可用；见 `filesApi.ts` 的 R15 注释）。
  */
 export const sendPrompt = async (
   target: RemoteCallTarget,
@@ -633,11 +771,23 @@ export const sendPrompt = async (
   attachments: readonly RemotePromptAttachment[] = [],
   options: SendPromptOptions = {},
 ): Promise<void> => {
-  const files = attachments.filter((item): item is Extract<RemotePromptAttachment, { type: 'file' }> => item.type === 'file')
-  const images = attachments.filter((item): item is Extract<RemotePromptAttachment, { type: 'image' }> => item.type === 'image')
+  const files: Extract<RemotePromptAttachment, { type: 'file' }>[] = []
+  const images: Extract<RemotePromptAttachment, { type: 'image' }>[] = []
+  const references: string[] = []
+  for (const item of attachments) {
+    if (item.type === 'image') {
+      images.push(item)
+    } else if (isWorkspaceReferenceToken(item.receiptId)) {
+      const path = pathOfWorkspaceReference(item.receiptId)
+      if (path.length > 0) references.push(path)
+    } else {
+      files.push(item)
+    }
+  }
+  const promptText = appendWorkspaceReferences(text, references)
   const content: Record<string, unknown>[] = [
     ...files.map(file => ({ type: 'file', receiptId: file.receiptId })),
-    ...(text.length === 0 ? [] : [{ type: 'text', text }]),
+    ...(promptText.length === 0 ? [] : [{ type: 'text', text: promptText }]),
     ...images.map(image => ({
       type: 'image',
       mediaType: image.mediaType,
@@ -1304,11 +1454,184 @@ export interface RemoteModelSelection {
   reasoningEffort?: string
 }
 
+/** 一个思考强度档位（`groups[].models[].reasoning.efforts[]`，`client-core:84-87`）。 */
+export interface RemoteModelEffort {
+  /** 发给 Host 的档位值（`reasoningEffort`），如 `off` / `low` / `high` / `max`。 */
+  id: string
+  /** Host 给的可读名（可能没有 → 界面按 id 映射）。 */
+  name?: string
+  description?: string
+}
+
+/** 目录里的一行模型（已摊平到 provider，方便一次渲染成网格）。 */
+export interface RemoteModelEntry {
+  provider: string
+  providerName: string
+  id: string
+  name: string
+  description?: string
+  /** 这个模型支持的思考强度档位；少于 2 档时界面不显示分段控件。 */
+  efforts: RemoteModelEffort[]
+  /** 模型的默认档位（Host 声明）。 */
+  defaultEffort?: string
+}
+
+export interface RemoteModelCatalog {
+  /** Host 默认模型（没有就 `null`）。 */
+  default: RemoteModelSelection | null
+  models: RemoteModelEntry[]
+  /** 拿不到目录的 provider（Host 会列出来，界面可以一行提示）。 */
+  failures: { name: string; message: string }[]
+}
+
+const parseEfforts = (value: unknown): RemoteModelEffort[] => {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((entry) => {
+    // 两种写法都认：对象 `{id,name}`，以及裸字符串 `'low'`。
+    if (typeof entry === 'string' && entry.length > 0) return [{ id: entry }]
+    if (!isRecord(entry)) return []
+    const id = typeof entry.id === 'string' && entry.id.length > 0
+      ? entry.id
+      : typeof entry.value === 'string' && entry.value.length > 0 ? entry.value : undefined
+    if (id === undefined) return []
+    return [{
+      id,
+      ...(typeof entry.name === 'string' && entry.name.length > 0 ? { name: entry.name } : {}),
+      ...(typeof entry.description === 'string' ? { description: entry.description } : {}),
+    }]
+  })
+}
+
+/** 模型行上的思考强度声明：官方是 `reasoning.{efforts,defaultEffort}`，老版本另有 `reasoning_options`。 */
+const parseModelReasoning = (model: Record<string, unknown>): { efforts: RemoteModelEffort[]; defaultEffort?: string } => {
+  const reasoning = isRecord(model.reasoning) ? model.reasoning : undefined
+  // 三种历史写法都认：
+  //   `reasoning: { efforts: [{id,name}], defaultEffort }`   ← 官方（client-core:84-87）
+  //   `reasoning_options: ['off','low']`                      ← 裸数组
+  //   `reasoning_options: { efforts: [...] }` / `{ values: [...] }` ← 对象包一层
+  const legacyRaw = model.reasoning_options ?? model.reasoningOptions
+  const legacy = isRecord(legacyRaw) ? legacyRaw : undefined
+  const legacyList = Array.isArray(legacyRaw) ? legacyRaw : undefined
+  const efforts = parseEfforts(
+    reasoning?.efforts ?? reasoning?.options ?? legacy?.efforts ?? legacy?.values ?? legacyList ?? model.efforts,
+  )
+  const defaultEffort = [reasoning?.defaultEffort, legacy?.defaultEffort, legacy?.default]
+    .find((value): value is string => typeof value === 'string' && value.length > 0)
+  return {
+    efforts,
+    ...(defaultEffort === undefined ? {} : { defaultEffort }),
+  }
+}
+
+const parseSelection = (value: unknown): RemoteModelSelection | null => {
+  if (!isRecord(value)) return null
+  // Host 有时把选择包在 `{next}` / `{lastUsed}` 里（`client-core:1933-1945` 同一套判断）。
+  for (const candidate of [value.next, value.lastUsed, value]) {
+    if (!isRecord(candidate)) continue
+    if (typeof candidate.provider !== 'string' || typeof candidate.model !== 'string') continue
+    if (candidate.provider.length === 0 || candidate.model.length === 0) continue
+    return {
+      provider: candidate.provider,
+      model: candidate.model,
+      ...(typeof candidate.reasoningEffort === 'string' && candidate.reasoningEffort.length > 0
+        ? { reasoningEffort: candidate.reasoningEffort }
+        : {}),
+    }
+  }
+  return null
+}
+
+/**
+ * 完整的模型目录：`session/modelCatalog`（call，`args` 是空对象）。
+ *
+ * 形状依据 `client-core:446-467` 的 `HarnessSessionModels` + `:77-89` 的分组声明：
+ *
+ * ```json
+ * { "default": {"provider":"x","model":"y","reasoningEffort":"high"},
+ *   "groups": [{ "id":"deepseek", "name":"DeepSeek",
+ *                "models": [{ "id":"deepseek-v4","name":"V4",
+ *                             "reasoning": { "efforts":[{"id":"low","name":"低"}],
+ *                                            "defaultEffort":"low" } }] }],
+ *   "failures": [{ "name":"…","message":"…" }] }
+ * ```
+ *
+ * 拿不到 / 形状不对就是一目录空：新建面板据此把「模型」这一项整块隐藏（能力门禁）。
+ * **切模型不在本批的会话内控制里**（那是 W2 的 `sessionControls.ts`）；这里只服务新建会话。
+ */
+export const fetchModelCatalog = async (
+  target: RemoteCallTarget,
+  options: { timeoutMs?: number } = {},
+): Promise<RemoteModelCatalog> => {
+  const result = await callEndpoint<Record<string, unknown>>(
+    target,
+    RemoteEndpoints.modelCatalog,
+    {},
+    options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
+  )
+  const models: RemoteModelEntry[] = []
+  const groups = Array.isArray(result?.groups) ? result.groups : []
+  for (const group of groups) {
+    if (!isRecord(group) || typeof group.id !== 'string' || group.id.length === 0) continue
+    const providerName = typeof group.name === 'string' && group.name.length > 0 ? group.name : group.id
+    const rows = Array.isArray(group.models) ? group.models : []
+    for (const row of rows) {
+      if (!isRecord(row) || typeof row.id !== 'string' || row.id.length === 0) continue
+      const { efforts, defaultEffort } = parseModelReasoning(row)
+      models.push({
+        provider: group.id,
+        providerName,
+        id: row.id,
+        name: typeof row.name === 'string' && row.name.length > 0 ? row.name : row.id,
+        ...(typeof row.description === 'string' && row.description.length > 0 ? { description: row.description } : {}),
+        efforts,
+        ...(defaultEffort === undefined ? {} : { defaultEffort }),
+      })
+    }
+  }
+  return {
+    default: parseSelection(result?.default),
+    models,
+    failures: Array.isArray(result?.failures)
+      ? result.failures.flatMap((entry) => {
+        if (!isRecord(entry)) return []
+        return [{
+          name: typeof entry.name === 'string' ? entry.name : typeof entry.id === 'string' ? entry.id : '',
+          message: typeof entry.message === 'string' ? entry.message : '',
+        }]
+      })
+      : [],
+  }
+}
+
+/** 目录里找一行模型（`provider` + `model` 都要对上）。 */
+export const findRemoteModel = (
+  catalog: RemoteModelCatalog | null,
+  selection: RemoteModelSelection | null | undefined,
+): RemoteModelEntry | undefined => {
+  if (catalog === null || selection === null || selection === undefined) return undefined
+  return catalog.models.find((model) => model.provider === selection.provider && model.id === selection.model)
+}
+
+/**
+ * 模型的短名：去掉 `DeepSeek-` 前缀、连字符换空格、首字母大写。
+ *
+ * 直接照 dsh-Go 的 `shortModelName()`（`model_sheet.dart:32-42`）写：`DeepSeek-V4-Pro` → `V4 Pro`，
+ * 胶囊和卡片上都能少占一半宽度。
+ */
+export const shortModelName = (raw: string): string => {
+  const stripped = raw.replace(/^deepseek[-_ ]?/i, '')
+  const words = stripped
+    .split(/[-_ ]+/)
+    .filter((word) => word.length > 0)
+    .map((word) => (word.length === 1 ? word.toUpperCase() : `${word[0]?.toUpperCase() ?? ''}${word.slice(1)}`))
+    .join(' ')
+  return words.length === 0 ? raw : words
+}
+
 /**
  * Host 的默认模型：`session/modelCatalog`（call，`args` 是空对象）里只取 `default`。
  *
  * 拿不到 / 形状不对一律返回 `null`（新建面板就显示「继承 Host 默认」而不带具体名字）。
- * **不在这里做模型切换**：那是 W2 的 `sessionControls.ts`。
  */
 export const fetchDefaultModel = async (
   target: RemoteCallTarget,
@@ -1320,16 +1643,148 @@ export const fetchDefaultModel = async (
     {},
     options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
   )
-  if (!isRecord(result?.default)) return null
-  const value = result.default
-  if (typeof value.provider !== 'string' || typeof value.model !== 'string') return null
-  if (value.provider.length === 0 || value.model.length === 0) return null
-  return {
-    provider: value.provider,
-    model: value.model,
-    ...(typeof value.reasoningEffort === 'string' ? { reasoningEffort: value.reasoningEffort } : {}),
-  }
+  return parseSelection(result?.default)
 }
+
+/**
+ * `session/selectModel` 响应里的 `defaultSave`（「顺手把这个选择记成新对话默认」的结果）。
+ *
+ * 取值来自 dsh-Go 的 `ModelDefaultSaveStatus`：`saved` / `skipped` / `failed` / `unknown`。
+ * **它失败不代表会话模型没切**（`selected` 才是会话那一份）—— 只是「下次新建的默认」没存上，
+ * 所以界面要分开提示（`engineModelDefaultSaveFailed` 那条文案就是这个意思）。
+ */
+export interface RemoteModelDefaultSave {
+  status: 'saved' | 'skipped' | 'failed' | 'unknown'
+  message?: string
+}
+
+const parseDefaultSave = (value: unknown): RemoteModelDefaultSave | null => {
+  if (!isRecord(value)) return null
+  const status = typeof value.status === 'string' ? value.status : undefined
+  const message = typeof value.message === 'string' && value.message.length > 0 ? value.message : undefined
+  if (status === undefined) {
+    // 老 Host 只给 error / message：有就是失败
+    if (typeof value.error === 'string' || message !== undefined) {
+      return { status: 'failed', ...(message === undefined ? {} : { message }) }
+    }
+    return null
+  }
+  const known = status === 'saved' || status === 'skipped' || status === 'failed' ? status : 'unknown'
+  return { status: known, ...(message === undefined ? {} : { message }) }
+}
+
+export interface SelectModelResult {
+  selected: RemoteModelSelection
+  defaultSave: RemoteModelDefaultSave | null
+}
+
+/** 切某个会话的模型：`session/selectModel`（call）。返回值以 Host 的 `selected` 为准。 */
+export const selectSessionModel = async (
+  target: RemoteCallTarget,
+  sessionId: string,
+  selection: RemoteModelSelection,
+  options: { timeoutMs?: number } = {},
+): Promise<SelectModelResult> => {
+  const request: Record<string, unknown> = {
+    sessionId,
+    provider: selection.provider,
+    model: selection.model,
+  }
+  if (selection.reasoningEffort !== undefined && selection.reasoningEffort.length > 0) {
+    request.reasoningEffort = selection.reasoningEffort
+  }
+  const result = await callEndpoint<{ selected?: unknown; defaultSave?: unknown }>(
+    target,
+    RemoteEndpoints.sessionSelectModel,
+    { request },
+    options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
+  )
+  const selected = parseSelection(result?.selected)
+  if (selected === null) {
+    throw new RemoteApiError('INVALID_RESPONSE', '远端没有返回新的模型选择（selected）')
+  }
+  return { selected, defaultSave: parseDefaultSave(result?.defaultSave) }
+}
+
+/**
+ * 给刚建出来的空会话初始化模型：`session/initializeDefaultModel`（call）。
+ *
+ * **字段形状没有源码证据**（Host allowlist 里有这个端点，`harness-remote-bridge.ts:187`，
+ * 但官方 TS/Dart 客户端都没用过它），所以这里按 `session/selectModel` 同构发
+ * `{request:{sessionId, provider, model, reasoningEffort?}}`；返回值可能带 `selected`，
+ * 也可能什么都不带 —— 不带就返回 `null`，由 `applySessionModel` 决定要不要再确认。
+ */
+export const initializeSessionDefaultModel = async (
+  target: RemoteCallTarget,
+  sessionId: string,
+  selection: RemoteModelSelection,
+  options: { timeoutMs?: number } = {},
+): Promise<RemoteModelSelection | null> => {
+  const request: Record<string, unknown> = {
+    sessionId,
+    provider: selection.provider,
+    model: selection.model,
+  }
+  if (selection.reasoningEffort !== undefined && selection.reasoningEffort.length > 0) {
+    request.reasoningEffort = selection.reasoningEffort
+  }
+  const result = await callEndpoint<Record<string, unknown> | null>(
+    target,
+    RemoteEndpoints.sessionInitializeDefaultModel,
+    { request },
+    options.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
+  )
+  return parseSelection(result?.selected ?? result)
+}
+
+/** 「这个端点/这种参数老 Host 不认」—— 可以安全地换一条路重试。 */
+const MODEL_FALLBACK_CODES = new Set([
+  'METHOD_NOT_FOUND',
+  'METHOD_NOT_ALLOWED',
+  'CAPABILITY_NOT_SUPPORTED',
+  'UNSUPPORTED',
+  'FEATURE_NOT_SUPPORTED',
+  'INVALID_ARGUMENT',
+  'gateway/arguments-invalid',
+])
+
+export interface ApplyModelResult {
+  /** 最终生效的那条路。 */
+  via: 'select' | 'initialize'
+  /** Host 确认后的选择（没回显就是请求里那份）。 */
+  selection: RemoteModelSelection
+  /** `selectModel` 顺带的「新对话默认」结果；`initializeDefaultModel` 路径下是 `null`。 */
+  defaultSave: RemoteModelDefaultSave | null
+}
+
+/**
+ * 把选定的模型（+ 思考强度）落到一个**刚建出来、还没跑第一轮**的会话上。
+ *
+ * 顺序（`session/create` 里没有 model 字段，所以只能建完再设）：
+ *   1. **先 `session/selectModel`** —— 官方 TS / Dart 客户端都走这条，响应里还带
+ *      `defaultSave`（「顺手记成新对话默认」的结果，要单独提示，见 `RemoteModelDefaultSave`）；
+ *   2. 它不存在 / 参数不认（`METHOD_NOT_FOUND` / `gateway/arguments-invalid` 之类）→
+ *      退回 `session/initializeDefaultModel`（只有部分 Host 有）；
+ *   3. 两条都失败就把错误抛出去（界面必须让用户看见，不许静默）。
+ *
+ * 注意：只选「继承 Host 默认」时**根本不该调用这里** —— 没有选择就没有副作用。
+ */
+export const applySessionModel = async (
+  target: RemoteCallTarget,
+  sessionId: string,
+  selection: RemoteModelSelection,
+  options: { timeoutMs?: number } = {},
+): Promise<ApplyModelResult> => {
+  try {
+    const result = await selectSessionModel(target, sessionId, selection, options)
+    return { via: 'select', selection: result.selected, defaultSave: result.defaultSave }
+  } catch (error) {
+    if (!MODEL_FALLBACK_CODES.has(codeOf(error) ?? '')) throw error
+  }
+  const confirmed = await initializeSessionDefaultModel(target, sessionId, selection, options)
+  return { via: 'initialize', selection: confirmed ?? selection, defaultSave: null }
+}
+
 
 /** `/permission <preset>` 这条命令的合法 preset 形状（`client-core:745-749` 的同一判据）。 */
 const PERMISSION_PRESET_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
