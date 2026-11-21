@@ -1,0 +1,220 @@
+/* 「远程 DSH」设置分节：与 Settings.module.css 的 .cell / .row 同一套排版与分隔线 */
+.panel {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  padding-bottom: 8px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.intro {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 8px;
+}
+
+.introTitle {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+}
+
+.description {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 非壳环境：整块降级提示，红边比纯灰字更能说明「这里点不动」 */
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  margin: 4px 0 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-state-error-primary);
+  border-radius: 12px;
+  background-color: transparent;
+}
+
+.noticeText {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  min-height: 52px;
+  padding: 8px 0;
+
+  & + & {
+    box-shadow: inset 0 1px 0 0 var(--dsw-alias-border-l2-darkmode-thin);
+  }
+}
+
+.fieldText {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 2px;
+  width: 132px;
+  min-width: 0;
+}
+
+.label {
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.control {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.input {
+  box-sizing: border-box;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  height: var(--ds-control-height-xl);
+  padding: 0 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background-color: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color var(--ds-transition-duration) var(--ds-ease-in-out);
+
+  &::placeholder {
+    color: var(--dsw-alias-label-tertiary);
+  }
+
+  &:focus {
+    border-color: var(--dsw-alias-button-primary-fill);
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0 2px;
+}
+
+/* 状态胶囊行：标签 + 值合成一个小 pill，三项并排，放不下自动折行 */
+.status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 4px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  background-color: transparent;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.chipError {
+  border-color: var(--dsw-alias-state-error-primary);
+}
+
+.chipLabel {
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+}
+
+.chipValue {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.chipError .chipValue {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.errorText {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-error-primary);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.errorCode {
+  flex-shrink: 0;
+  font-family: var(--ds-font-family-mono, ui-monospace, monospace);
+  opacity: 0.8;
+}
+
+@media not all and (min-width: 768px) {
+  .field {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 12px 0;
+  }
+
+  .fieldText {
+    flex-basis: 100%;
+    width: auto;
+  }
+
+  .control {
+    flex: 1 1 100%;
+  }
+
+  .input {
+    height: 48px;
+    font-size: 16px;
+  }
+
+  .actions > button {
+    min-height: 44px;
+  }
+
+  .modeRow {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .modeLabel {
+    flex-basis: 100%;
+    width: auto;
+  }
+}

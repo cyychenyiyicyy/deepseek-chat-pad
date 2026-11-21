@@ -1,7 +1,13 @@
 import clsx from 'clsx'
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
-import { IconPanelLeftOutline16, IconSearchOutline16, IconSettingsOutline16, NewChatIcon } from '../base/icons.js'
+import {
+  IconLinkOutline16,
+  IconPanelLeftOutline16,
+  IconSearchOutline16,
+  IconSettingsOutline16,
+  NewChatIcon,
+} from '../base/icons.js'
 import { setSiderCollapsed } from '../../services/settings.js'
 import { groupSessions } from '../../services/chat/sessionGroups.js'
 import { forgetPin, togglePin, usePins } from '../../services/chat/pins.js'
@@ -12,6 +18,7 @@ import { IconButton } from '../base/IconButton.js'
 import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
 import { openSettings } from '../settings/settingsDialogState.js'
+import { enterRemoteMode, useRemoteMode } from '../remote/RemoteModeSwitch.js'
 import { closeMobileSider, useMobileSider } from './mobileSiderState.js'
 import { SessionItem } from './SessionItem.js'
 import styles from './Sider.module.css'
@@ -35,6 +42,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   const [deletePending, setDeletePending] = useState(false)
 
   const pinnedIds = usePins((state) => state.ids)
+  const remoteMode = useRemoteMode((state) => state.mode)
   const groups = useMemo(() => {
     const pinned = new Set(pinnedIds)
     const all = groupSessions(sessions, now, t, (id) => pinned.has(id))
@@ -159,6 +167,25 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
       </div>
 
       <div className={styles.bottom}>
+        {/*
+          远程入口：这里只切模式，**不做任何探测**。原生桥的能力探测放在
+          `RemoteModeSwitch` / 会话页里，等用户真的点进去才发起 —— `index.html` 的
+          8 秒看门狗会把启动路径上的慢请求当成坏包回滚。
+        */}
+        <button
+          type="button"
+          className={clsx(styles.settings, remoteMode === 'remote' && styles.settingsActive)}
+          aria-pressed={remoteMode === 'remote'}
+          onClick={() => {
+            enterRemoteMode()
+            closeMobileSider()
+          }}
+        >
+          <span className={styles.settingsIcon}>
+            <IconLinkOutline16 />
+          </span>
+          <span className={styles.settingsLabel}>{t('remoteModeRemote')}</span>
+        </button>
         <button type="button" className={styles.settings} onClick={() => openSettings('models')}>
           <span className={styles.settingsIcon}>
             <IconSettingsOutline16 />

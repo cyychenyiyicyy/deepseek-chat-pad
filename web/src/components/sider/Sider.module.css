@@ -195,6 +195,16 @@
   color: var(--dsw-alias-label-primary);
 }
 
+/* 当前处于远程模式时，入口保持高亮，避免「点进来不知道自己在哪个模式」 */
+.settingsActive {
+  background-color: var(--dsw-specific-sidebar-nav-item-active-accent);
+
+  .settingsIcon,
+  .settingsLabel {
+    color: var(--dsw-alias-brand-primary-invert);
+  }
+}
+
 .settingsLabel {
   min-width: 0;
   margin-left: 4px;

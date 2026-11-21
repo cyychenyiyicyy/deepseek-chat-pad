@@ -60,6 +60,15 @@
   min-height: 0;
 }
 
+/* 远程模式：左栏会话列表 + 右栏会话页，和本机模式的「侧栏 + 主区」是同一套观感 */
+.remote {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .saveError {
   display: flex;
   align-items: center;

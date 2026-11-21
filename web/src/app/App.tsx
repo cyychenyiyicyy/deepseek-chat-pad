@@ -37,6 +37,9 @@ import { Button } from '../components/base/Button.js'
 import { stopReadAloud } from '../services/speech/readAloud.js'
 import { closeMobileSider } from '../components/sider/mobileSiderState.js'
 import { MobileSider, Sider } from '../components/sider/Sider.js'
+import { RemoteChatView } from '../components/remote/RemoteChatView.js'
+import { RemoteSessionList } from '../components/remote/RemoteSessionList.js'
+import { useRemoteMode } from '../components/remote/RemoteModeSwitch.js'
 import styles from './App.module.css'
 
 /**
@@ -84,6 +87,8 @@ export const App = () => {
   const activeId = useChatStore((state) => state.activeId)
   const uiScale = useSettings((state) => state.uiScale)
   const autoCheckUpdate = useSettings((state) => state.autoCheckUpdate)
+  // 本机 / 远程 双态：远程模式复用同一套壳，只是把内容区换成远端会话
+  const chatMode = useRemoteMode((state) => state.mode)
 
   usePreventPageScroll(isMobile)
 
@@ -163,7 +168,7 @@ export const App = () => {
       <div ref={frameRef} className={styles.frame}>
         {isMobile ? <MobileSider /> : <SiderSlot collapsed={siderCollapsed} />}
         <main className={styles.main}>
-          {saveError ? (
+          {chatMode === 'local' && saveError ? (
             <div className={styles.saveError} role="alert">
               <span>{t('sessionSaveFailed')}</span>
               <Button
@@ -177,7 +182,13 @@ export const App = () => {
             </div>
           ) : null}
           <div className={styles.content}>
-            {!ready || (activeId !== null && !session) ? (
+            {chatMode === 'remote' ? (
+              // 远程模式：平板上左栏会话列表 + 右栏会话页；移动端列表收在会话页的抽屉里
+              <div className={styles.remote}>
+                {isMobile ? null : <RemoteSessionList />}
+                <RemoteChatView />
+              </div>
+            ) : !ready || (activeId !== null && !session) ? (
               <div className={styles.loadingView}>
                 {isMobile ? <MobileHeader /> : null}
                 {(!ready ? initError : sessionLoadError) ? (
