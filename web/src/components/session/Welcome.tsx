@@ -12,7 +12,7 @@ export const Welcome = () => {
   const isMobile = useIsMobile()
   return (
     <div className={styles.container}>
-      {isMobile ? <MobileHeader /> : <TabletHeader compact />}
+      {isMobile ? <MobileHeader /> : <TabletHeader />}
       <div className={styles.welcome}>
         <div className={styles.greeting}>{t('welcomeMessageChat250808')}</div>
         <div className={styles.balance}>

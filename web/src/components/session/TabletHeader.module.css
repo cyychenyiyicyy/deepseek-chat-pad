@@ -4,13 +4,13 @@
   align-items: center;
   gap: 8px;
   box-sizing: border-box;
-  height: 64px;
-  padding: 10px 14px 6px 12px;
-}
-
-.compact {
-  height: 56px;
-  padding-top: 8px;
+  /*
+   * 与左栏 logo 行同一套公式（见 global.css 的 --ds-topbar-h）：
+   * 盒子 = 安全区 + 顶栏行高，padding-top 只让出安全区，居中后标题中心落在
+   * offset + topbar-h / 2，和侧栏 logo 同一条水平线。
+   */
+  height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
+  padding: var(--ds-top-offset) 14px 0 12px;
 }
 
 .title {

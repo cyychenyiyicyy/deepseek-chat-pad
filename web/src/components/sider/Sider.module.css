@@ -4,7 +4,8 @@
   box-sizing: border-box;
   width: 100%;
   height: 100%;
-  padding: 6px 12px 0;
+  /* 顶部不留内边距：安全区由 .top 自己的 --ds-top-offset 让，否则左栏比右栏多下移一截 */
+  padding: 0 12px 0;
   border-right: 1px solid var(--dsw-alias-border-l1);
   background-color: var(--dsw-specific-sidebar-fill);
 }
@@ -15,10 +16,14 @@
   justify-content: space-between;
   gap: 8px;
   box-sizing: border-box;
-  /* 沉浸式状态栏：高度和上内边距都要加上安全区，否则按钮会被状态栏压住 */
-  height: calc(48px + var(--ds-top-offset));
+  /*
+   * 沉浸式状态栏：盒子 = 安全区 + 顶栏行高，padding-top 只让出安全区，
+   * 内容区正好剩 --ds-topbar-h，居中后 logo 中心与右栏会话标题在同一条线上。
+   * （旧写法在 >=768 把 height 写死 52px，安全区吃掉的其实是行高，logo 才会忽高忽低。）
+   */
+  height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
   margin-bottom: 10px;
-  padding: var(--ds-top-offset) 0 10px 4px;
+  padding: var(--ds-top-offset) 0 0 4px;
   flex-shrink: 0;
 }
 
@@ -341,11 +346,10 @@
 
 @media (min-width: 768px) {
   .sider {
-    padding: 10px 16px 0;
+    padding: 0 16px 0;
   }
 
   .top {
-    height: 52px;
     margin-bottom: 8px;
   }
 

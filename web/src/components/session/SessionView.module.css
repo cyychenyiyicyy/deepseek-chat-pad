@@ -5,30 +5,13 @@
   flex-direction: column;
 }
 
-.header {
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
-  /* 沉浸式状态栏：给状态栏让出高度，标题和按钮一起下移 */
-  height: calc(60px + var(--ds-top-offset));
-  padding: var(--ds-top-offset) 18px 0;
-  box-sizing: border-box;
-  background: var(--dsw-alias-bg-base);
-}
-
-.title {
-  max-width: 480px;
-  padding: 8px 12px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font: var(--dsw-font-s-strong-14);
-  color: var(--dsw-alias-label-primary);
-}
-
-.withCollapsedSider {
-  margin-left: 113px;
-}
+/*
+ * 会话页顶栏不在这里：本机模式用 TabletHeader（平板）/ MobileHeader（手机），
+ * 远程模式用 RemoteChatView 的 .header，三者共用 --ds-topbar-h + --ds-top-offset。
+ * 旧版这里还留着 `.header { height: calc(60px + var(--ds-top-offset)); padding: var(--ds-top-offset) 18px 0 }`
+ * 与 `.title { padding: 8px 12px }`，SessionView 早已不渲染它们 —— 死规则只会让下一个人
+ * 照着它再写一遍"安全区 + 行内留白"的双重下移，已删除。
+ */
 
 .inputContainer {
   position: sticky;

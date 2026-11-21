@@ -12,12 +12,18 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 
 /**
- * 「远程连接保活」前台服务。
+ * 后台保活前台服务（远程连接在用，通用设置的「后台与权限」也在用）。
+ *
+ * <p><b>名字里的「远程连接」是历史包袱</b>：用户反馈这个保护不该只放在远程连接里，
+ * 所以服务的职责已经泛化成「让进程别被杀」，常驻通知的渠道也随之改名成「后台保活」。
+ * 页面侧由 {@code /__ds_keepalive/*}（见 {@link KeepAliveHandler}）统一驱动。
  *
  * <p>为什么需要它：用户一切到后台，本进程就是普通优先级，系统（尤其是国产 ROM）几秒内就把它
  * 回收掉，页面持有的 WebSocket 一断，远程会话就卡在那儿不动了 —— 这就是真机反馈的
@@ -35,6 +41,8 @@ import android.util.Log;
  *   <li>{@link #START_STICKY}：被系统杀掉后由系统自己把服务拉回来（不重建页面，只恢复服务与通知）</li>
  *   <li>维护一个「页面希望保活」的持久标志（SharedPreferences）。进程被杀后重启、或 Activity 被
  *       重建时，{@code MainActivity.onResume} 据此自愈，页面不必等远程重连成功才想起来再要一次</li>
+ *   <li>维护一个「常驻通知文案」的持久开关（{@link #setNotificationEnabled}）：页面说「不要通知」
+ *       时只把文案降级成「后台保持」，<b>绝不</b>撤掉前台地位</li>
  * </ol>
  *
  * <p>刻意<b>不</b>做的事：
@@ -64,8 +72,13 @@ public final class RemoteKeepAliveService extends Service {
 
     /** 通知渠道 id：同名渠道重复 createNotificationChannel 是幂等的，不会报错 */
     static final String CHANNEL_ID = "ds_keepalive";
-    private static final CharSequence CHANNEL_NAME = "远程连接保活";
-    private static final String CHANNEL_DESCRIPTION = "远程会话在后台保持连接时常驻，退出应用后自动消失";
+    /**
+     * 渠道名从「远程连接保活」改成「后台保活」：这个服务已经不只是远程连接在用，
+     * 通用设置里的「后台与权限」也靠它（服务是同一个，渠道也就该按「后台保活」命名）。
+     * 同名渠道再 createNotificationChannel 一次会把用户看到的名字更新掉，幂等。
+     */
+    private static final CharSequence CHANNEL_NAME = "后台保活";
+    private static final String CHANNEL_DESCRIPTION = "后台保持运行时常驻一条低打扰通知，退出应用后自动消失";
 
     /** 常驻通知的 id。固定值：重复 startForeground 只会刷新这一条，不会叠出一堆通知 */
     static final int NOTIFICATION_ID = 0x44530001;
@@ -85,9 +98,21 @@ public final class RemoteKeepAliveService extends Service {
     /** 「页面希望保活」标志的落盘位置。故意用独立 pref 文件，别和应用设置混在一起 */
     private static final String PREFS_NAME = "dsp.keepalive.v1";
     private static final String KEY_SHOULD_RUN = "should_run";
+    /**
+     * 常驻通知的文案开关（true = 常驻通知，false = 降级成「后台保持」文案）。
+     *
+     * <p><b>它不管「有没有通知」</b>：这条是前台服务的通知，系统要求前台服务必须有一条可见
+     * 通知。真要隐藏只能用 {@code stopForeground(STOP_FOREGROUND_DETACH)}，那会让服务失去
+     * 前台地位、立刻回到「一切后台就被杀」的老路，所以本工程<b>不允许</b>那么做。
+     * 也就是说这个开关只能让通知「不那么像在偷偷干活」，不能让它消失。
+     */
+    private static final String KEY_NOTIFY_ENABLED = "notify_enabled";
 
     private static final String TITLE = "Chat Pad 正在保持远程连接";
     private static final String CONTENT = "远程会话在后台继续；点一下回到对话，退出应用后自动停止";
+    /** 通知文案被页面降级时用的两行（不说「远程连接」，只说「在后台保持」） */
+    private static final String TITLE_QUIET = "Chat Pad 在后台保持";
+    private static final String CONTENT_QUIET = "后台服务仍在运行；点一下回到对话，退出应用后自动停止";
 
     /**
      * 服务是否活着。只在本进程内有意义（进程被杀后静态变量自然没了），
@@ -95,12 +120,27 @@ public final class RemoteKeepAliveService extends Service {
      */
     private static volatile boolean running;
 
+    /**
+     * 当前活着的服务实例。只用来「页面改了通知开关 → 立刻把那条常驻通知刷新一遍」。
+     * Service 是单例、生命周期由系统管：onCreate 置位、onDestroy 清空，
+     * 所以这个引用不会比服务活得更久（不是内存泄漏的写法）。
+     */
+    private static volatile RemoteKeepAliveService instance;
+
+    /**
+     * 刷新通知要回主线程：{@code setNotificationEnabled} 是从 HTTP 工作线程进来的，
+     * 而 {@code startForeground} 与渠道更新都按主线程语义处理最稳。
+     */
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
     // ---------------------------------------------------------------- 生命周期
 
     @Override
     public void onCreate() {
         super.onCreate();
         running = true;
+        // 先记下自己：页面随时可能 POST /__ds_keepalive/notify 改通知文案，需要立刻刷新
+        instance = this;
         // 这里**不**写「应当保活」标志：onCreate 也可能来自系统按 START_STICKY 的静默重建
         // （那时页面早就不在了），先写就把 onStartCommand 里「没人认领就退出」的判断废掉了。
         // 标志只由 start(Context) 与 ACTION_START 负责置真。
@@ -160,6 +200,10 @@ public final class RemoteKeepAliveService extends Service {
     public void onDestroy() {
         Log.i(TAG, "保活前台服务销毁");
         running = false;
+        if (instance == this) {
+            // 只清自己这一份：系统重建时会先 onCreate 再 onDestroy（旧实例），别把新的清掉
+            instance = null;
+        }
         // 注意：这里**不**清「应当保活」标志。onDestroy 也可能是系统自己收的（换机型、
         // 低内存清理），保留标志才能让 onResume 自愈；真正不要了的路径是 stop()/ACTION_STOP，
         // 它们会先把标志清掉再进来。
@@ -292,6 +336,83 @@ public final class RemoteKeepAliveService extends Service {
         }
     }
 
+    // ---------------------------------------------------------------- 常驻通知开关
+
+    /**
+     * 常驻通知的文案开关（默认 true = 正常的「正在保持远程连接」文案）。
+     *
+     * <p>页面通过 {@code POST /__ds_keepalive/notify {"enabled":false}} 把它关掉时，
+     * 通知<b>不会消失</b>，只是换成 {@link #TITLE_QUIET} / {@link #CONTENT_QUIET} ——
+     * 原因见 {@link #KEY_NOTIFY_ENABLED} 的注释。
+     */
+    static boolean isNotificationEnabled(Context context) {
+        Context app = appContext(context);
+        if (app == null) {
+            // 拿不到 Context 时按「开着」处理：宁可多显示一行字，也别让用户以为通知丢了
+            return true;
+        }
+        try {
+            return preferences(app).getBoolean(KEY_NOTIFY_ENABLED, true);
+        } catch (RuntimeException broken) {
+            return true;
+        }
+    }
+
+    /**
+     * 改常驻通知开关并落盘。
+     *
+     * <p>落盘一定会试（失败返回 false 且调用方应回 500）；服务正在跑时顺带把通知文案刷新一遍。
+     *
+     * @return true = 服务活着且已即时刷新（用户马上能看到文案变化）；
+     *         false = 只落盘了，下次启动/重建服务时生效（服务没跑或刷新投递失败）
+     */
+    static boolean setNotificationEnabled(Context context, boolean enabled) {
+        Context app = appContext(context);
+        if (app == null) {
+            return false;
+        }
+        try {
+            preferences(app).edit().putBoolean(KEY_NOTIFY_ENABLED, enabled).apply();
+        } catch (RuntimeException failed) {
+            Log.w(TAG, "常驻通知开关写入失败", failed);
+            return false;
+        }
+        RemoteKeepAliveService current = instance;
+        if (current == null) {
+            // 服务没跑：不需要刷新，下次 buildNotification 自然用新值
+            return false;
+        }
+        current.refreshNotification();
+        return true;
+    }
+
+    /**
+     * 按当前开关重建那条常驻通知（必须回主线程）。
+     *
+     * <p>刷新失败只记日志、不动服务：前台服务不能因为「通知文案没刷上」就退出，
+     * 那比文案旧一行严重得多。
+     */
+    private void refreshNotification() {
+        try {
+            mainHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        // 渠道名一起刷新（幂等）：从「远程连接保活」改名成「后台保活」的
+                        // 老用户也能跟着变
+                        createChannel();
+                        startForegroundCompat(buildNotification());
+                        Log.i(TAG, "常驻通知文案已按开关刷新");
+                    } catch (RuntimeException failed) {
+                        Log.w(TAG, "按新的通知开关刷新常驻通知失败", failed);
+                    }
+                }
+            });
+        } catch (RuntimeException failed) {
+            Log.w(TAG, "投递通知刷新任务失败", failed);
+        }
+    }
+
     // ---------------------------------------------------------------- 通知
 
     /** 建通知渠道：低打扰（无声、无振动、无角标、不亮屏），用户不会被打扰但看得到。 */
@@ -330,8 +451,10 @@ public final class RemoteKeepAliveService extends Service {
         // 工程里没有专门的单色通知图标，复用启动图标：通知栏上会渲染成白色剪影（可接受）。
         // 要更精致就得往 res/drawable 里加一张单色 icon，那超出本次改动范围。
         builder.setSmallIcon(R.mipmap.ic_launcher);
-        builder.setContentTitle(TITLE);
-        builder.setContentText(CONTENT);
+        // 通知开关关掉时只换文案（不能真隐藏：前台服务必须有一条通知，见 KEY_NOTIFY_ENABLED）
+        boolean resident = isNotificationEnabled(this);
+        builder.setContentTitle(resident ? TITLE : TITLE_QUIET);
+        builder.setContentText(resident ? CONTENT : CONTENT_QUIET);
         builder.setContentIntent(contentIntent);
         // 常驻：用户滑不掉，也保证它不会被当成「可清理」的通知
         builder.setOngoing(true);
