@@ -48,6 +48,12 @@ jobs:
         env:
           NODE_ENV: production
 
+      - name: 启动冒烟（无头浏览器）
+        # 构建产物能不能真的跑起来：tsc 抓不到运行期错误（v1.8.6 黑屏就是这么漏的）
+        run: node tools/check-web-boot.cjs
+        env:
+          REQUIRE_BROWSER: '1'
+
       - name: 写入网页包版本标记
         working-directory: web
         run: |

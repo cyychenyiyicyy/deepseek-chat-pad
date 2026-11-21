@@ -116,12 +116,29 @@ const loadImageUrls = async (files: CreateMessageRequest['localFiles']): Promise
   return urls
 }
 
+/**
+ * 思考过程用中文。
+ *
+ * 不少海外模型的 reasoning 默认跟着英文语料走，用户看到的是一坨英文思维链。
+ * 在系统提示里显式要求用简体中文思考，比客户端做后处理靠谱（也省一次翻译调用）。
+ */
+const withReasoningLanguage = (system: string): string => {
+  const language = useSettings.getState().locale ?? 'zh_CN'
+  if (!language.startsWith('zh')) {
+    return system
+  }
+  const rule = '思考过程（reasoning）与最终回答都请使用简体中文，即使用户用其他语言提问。'
+  return system ? `${system}\n\n${rule}` : rule
+}
+
 const toOpenAIMessages = (
   body: CreateMessageRequest,
   extraContext = '',
   imageUrls: string[] = []
 ): OpenAIMessage[] => {
-  const messages: OpenAIMessage[] = [{ role: 'system', content: body.system }]
+  const messages: OpenAIMessage[] = [
+    { role: 'system', content: withReasoningLanguage(body.system) },
+  ]
   const list = body.messages as MessageParam[]
   const lastUserIndex = (() => {
     for (let i = list.length - 1; i >= 0; i -= 1) if (list[i].role === 'user') return i

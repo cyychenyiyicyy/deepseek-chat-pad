@@ -53,9 +53,11 @@ const SiderSlot = ({ collapsed }: { collapsed: boolean }) => (
 )
 
 export const App = () => {
-  // 报到：index.html 的看门狗据此判断这个网页包是不是坏包
+  // 报到：index.html 的看门狗据此判断这个网页包是不是坏包；
+  // 同时写进 <html data-ds-booted>，让 CI 的启动冒烟能在 DOM 里断言「React 真的挂上了」
   useEffect(() => {
     ;(window as unknown as { __dsBooted?: boolean }).__dsBooted = true
+    document.documentElement.dataset.dsBooted = '1'
   }, [])
 
   const t = useTranslate()
@@ -178,13 +180,9 @@ export const App = () => {
             {!ready || (activeId !== null && !session) ? (
               <div className={styles.loadingView}>
                 {isMobile ? <MobileHeader /> : null}
-                <div className={styles.loadingState} role="status" aria-live="polite">
-                  <span>
-                    {(!ready ? initError : sessionLoadError)
-                      ? t(!ready ? 'sessionListLoadFailed' : 'sessionLoadFailed')
-                      : t('sessionLoading')}
-                  </span>
-                  {(!ready ? initError : sessionLoadError) ? (
+                {(!ready ? initError : sessionLoadError) ? (
+                  <div className={styles.loadingState} role="status" aria-live="polite">
+                    <span>{t(!ready ? 'sessionListLoadFailed' : 'sessionLoadFailed')}</span>
                     <Button
                       variant="outlined"
                       size="m"
@@ -198,8 +196,16 @@ export const App = () => {
                     >
                       {t('retry')}
                     </Button>
-                  ) : null}
-                </div>
+                  </div>
+                ) : (
+                  // 懒加载骨架：不写「正在加载对话」，界面先出来，数据到了再把内容填进去
+                  <div className={styles.skeleton} aria-hidden="true">
+                    <div className={styles.skeletonRow} data-width="60" />
+                    <div className={styles.skeletonRow} data-width="88" />
+                    <div className={styles.skeletonRow} data-width="74" />
+                    <div className={styles.skeletonRow} data-width="92" />
+                  </div>
+                )}
               </div>
             ) : session ? (
               <SessionView

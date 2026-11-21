@@ -15,9 +15,10 @@
   justify-content: space-between;
   gap: 8px;
   box-sizing: border-box;
-  height: 48px;
+  /* 沉浸式状态栏：高度和上内边距都要加上安全区，否则按钮会被状态栏压住 */
+  height: calc(48px + var(--ds-safe-top, 0px));
   margin-bottom: 10px;
-  padding: 15px 0 10px 4px;
+  padding: calc(15px + var(--ds-safe-top, 0px)) 0 10px 4px;
   flex-shrink: 0;
 }
 

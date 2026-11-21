@@ -1,4 +1,10 @@
 :root {
+  /**
+   * 顶部安全区（状态栏高度）。
+   * Android WebView 里 env(safe-area-inset-top) 恒为 0，所以壳会用
+   * evaluateJavascript 把真实高度写进 --ds-safe-top；浏览器里回退到 env()。
+   */
+  --ds-safe-top: env(safe-area-inset-top, 0px);
   --message-list-max-width: 840px;
   --message-list-padding-horizontal: 44px;
 }

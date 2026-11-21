@@ -229,19 +229,39 @@ public final class MainActivity extends AppCompatActivity {
         });
         rootLayout.addView(errorView);
 
-        // Android WebView 里 env(safe-area-inset-*) 恒为 0，网页没法自己避让系统栏，
-        // 所以顶部按状态栏高度让出空间（否则顶栏会和状态栏叠在一起），
-        // 底部兜住键盘与导航栏。
+        // 沉浸式状态栏：页面内容一直铺到状态栏底下（背景色由网页自己画），
+        // 顶部那条栏靠 --ds-safe-top 自己下移，所以这里不再给顶部留内边距。
+        // Android WebView 里 env(safe-area-inset-top) 恒为 0，只能由壳把高度写进 CSS 变量。
+        // 底部仍然兜住键盘与导航栏，否则输入框会被挡住。
         ViewCompat.setOnApplyWindowInsetsListener(rootLayout, (view, windowInsets) -> {
             Insets bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars());
             Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
             int top = bars.top;
             int bottom = Math.max(bars.bottom, ime.bottom);
-            view.setPadding(0, top, 0, bottom);
+            view.setPadding(0, 0, 0, bottom);
+            publishSafeTop(top);
             return windowInsets;
         });
 
         setContentView(rootLayout);
+    }
+
+    /** 上次告诉网页的状态栏高度，页面加载完成时补发一次（避免页面晚于 inset 就绪） */
+    private int lastSafeTop = -1;
+
+    /** 把状态栏高度写进网页的 CSS 变量 --ds-safe-top */
+    private void publishSafeTop(int topPx) {
+        lastSafeTop = topPx;
+        if (webView == null) {
+            return;
+        }
+        String script = "(function(){try{document.documentElement.style.setProperty("
+                + "'--ds-safe-top','" + topPx + "px');}catch(e){}})()";
+        try {
+            webView.evaluateJavascript(script, null);
+        } catch (RuntimeException ignored) {
+            // 页面还没就绪时注入失败没关系，onPageFinished 会再发一次
+        }
     }
 
     private void configureWebView() {
@@ -404,6 +424,16 @@ public final class MainActivity extends AppCompatActivity {
     // ---------------------------------------------------------------- WebView 回调
 
     private final class ShellWebViewClient extends WebViewClient {
+
+        @Override
+        public void onPageFinished(WebView view, String url) {
+            super.onPageFinished(view, url);
+            // 页面（重新）加载完成后补发一次状态栏高度：
+            // WebView 重新加载后 documentElement 上的 CSS 变量会丢，不补发顶栏就会被状态栏压住
+            if (lastSafeTop > 0) {
+                publishSafeTop(lastSafeTop);
+            }
+        }
 
         @Override
         public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {

@@ -9,8 +9,9 @@
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  height: 60px;
-  padding: 12px 18px 0;
+  /* 沉浸式状态栏：给状态栏让出高度，标题和按钮一起下移 */
+  height: calc(60px + var(--ds-safe-top, 0px));
+  padding: calc(12px + var(--ds-safe-top, 0px)) 18px 0;
   box-sizing: border-box;
   background: var(--dsw-alias-bg-base);
 }
