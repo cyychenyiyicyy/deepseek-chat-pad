@@ -506,7 +506,7 @@ final class RemoteDownloadHandler {
             while (end < body.length) {
                 byte current = body[end];
                 if (current == '\\') {
-                    // 跳过被转义的字节（\" \\ \/ \uXXXX …）
+                    // 跳过被转义的字节（引号 / 反斜杠 / 斜杠 / unicode 转义 …）
                     end += 2;
                     continue;
                 }
