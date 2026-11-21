@@ -268,6 +268,8 @@ export const en = {
   updateNetDirect: 'Network: direct (no proxy detected)',
   updateLatest: 'latest {version}',
   updateNotesLabel: 'What changed',
+  updateKindWeb: 'This is a web update: it installs inside the app, no APK reinstall needed.',
+  updateKindNative: 'This is an app update: the latest web bundle is included, one install covers both.',
   updateLater: 'Later',
   updateSkipVersion: 'Skip this version',
   updateAutoCheck: 'Check on launch',

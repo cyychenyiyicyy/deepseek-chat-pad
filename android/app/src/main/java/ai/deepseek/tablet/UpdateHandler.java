@@ -422,13 +422,15 @@ final class UpdateHandler {
         if (release.version.isEmpty()) {
             return null;
         }
-        String apk = root.optString("apkUrl", "").trim();
-        if (!apk.isEmpty()) {
+        // 注意：org.json 的 optString 遇到 JSON null 会返回字符串 "null"，
+        // 直接当 URL 用会导致客户端拼出 "https://.../null" 这种地址
+        String apk = readUrl(root, "apkUrl");
+        if (apk != null) {
             release.apkUrl = apk;
             release.apkSize = root.optLong("apkSize", 0L);
         }
-        String web = root.optString("webUrl", "").trim();
-        if (!web.isEmpty()) {
+        String web = readUrl(root, "webUrl");
+        if (web != null) {
             release.webUrl = web;
             release.webSize = root.optLong("webSize", 0L);
         }
@@ -436,6 +438,18 @@ final class UpdateHandler {
         release.notes = notes.length() > NOTES_LIMIT ? notes.substring(0, NOTES_LIMIT) : notes;
         release.apkRequired = root.optBoolean("apkRequired", true);
         return release;
+    }
+
+    /** 读 URL 字段：null / 空串 / 字符串 "null" 一律当作没有 */
+    private static String readUrl(JSONObject root, String name) {
+        if (root.isNull(name)) {
+            return null;
+        }
+        String value = root.optString(name, "").trim();
+        if (value.isEmpty() || "null".equalsIgnoreCase(value)) {
+            return null;
+        }
+        return value;
     }
 
     /** 从 release JSON 里挑出 apk 与 web-*.zip；两个都缺也算成功（只是没东西可更）。 */

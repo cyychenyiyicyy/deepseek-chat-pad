@@ -146,18 +146,39 @@ jobs:
           retention-days: 90
 
       # main 分支上发布 release：标签与标题直接用应用版本号，不再用 run number
+      - name: 判断本次是网页更新还是本体更新
+        id: native
+        run: |
+          set -euo pipefail
+          v=${{ steps.ver.outputs.value }}
+          prev=$(git tag --sort=-v:refname | grep -v "^v$v$" | head -1 || true)
+          if [ -z "$prev" ]; then
+            echo "required=true" >> "$GITHUB_OUTPUT"
+            echo "首个版本：本体更新"
+            exit 0
+          fi
+          # 版本号文件每次发版都会变，不能算作「原生改动」
+          if git diff --quiet "$prev" HEAD -- android/ ':(exclude)android/version.properties'; then
+            echo "required=false" >> "$GITHUB_OUTPUT"
+            echo "自 $prev 起 android/ 没有变化 ⇒ 本次是网页更新，只发网页包"
+          else
+            echo "required=true" >> "$GITHUB_OUTPUT"
+            echo "自 $prev 起 android/ 有改动 ⇒ 本次是本体更新，只发 APK"
+          fi
+
       - name: 生成更新说明
         run: |
           set -euo pipefail
           v=${{ steps.ver.outputs.value }}
           {
-            echo "版本 v$v（构建 ${{ github.run_number }}）"
-            echo
-            echo "app-debug.apk：完整安装包，直接覆盖安装（需允许「未知来源」）"
             if [ "${{ steps.native.outputs.required }}" = "true" ]; then
-              echo "web-v$v.zip：网页更新包（本次包含原生改动，建议同时更新 APK）"
+              echo "【本体更新】v$v（构建 ${{ github.run_number }}）"
+              echo
+              echo "下载 app-debug.apk 覆盖安装即可，最新网页已经打包在里面。"
             else
-              echo "web-v$v.zip：网页更新包（本次只有网页变化，应用内直接更新即可，无需重装）"
+              echo "【网页更新】v$v（构建 ${{ github.run_number }}）"
+              echo
+              echo "打开应用 → 设置 → 通用 → 检查更新 → 「更新网页」，不用重装应用。"
             fi
             echo
             if [ -f release-notes.md ]; then
@@ -168,60 +189,67 @@ jobs:
           } > release-body.md
           cat release-body.md
 
-      - name: 判断是否需要更新 APK
-        id: native
-        run: |
-          set -euo pipefail
-          v=${{ steps.ver.outputs.value }}
-          prev=$(git tag --sort=-v:refname | grep -v "^v$v$" | head -1 || true)
-          if [ -z "$prev" ]; then
-            echo "required=true" >> "$GITHUB_OUTPUT"
-            echo "首个版本，需要 APK"
-            exit 0
-          fi
-          # 版本号文件每次发版都会变，不能算作「原生改动」
-          if git diff --quiet "$prev" HEAD -- android/ ':(exclude)android/version.properties'; then
-            echo "required=false" >> "$GITHUB_OUTPUT"
-            echo "自 $prev 起 android/ 没有变化，本次只需要更新网页包"
-          else
-            echo "required=true" >> "$GITHUB_OUTPUT"
-            echo "自 $prev 起 android/ 有改动，需要更新 APK"
-          fi
-
       - name: 生成 latest.json
         run: |
           set -euo pipefail
-          v=$(grep -m1 '^versionName=' android/version.properties | cut -d= -f2 | tr -d '\r[:space:]')
+          v=${{ steps.ver.outputs.value }}
           apk=android/app/build/outputs/apk/debug/app-debug.apk
           web=web-v$v.zip
           notes=$(jq -Rs . < release-notes.md)
-          apk_required=${{ steps.native.outputs.required }}
+          repo=https://github.com/${GITHUB_REPOSITORY}/releases/download/v$v
+          if [ "${{ steps.native.outputs.required }}" = "true" ]; then
+            # 本体更新：只给 APK 地址，网页地址留 null（客户端据此只提供安装包）
+            apk_url="$repo/app-debug.apk"
+            apk_size=$(stat -c%s "$apk")
+            web_url=null
+            web_size=0
+            kind=native
+          else
+            # 网页更新：只给网页包地址，APK 地址留 null
+            apk_url=null
+            apk_size=0
+            web_url="$repo/web-v$v.zip"
+            web_size=$(stat -c%s "$web")
+            kind=web
+          fi
           cat > latest.json <<EOF
           {
             "version": "$v",
             "tag": "v$v",
-            "apkUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/download/v$v/app-debug.apk",
-            "apkSize": $(stat -c%s "$apk"),
-            "webUrl": "https://github.com/${GITHUB_REPOSITORY}/releases/download/v$v/web-v$v.zip",
-            "webSize": $(stat -c%s "$web"),
-            "apkRequired": $apk_required,
+            "kind": "$kind",
+            "apkUrl": $apk_url,
+            "apkSize": $apk_size,
+            "webUrl": $web_url,
+            "webSize": $web_size,
             "notes": $notes
           }
           EOF
           cat latest.json
 
-      - name: 发布 release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: 发布本体更新
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.native.outputs.required == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.value }}
           name: v${{ steps.ver.outputs.value }}
-          # 同一版本重跑时更新已有 release，而不是失败
           allowUpdates: true
           prerelease: false
           generate_release_notes: false
           body_path: release-body.md
           files: |
             android/app/build/outputs/apk/debug/app-debug.apk
+            latest.json
+
+      - name: 发布网页更新
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.native.outputs.required == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.value }}
+          name: v${{ steps.ver.outputs.value }}
+          allowUpdates: true
+          prerelease: false
+          generate_release_notes: false
+          body_path: release-body.md
+          files: |
             web-v${{ steps.ver.outputs.value }}.zip
             latest.json

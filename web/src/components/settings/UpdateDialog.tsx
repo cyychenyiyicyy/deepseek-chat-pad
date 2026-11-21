@@ -189,6 +189,12 @@ export const UpdateDialog = () => {
           {release ? <span className={styles.latest}>{t('updateLatest', { version: release.version })}</span> : null}
         </div>
 
+        {release && (Boolean(release.webUrl) !== Boolean(release.apkUrl)) ? (
+          <div className={styles.kindHint}>
+            {release.webUrl ? t('updateKindWeb') : t('updateKindNative')}
+          </div>
+        ) : null}
+
         {net ? (
           <div className={styles.network}>
             {net.proxy

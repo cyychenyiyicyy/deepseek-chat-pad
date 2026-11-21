@@ -258,6 +258,8 @@ export const zh = {
   updateNetDirect: '网络：直连（未检测到代理）',
   updateLatest: '最新 {version}',
   updateNotesLabel: '更新内容',
+  updateKindWeb: '本次为网页更新：装进应用即可，不需要重装 APK。',
+  updateKindNative: '本次为应用本体更新：安装包内已含最新网页，装一次就都更新了。',
   updateLater: '稍后',
   updateSkipVersion: '跳过此版本',
   updateAutoCheck: '启动时自动检查',
