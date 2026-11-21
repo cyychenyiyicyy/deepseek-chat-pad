@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useIsMobile } from '../../app/viewport.js'
 import { useTranslate, type TranslationKey } from '../../i18n/index.js'
 import { stripDsml } from '../../services/api/dsml.js'
@@ -8,18 +8,43 @@ import type {
   ApprovalOutcome,
   ChatItem,
   ChatMessage,
-  QuestionActivity,
   ToolActivity,
 } from '../../services/remote/adapter.js'
-import { useRemoteStore } from '../../services/remote/store.js'
+import { useRemoteStore, sendRemoteMessage } from '../../services/remote/store.js'
+import type { RemotePromptAttachment } from '../../services/remote/sessionsApi.js'
+import {
+  commandLineOf,
+  filterCommands,
+  slashQuery,
+  useChatControls,
+} from '../../services/remote/sessionControls.js'
+import { useNewSessionStore } from '../../services/remote/newSessionStore.js'
 import { Button } from '../base/Button.js'
 import { IconButton } from '../base/IconButton.js'
-import { IconMenuOutline20, IconSendOutline16, IconStopFill16 } from '../base/icons.js'
+import {
+  IconDataOutline16,
+  IconMenuOutline20,
+  IconNewChatOutline20,
+  IconSendOutline16,
+  IconStopFill16,
+} from '../base/icons.js'
 import { Markdown } from '../markdown/Markdown.js'
 import { openSettings } from '../settings/settingsDialogState.js'
 import { openMobileSider } from '../sider/mobileSiderState.js'
 import { ApprovalCard } from './ApprovalCard.js'
+import { ChatControlsError, SessionControlsBar } from './chat-controls/SessionControlsBar.js'
+import { QuestionCard } from './chat-controls/QuestionCard.js'
+import { QueueDock } from './chat-controls/QueueDock.js'
+import { SlashCommandList } from './chat-controls/SlashCommandList.js'
+import { aggregateUsage } from './chat-controls/usage.js'
+import controlsStyles from './chat-controls/Controls.module.css'
+import { NewSessionPanel } from './new-session/NewSessionPanel.js'
 import { useRemoteAvailability } from './RemoteModeSwitch.js'
+import { ToolCard } from './tool/ToolCard.js'
+import { AttachmentButton } from './workspace/AttachmentButton.js'
+import { AttachmentTray, attachmentsBusy } from './workspace/AttachmentTray.js'
+import { WorkspacePane } from './workspace/WorkspacePane.js'
+import { readyReceipts, useWorkspacePane } from './workspace/workspacePaneStore.js'
 import styles from './RemoteChatView.module.css'
 
 /**
@@ -66,6 +91,13 @@ export const RemoteChatView = () => {
   const streaming = useRemoteStore((state) => state.streaming)
   const approvals = useRemoteStore((state) => state.pendingApprovals)
   const error = useRemoteStore((state) => state.error)
+  /** 重启后自动恢复的进度（K4）：失败时给一个「重试」，不弹红条 */
+  const autoConnect = useRemoteStore((state) => state.autoConnect)
+  /** 新建会话能力（W1）：Host 没有 `session/create` 时入口整块隐藏 */
+  const canCreateSession = useNewSessionStore((state) => state.capabilities.create)
+  /** 工作区文件能力（W3）：Host 回过 `METHOD_NOT_FOUND` 后入口整块隐藏（`null` = 还没探过） */
+  const filesSupported = useWorkspacePane((state) => state.filesSupported)
+  const attachments = useWorkspacePane((state) => state.attachments)
   // 原生桥探测：只在远程会话页挂载时发生（启动路径上没有任何探测）
   const { availability, retry } = useRemoteAvailability()
 
@@ -77,10 +109,30 @@ export const RemoteChatView = () => {
   const olderPendingRef = useRef(false)
   const itemCountRef = useRef(0)
 
+  /*
+   * ── 会话内控制（W2）────────────────────────────────────────────────
+   * 模型 / 权限 / 命令 / 队列 / 提问这五块的状态都在 `services/remote/sessionControls.ts`
+   * （`session/control` 投影 + `$events` waterfall 归约出来），这里只读它与调它的动作。
+   * 输入区自己额外管三件纯 UI 的事：补全高亮下标、补全是否被 Esc 关掉、命令执行结果的一行提示。
+   */
+  const controlTitle = useChatControls((state) => state.title)
+  const slashCommands = useChatControls((state) => state.commands)
+  const commandAccess = useChatControls((state) => state.commandAccess)
+  const executeCommand = useChatControls((state) => state.executeCommand)
+  const [commandCursor, setCommandCursor] = useState(0)
+  const [commandDismissed, setCommandDismissed] = useState(false)
+  const [commandResult, setCommandResult] = useState<string | null>(null)
+
   const ready = phase === 'ready'
   const bridgeReady = availability === 'ready'
+  const sessionsTitle = sessions.find((session) => session.id === activeSessionId)?.title
+  // 标题以 `session/control` 投影为最新（Host 会自动起名 / 用户可以改名），列表里的那份兜底
   const activeTitle =
-    sessions.find((session) => session.id === activeSessionId)?.title ?? t('remoteSessionUntitled')
+    controlTitle !== null && controlTitle.length > 0
+      ? controlTitle
+      : (sessionsTitle ?? t('remoteSessionUntitled'))
+  /** 时间线汇总的用量（投影没给 `usage` 时给「会话信息」面板兜底） */
+  const usage = useMemo(() => aggregateUsage(items), [items])
 
   // 新内容到达：仍贴着底部就继续跟随；条数变化时允许再拉一屏历史
   useLayoutEffect(() => {
@@ -104,14 +156,29 @@ export const RemoteChatView = () => {
   }, [activeSessionId])
 
   /*
-   * 启动 / 回到前台：续上一次没完成的登录（K2）。
+   * 工作区文件抽屉的作用域（W3）：跟着「当前会话」走，`workspaceFileScopeId` 就是它。
    *
-   * 为什么这里也要挂（设置面板里已经挂了一份）：真机上发生的是「切到系统浏览器授权 →
-   * App 被系统杀掉 → 重启 → 直接回到远程会话页」，设置面板根本没打开过。两个入口都调
-   * 数据层那套幂等的动作（单飞 + 静默），重复触发不会多发请求。
+   * 没连上（或还没选会话）时绑 `null`，面板里的目录缓存与预览一律清掉 ——
+   * 上一代连接的预览对象继续留着没有任何意义，还会把 blob URL 拖住。
+   * 这里**不发请求**（工作区路径是读 `session/list` 的投影，目录树在抽屉打开时才拉），
+   * 所以放在会话切换这种高频路径上也不会多打一次网络。
+   */
+  useEffect(() => {
+    void useWorkspacePane.getState().bind(ready ? activeSessionId : null)
+  }, [ready, activeSessionId])
+
+  /*
+   * 启动 / 回到前台：① 恢复上次连接（K4）；② 续上一次没完成的登录（K2）。
+   *
+   * 为什么挂在这里而不是 `App.tsx`：任务书要求不改 App，而**远程模式的入口就是这里**
+   * —— 用户切到远程页时这个组件才挂载，正好是「该连了」的时刻，也不会落在首屏关键路径上
+   * （effect 里的异步调用，不 await、不阻塞渲染）。设置面板里挂了同一份（幂等单飞），
+   * 两条入口谁先到都一样。
+   *
    * 同时也补一次「回前台立即轮询」：后台的 `setTimeout` 会被系统节流，2s 定时器靠不住。
    */
   useEffect(() => {
+    fireAndForget(() => useRemoteStore.getState().autoConnectNow())
     fireAndForget(() => useRemoteStore.getState().resumeLogin())
     if (typeof document === 'undefined') return undefined
     const onVisible = (): void => {
@@ -138,22 +205,119 @@ export const RemoteChatView = () => {
     }
   }
 
-  const canSend = ready && activeSessionId !== null && !streaming && draft.trim().length > 0
+  const canSend =
+    ready &&
+    activeSessionId !== null &&
+    !streaming &&
+    !attachmentsBusy() &&
+    (draft.trim().length > 0 || readyReceipts(attachments).length > 0)
 
+  /*
+   * 发送：有附件就走 `sendRemoteMessage(text, attachments)`（`store.ts` 的唯一附件入口，
+   * 契约里的 `send()` 只发文本），没有附件仍走 `store.send()` —— 两条路径最后都是
+   * 同一个 `sendFlow`，乐观行 / 流式 / 错误回填完全一致。
+   *
+   * 附件块形状是 `{type:'file', receiptId}`（`fileUploads/upload` 的收据）；
+   * 正在上传的附件不能发（receiptId 还没到手），`canSend` 已经挡住了。
+   */
   const send = useCallback(() => {
     if (!ready || streaming) return
     const text = draft.trim()
-    if (text.length === 0) return
+    const receipts = readyReceipts(useWorkspacePane.getState().attachments)
+    if (text.length === 0 && receipts.length === 0) return
     // 乐观清空：与本地输入框一致，发出去就不再占着输入框；失败原因由数据层写回时间线
     setDraft('')
-    fireAndForget(() => useRemoteStore.getState().send(text))
+    useWorkspacePane.getState().clearAttachments()
+    const blocks: RemotePromptAttachment[] = receipts.map((receiptId) => ({ type: 'file', receiptId }))
+    if (blocks.length === 0) {
+      fireAndForget(() => useRemoteStore.getState().send(text))
+      return
+    }
+    fireAndForget(() => sendRemoteMessage(text, blocks))
   }, [draft, ready, streaming])
 
   const respond = useCallback((eventId: string, decision: ApprovalDecision) => {
     fireAndForget(() => useRemoteStore.getState().respondApproval(eventId, decision))
   }, [])
 
+  /* ── 斜杠命令（W2） ───────────────────────────────────────────────────
+   * 规则（与官方 composer 一致，见 `sessionControls.slashQuery`）：整行只有 `/` + 名字时才弹补全；
+   * 一旦有空格（`/permission read-only`）就当成「要在终端执行的那一行命令」，回车直接执行。
+   * 不是已知命令的 `/xxx` 仍按普通消息发出去（不吞用户的输入）。 */
+
+  const slashMatches = useMemo(() => {
+    const query = slashQuery(draft)
+    if (query === null || commandAccess !== 'available') return []
+    return filterCommands(slashCommands, query)
+  }, [commandAccess, draft, slashCommands])
+
+  const completionOpen =
+    slashQuery(draft) !== null &&
+    commandAccess === 'available' &&
+    slashCommands.length > 0 &&
+    !commandDismissed
+
+  // 查询串变了：高亮回到第一行、撤掉上一次的 Esc 关闭
+  useEffect(() => {
+    setCommandCursor(0)
+    setCommandDismissed(false)
+  }, [draft])
+
+  const isKnownCommand = useCallback(
+    (line: string): boolean => {
+      const name = line.trim().replace(/^\/+/, '').split(/\s+/)[0] ?? ''
+      return name.length > 0 && slashCommands.some((command) => command.name === name)
+    },
+    [slashCommands],
+  )
+
+  const runCommand = useCallback(
+    (line: string) => {
+      setDraft('')
+      setCommandResult(null)
+      void (async () => {
+        const result = await executeCommand(line)
+        // 成功的命令常常会回一句人话（`/permission` 回「当前 preset …」）；失败走错误条，不在这里重复
+        if (result !== null && result.kind === 'success' && (result.text ?? '').length > 0) {
+          setCommandResult(result.text ?? null)
+        }
+      })()
+    },
+    [executeCommand],
+  )
+
+  // 结果行几秒后自己消失（它只是「刚才那条命令回了什么」，不是时间线内容）
+  useEffect(() => {
+    if (commandResult === null) return undefined
+    const timer = window.setTimeout(() => setCommandResult(null), 4000)
+    return () => window.clearTimeout(timer)
+  }, [commandResult])
+
+  /** `⋯` → 命令 → 把 `/name ` 填回输入框（光标落到末尾，方便补参数） */
+  const insertCommand = useCallback((line: string) => {
+    setDraft(line)
+    const el = textareaRef.current
+    if (el === null) return
+    el.focus()
+    const end = line.length
+    // 受控组件：值更新后再落光标，放在下一帧
+    window.requestAnimationFrame(() => el.setSelectionRange(end, end))
+  }, [])
+
   const lastIndex = items.length - 1
+
+  /** 输入区唯一的提交入口：已知斜杠命令 → 执行，其余 → 发消息 */
+  const submit = useCallback(() => {
+    const line = draft.trim()
+    if (line.length > 0 && isKnownCommand(line)) {
+      runCommand(line)
+      return
+    }
+    send()
+  }, [draft, isKnownCommand, runCommand, send])
+
+  const canRunCommand = ready && activeSessionId !== null && draft.trim().length > 0
+  const submitEnabled = isKnownCommand(draft.trim()) ? canRunCommand : canSend
 
   return (
     <div className={styles.view}>
@@ -172,6 +336,32 @@ export const RemoteChatView = () => {
           />
         ) : null}
         <div className={styles.title}>{ready && activeSessionId !== null ? activeTitle : ''}</div>
+        {/*
+          工作区抽屉入口（W3）。门禁：`filesSupported === false`（Host 回 `METHOD_NOT_FOUND`）
+          时**整个按钮消失**；`null`（还没探过）时先画出来 —— 端点没有专属 capability，
+          不点一次没有别的办法知道。
+        */}
+        {ready && activeSessionId !== null && filesSupported !== false ? (
+          <IconButton
+            size="xs"
+            tooltip={t('workspacePaneOpen')}
+            icon={<IconDataOutline16 />}
+            onClick={() => void useWorkspacePane.getState().openPane()}
+          />
+        ) : null}
+        {/*
+          会话内控制（W2）：模型胶囊 / 权限预设胶囊 / `⋯` 菜单。
+          三个入口各自按能力降级（Host 回 `METHOD_NOT_FOUND` 就只隐藏对应那个），
+          组件内部自己判 `showsXxx`，这里不写条件 —— 免得顶栏堆一堆 &&。
+        */}
+        {ready && activeSessionId !== null ? (
+          <SessionControlsBar
+            sessionId={activeSessionId}
+            title={controlTitle}
+            usage={usage}
+            onInsertCommand={insertCommand}
+          />
+        ) : null}
         <span className={clsx(styles.badge, ready ? styles.badgeLive : styles.badgeIdle)}>
           {transportLabel(t, transport, ready)}
         </span>
@@ -192,12 +382,39 @@ export const RemoteChatView = () => {
       ) : !ready ? (
         <div className={styles.centerState}>
           <div className={styles.centerTitle}>
-            {/* 等待授权（系统浏览器里）是「正在登录」而不是「失败了」：别让用户以为要重来 */}
-            {t(phase === 'error' ? 'remotePhaseError' : phase === 'waiting-auth' ? 'remotePhaseWaitingAuth' : 'remoteNotConnected')}
+            {/* 自动恢复（K4）优先：它说的是「刚才为什么没连上」，比通用的「未连接」有用得多。
+                等待授权（系统浏览器里）是「正在登录」而不是「失败了」，别让用户以为要重来。 */}
+            {t(
+              autoConnect.state === 'failed'
+                ? autoConnect.code === 'SESSION_EXPIRED'
+                  ? 'remoteSessionExpired'
+                  : 'remoteAutoConnectFailed'
+                : phase === 'error'
+                  ? 'remotePhaseError'
+                  : phase === 'waiting-auth'
+                    ? 'remotePhaseWaitingAuth'
+                    : phase === 'connecting'
+                      ? 'remotePhaseConnecting'
+                      : 'remoteNotConnected',
+            )}
           </div>
           <div className={styles.centerHint}>
-            {error ? `${error.code}: ${error.message}` : t('remoteNotConnectedHint')}
+            {error
+              ? `${error.code}: ${error.message}`
+              : autoConnect.state === 'failed' && autoConnect.message !== undefined
+                ? autoConnect.message
+                : t('remoteNotConnectedHint')}
           </div>
+          {/* 上次连接失败：给一次重试（凭据过期时重试没有意义，直接去设置里重新登录） */}
+          {autoConnect.state === 'failed' && autoConnect.code !== 'SESSION_EXPIRED' ? (
+            <Button
+              variant="primary"
+              size="m"
+              onClick={() => fireAndForget(() => useRemoteStore.getState().retryAutoConnect())}
+            >
+              {t('remoteAutoConnectRetry')}
+            </Button>
+          ) : null}
           <Button variant="primary" size="m" onClick={() => openSettings('remote')}>
             {t('remoteOpenSettings')}
           </Button>
@@ -205,6 +422,20 @@ export const RemoteChatView = () => {
       ) : activeSessionId === null ? (
         <div className={styles.centerState}>
           <div className={styles.centerTitle}>{t('remotePickSession')}</div>
+          {/*
+            「新建会话」入口（W1）。为什么只挂在**空态**：顶栏与输入区归 W2（会话内控制），
+            而空态正是「这台 Host 上一个会话都还没打开」的时候 —— 用户唯一的下一步就是新建一个。
+            能力门禁：Host 不支持 `session/create` 时（`capabilities.create === false`）不渲染，
+            不弹错误对话框。
+          */}
+          {canCreateSession ? (
+            <Button variant="primary" size="m" onClick={() => useNewSessionStore.getState().openPanel()}>
+              <span className={styles.newSessionIcon} aria-hidden>
+                <IconNewChatOutline20 />
+              </span>
+              {t('newSessionEntry')}
+            </Button>
+          ) : null}
           {isMobile ? (
             <Button variant="outlined" size="m" onClick={openMobileSider}>
               {t('remoteListButton')}
@@ -233,6 +464,9 @@ export const RemoteChatView = () => {
           </div>
 
           <div className={styles.footer}>
+            {/* 会话内控制的操作级错误（切模型 / 执行命令 / 队列操作）：一条可关掉的行 */}
+            <ChatControlsError />
+
             {approvals.length > 0 ? (
               <div className={styles.approvals}>
                 {approvals.map((approval) => (
@@ -248,26 +482,90 @@ export const RemoteChatView = () => {
               </div>
             ) : null}
 
+            {/* 排队消息（W2）：生成中发出去的消息进了 Host 的 inbox，这里给「立即发送 / 删除」 */}
+            <QueueDock />
+
+            {/* 斜杠命令补全（W2）：整行只有 `/`+名字时出现，回车执行、Tab 填回、Esc 关掉 */}
+            {completionOpen ? (
+              <SlashCommandList
+                listId="remote-slash-commands"
+                commands={slashMatches}
+                activeIndex={Math.min(commandCursor, Math.max(0, slashMatches.length - 1))}
+                onPick={(command) => runCommand(commandLineOf(command).trim())}
+                onHover={setCommandCursor}
+              />
+            ) : null}
+
+            {commandResult === null ? null : (
+              <div className={controlsStyles.resultBar} role="status">
+                {commandResult}
+              </div>
+            )}
+
             <div className={styles.inputWrapper}>
+              {/* 附件条（W3）：上传中 / 已完成 / 失败重试都在这里，进输入框上方 */}
+              <AttachmentTray compact />
               <textarea
                 ref={textareaRef}
                 className={styles.textarea}
                 rows={2}
                 value={draft}
                 placeholder={t('remoteInputPlaceholder')}
+                aria-controls={completionOpen ? 'remote-slash-commands' : undefined}
+                aria-activedescendant={
+                  completionOpen && slashMatches.length > 0
+                    ? `remote-slash-commands-${Math.min(commandCursor, slashMatches.length - 1)}`
+                    : undefined
+                }
                 onChange={(event) => setDraft(event.target.value)}
                 onKeyDown={(event) => {
+                  // 补全打开时：↑↓ 选、Enter 执行选中的命令、Tab 只填回、Esc 收起来
+                  if (completionOpen) {
+                    if (event.key === 'Escape') {
+                      event.preventDefault()
+                      setCommandDismissed(true)
+                      return
+                    }
+                    if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && slashMatches.length > 0) {
+                      event.preventDefault()
+                      const step = event.key === 'ArrowDown' ? 1 : -1
+                      setCommandCursor((current) => {
+                        const size = slashMatches.length
+                        return (current + step + size) % size
+                      })
+                      return
+                    }
+                    if (
+                      event.key === 'Enter' &&
+                      !event.shiftKey &&
+                      !event.nativeEvent.isComposing &&
+                      slashMatches.length > 0
+                    ) {
+                      event.preventDefault()
+                      const picked = slashMatches[Math.min(commandCursor, slashMatches.length - 1)]
+                      if (picked !== undefined) runCommand(commandLineOf(picked).trim())
+                      return
+                    }
+                    if (event.key === 'Tab' && slashMatches.length > 0) {
+                      event.preventDefault()
+                      const picked = slashMatches[Math.min(commandCursor, slashMatches.length - 1)]
+                      if (picked !== undefined) insertCommand(commandLineOf(picked))
+                      return
+                    }
+                  }
                   if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                     event.preventDefault()
-                    send()
+                    submit()
                   }
                 }}
               />
               <div className={styles.inputRow}>
+                {/* 「+」选文件 → fileUploads/upload → 收据随消息发出（W3） */}
+                <AttachmentButton disabled={!ready || activeSessionId === null || streaming} />
                 <span className={styles.inputHint}>
-                  {streaming ? t('remoteSending') : t('remoteInputHint')}
+                  {streaming ? t('remoteSending') : slashQuery(draft) !== null ? t('chatControlsSlashTyping') : t('remoteInputHint')}
                 </span>
-                {streaming ? (
+                {streaming && !isKnownCommand(draft.trim()) ? (
                   <button
                     type="button"
                     className={styles.sendButton}
@@ -279,10 +577,10 @@ export const RemoteChatView = () => {
                 ) : (
                   <button
                     type="button"
-                    className={clsx(styles.sendButton, !canSend && styles.sendDisabled)}
-                    aria-label={t('send')}
-                    aria-disabled={!canSend}
-                    onClick={send}
+                    className={clsx(styles.sendButton, !submitEnabled && styles.sendDisabled)}
+                    aria-label={isKnownCommand(draft.trim()) ? t('chatControlsRunCommand') : t('send')}
+                    aria-disabled={!submitEnabled}
+                    onClick={submit}
                   >
                     <IconSendOutline16 />
                   </button>
@@ -292,6 +590,10 @@ export const RemoteChatView = () => {
           </div>
         </>
       )}
+      {/* 新建会话面板（W1）：自己 portal 到 body，这里只是挂载点（不占布局） */}
+      <NewSessionPanel />
+      {/* 工作区文件抽屉（W3）：同样自己 portal；未展开 / 不支持时内部直接 return null */}
+      <WorkspacePane />
     </div>
   )
 }
@@ -302,7 +604,8 @@ const RemoteRow = ({ item, live }: { item: ChatItem; live: boolean }) => {
   if (item.kind === 'message') return <MessageRow item={item} live={live} />
   if (item.kind === 'tool') return <ToolRow item={item} />
   if (item.kind === 'approval') return <ApprovalRow item={item} />
-  return <QuestionRow item={item} />
+  // 提问不再是一行只读摘要：选项 / 自由输入 / 倒计时 / 提交全在卡片里（`chat-controls/QuestionCard`）
+  return <QuestionCard item={item} />
 }
 
 /** 正文用现有的 Markdown 组件；用户行保持纯文本，避免被当成 markdown 解析 */
@@ -351,28 +654,8 @@ const MessageRow = ({ item, live }: { item: ChatMessage; live: boolean }) => {
   )
 }
 
-/** 工具调用压成一行：名字 + 状态 + 首行摘要 */
-const ToolRow = ({ item }: { item: ToolActivity }) => {
-  const t = useTranslate()
-  const detail = item.resultDetail?.text ?? item.summary ?? item.arguments ?? ''
-  const stateLabel =
-    item.state === 'running'
-      ? t('remoteToolRunning')
-      : item.state === 'failed'
-        ? t('remoteToolFailed')
-        : t('remoteToolFinished')
-  return (
-    <div className={styles.activityRow}>
-      <span className={styles.activityName}>{item.toolName}</span>
-      <span className={clsx(styles.activityState, item.state === 'failed' && styles.activityFailed)}>
-        {stateLabel}
-      </span>
-      {detail.length > 0 ? (
-        <span className={styles.activityDetail}>{shorten(detail, 160)}</span>
-      ) : null}
-    </div>
-  )
-}
+/** 工具调用：一行摘要（图标 + 动词 + 要点 + 状态），点开按结果类型渲染详情。见 `tool/ToolCard`。 */
+const ToolRow = ({ item }: { item: ToolActivity }) => <ToolCard item={item} />
 
 /** 已经处理过的审批留在时间线上，作为一条不可再点的记录 */
 const ApprovalRow = ({ item }: { item: ApprovalActivity }) => {
@@ -395,16 +678,6 @@ const ApprovalRow = ({ item }: { item: ApprovalActivity }) => {
     </div>
   )
 }
-
-/** 远端 Agent 的提问（P0 只读展示；应答走问答通道，不在本期范围） */
-const QuestionRow = ({ item }: { item: QuestionActivity }) => (
-  <div className={styles.activityRow}>
-    <span className={styles.activityName}>question</span>
-    <span className={styles.activityDetail}>
-      {item.questions.map((question) => question.question).join(' / ')}
-    </span>
-  </div>
-)
 
 const outcomeLabel = (outcome: ApprovalOutcome | undefined): TranslationKey => {
   if (outcome === 'allowed-once') return 'remoteApprovalAllowed'

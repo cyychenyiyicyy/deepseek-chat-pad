@@ -15,8 +15,11 @@
   align-items: center;
   gap: 10px;
   box-sizing: border-box;
-  /* 沉浸式状态栏：与 TabletHeader / MobileHeader 同高 */
-  height: calc(60px + var(--ds-top-offset));
+  /*
+   * 与 SessionView 的 TabletHeader / MobileHeader 完全同一套公式
+   * （--ds-topbar-h + --ds-top-offset），左右两栏顶栏才会齐平。
+   */
+  height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
   padding: var(--ds-top-offset) 16px 0;
   background: var(--dsw-alias-bg-base);
 }
@@ -84,6 +87,13 @@
   color: var(--dsw-alias-label-tertiary);
   overflow-wrap: anywhere;
   user-select: text;
+}
+
+/* 空态里的「新建会话」按钮（W1）：图标与文字同一行，间距靠 gap */
+.newSessionIcon {
+  display: inline-flex;
+  margin-right: 6px;
+  vertical-align: -4px;
 }
 
 .timeline {
@@ -363,7 +373,7 @@
 
 @media not all and (min-width: 768px) {
   .header {
-    height: calc(56px + var(--ds-top-offset));
+    /* 高度与平板同值（--ds-topbar-h），手机只是左右收窄一点 */
     gap: 8px;
     padding: var(--ds-top-offset) 12px 0;
   }

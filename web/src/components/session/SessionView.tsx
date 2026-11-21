@@ -24,7 +24,7 @@ export const SessionView = ({
       {isMobile ? (
         <MobileHeader title={title} />
       ) : (
-        <TabletHeader title={title} compact />
+        <TabletHeader title={title} />
       )}
       <MessageList
         session={session}

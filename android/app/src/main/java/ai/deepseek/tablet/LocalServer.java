@@ -33,7 +33,8 @@ import okhttp3.OkHttpClient;
  *       /__ds_remote/* 走 {@link RemoteWsHandler}（远程 DSH 的原生 WebSocket 隧道桥），
  *       /__ds_auth/* 走 {@link RemoteAuthHandler}（应用内授权容器：全屏 Dialog + WebView，或交给
  *       系统浏览器；第三方登录在窗口里完成，登录结果由页面按 qrId 轮询服务端拿），
- *       /__ds_keepalive/* 走 {@link KeepAliveHandler}（后台保活前台服务 + 通知/电池权限）</li>
+ *       /__ds_keepalive/* 走 {@link KeepAliveHandler}（后台保活前台服务 + 通用设置的权限中心：
+ *       通知 / 省电 / 自启动 / 精确闹钟 / 悬浮窗 / 应用详情 / 流量 的状态与跳转）</li>
  *   <li>每个连接一个小循环支持 keep-alive，最多 256 个请求；/__ds_remote/ws 升级成 WebSocket 后
  *       整条连接交给 RemoteWsHandler 独占，隧道结束即关闭</li>
  *   <li>工作线程全部是 daemon，Activity 退出时不会把进程挂住</li>
@@ -88,8 +89,8 @@ public final class LocalServer {
         // Activity：MainActivity 传进来的是 Application context，所以它内部自己注册
         // ActivityLifecycleCallbacks 跟踪当前 resumed 的 Activity 来弹全屏 Dialog
         this.remoteAuthHandler = new RemoteAuthHandler(base);
-        // 后台保活（/__ds_keepalive/*）：同样靠 ActivityLifecycleCallbacks 定位当前 Activity
-        // （要弹通知权限框与「忽略电池优化」授权页），所以也传 Application context
+        // 后台保活 + 权限中心（/__ds_keepalive/*）：同样靠 ActivityLifecycleCallbacks 定位当前
+        // Activity（要弹通知权限框、要拉系统权限设置页），所以也传 Application context
         this.keepAliveHandler = new KeepAliveHandler(base);
         this.workers = Executors.newCachedThreadPool(runnable -> {
             Thread thread = new Thread(runnable, "ds-http-" + threadCounter.incrementAndGet());
@@ -320,10 +321,11 @@ public final class LocalServer {
             return remoteAuthHandler.handle(method, path, headers, in, out, keepAlive);
         }
 
-        // 后台保活 + 权限申请（/__ds_keepalive/*）：同样必须排在静态资源判断之前。
+        // 后台保活 + 权限中心（/__ds_keepalive/*）：同样必须排在静态资源判断之前。
         // 注意 AssetHandler 的 SPA 回落：无扩展名的未知路径会回 index.html（200 HTML），
-        // 所以旧 APK 上这些请求不是 404 —— 页面探测能力请用 /__ds_keepalive/state.json
-        // （带扩展名的路径不会触发回落，旧 APK 上是真 404），见 KeepAliveHandler 类注释。
+        // 所以旧 APK 上这些请求不是 404 —— 页面探测能力请用带扩展名的那些别名
+        // （/__ds_keepalive/state.json、/__ds_keepalive/permissions.json）：
+        // 带点的路径不会触发回落，旧 APK 上是真 404，见 KeepAliveHandler 类注释。
         if (path.startsWith(KeepAliveHandler.PATH_PREFIX)) {
             return keepAliveHandler.handle(method, path, headers, in, out, keepAlive);
         }

@@ -1,0 +1,313 @@
+/*
+ * 会话内控制的共用外观：顶栏胶囊 + 浮层里的行。
+ *
+ * 只用仓库已有的 token（`--dsw-alias-*`），不引新颜色：胶囊的选中态/悬停都跟
+ * `base/Menu`、`ApprovalCard` 保持同一套，深浅色主题自动跟随。
+ */
+
+/* ---------- 顶栏胶囊 ---------- */
+
+/* 顶栏右侧的一组控制：靠右排，窄屏时可横向收缩（标题先让位） */
+.bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pill {
+  display: inline-flex;
+  flex-shrink: 1;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 180px;
+  padding: 2px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.15s ease;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.pillActive {
+  border-color: var(--dsw-alias-button-ghost-active-border);
+  background-color: var(--dsw-alias-button-ghost-active-fill);
+  color: var(--dsw-alias-brand-text);
+}
+
+.pillText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pillChevron {
+  display: inline-flex;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+/* 图标按钮形态的胶囊（`⋯`） */
+.iconPill {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+/* ---------- 浮层内部 ---------- */
+
+.panelHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.panelTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.panelBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+}
+
+.sectionTitle {
+  padding: 8px 10px 4px;
+  font-size: 11px;
+  line-height: 16px;
+  letter-spacing: 0.02em;
+  color: var(--dsw-alias-label-tertiary);
+  text-transform: uppercase;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.rowActive {
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rowDanger {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.rowDisabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+
+  &:hover {
+    background-color: transparent;
+  }
+}
+
+.rowCopy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.rowName {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.rowHint {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.rowCheck {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--dsw-alias-brand-text);
+}
+
+.rowTail {
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.empty {
+  padding: 10px 12px 14px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.hint {
+  padding: 6px 12px 10px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.divider {
+  height: 1px;
+  margin: 4px 8px;
+  background-color: var(--dsw-alias-border-l2);
+}
+
+/* 信息面板里的键值对 */
+.infoRow {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 5px 10px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.infoLabel {
+  flex-shrink: 0;
+  width: 76px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.infoValue {
+  flex: 1;
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.infoMono {
+  font-family: var(--ds-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+}
+
+/* 底部的小按钮行（取消 / 确认） */
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 10px 10px;
+}
+
+/* ---------- 操作级错误条（贴在输入区上方） ---------- */
+
+.errorBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--dsw-alias-state-error-primary);
+  border-radius: 10px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+.errorText {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-error-primary);
+  overflow-wrap: anywhere;
+}
+
+.errorClose {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+/* 命令执行成功时的临时结果行（Host 回了 text 才显示，几秒后自己消失） */
+.resultBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+

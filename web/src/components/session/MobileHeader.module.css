@@ -3,8 +3,9 @@
   align-items: center;
   flex-shrink: 0;
   box-sizing: border-box;
-  height: 60px;
-  padding: 12px 10px 4px;
+  /* 与平板顶栏、侧栏 logo 行同一套公式（--ds-topbar-h，见 global.css） */
+  height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
+  padding: var(--ds-top-offset) 10px 0;
 }
 
 .title {

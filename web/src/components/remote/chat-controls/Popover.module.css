@@ -1,0 +1,22 @@
+/* 胶囊浮层：与 base/Menu 的观感一致（同一套圆角、阴影、hover），只是内容自由排版 */
+.anchor {
+  display: inline-flex;
+  min-width: 0;
+}
+
+.panel {
+  position: fixed;
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  max-width: calc(100vw - 16px);
+  overflow: hidden auto;
+  border-radius: 12px;
+  background-color: var(--dsw-specific-menu);
+  box-shadow:
+    0 0 1px rgba(0, 0, 0, 0.2),
+    0 0 4px rgba(0, 0, 0, 0.02),
+    0 12px 32px rgba(0, 0, 0, 0.08);
+  scrollbar-color: var(--scroll-color) transparent;
+}

@@ -22,10 +22,29 @@ export type ChatMode = 'local' | 'remote'
 
 type RemoteModeState = { mode: ChatMode }
 
-/** 会话级状态，不落盘：刷新页面回到本机模式，避免用户莫名其妙连着一台远端主机。 */
-export const useRemoteMode = create<RemoteModeState>(() => ({ mode: 'local' }))
+/** 上次用的模式要落盘：否则每次冷启动都回到「本机」，
+ *  「重启之后还得重新登录」的观感有一半来自这里 —— 用户上次连着远程，
+ *  重开就该还在远程，并由 `autoConnectNow()` 用已存凭据静默接上。 */
+const MODE_STORAGE_KEY = 'dsp.remote.mode.v1'
 
-export const setChatMode = (mode: ChatMode) => useRemoteMode.setState({ mode })
+const readStoredMode = (): ChatMode => {
+  try {
+    return window.localStorage.getItem(MODE_STORAGE_KEY) === 'remote' ? 'remote' : 'local'
+  } catch {
+    return 'local'
+  }
+}
+
+export const useRemoteMode = create<RemoteModeState>(() => ({ mode: readStoredMode() }))
+
+export const setChatMode = (mode: ChatMode) => {
+  useRemoteMode.setState({ mode })
+  try {
+    window.localStorage.setItem(MODE_STORAGE_KEY, mode)
+  } catch {
+    // 隐私模式/配额满：只影响下次启动的默认模式，不影响当前会话
+  }
+}
 
 export const enterRemoteMode = () => setChatMode('remote')
 

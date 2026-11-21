@@ -1,4 +1,11 @@
 /* 远程会话列表：放进 Sider 的列表区，只负责滚动；外框/背景/右边框都由 Sider 提供 */
+.wrap {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .list {
   flex: 1;
   min-height: 0;
@@ -6,6 +13,167 @@
   padding: 0 2px 12px;
   overflow-y: auto;
   scrollbar-color: var(--scroll-color) transparent;
+}
+
+/* ── 搜索（W1）：列表顶部一行，不占额外留白 ── */
+.searchRow {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  margin: 0 0 6px;
+  padding: 0 6px 0 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.searchIcon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.searchInput {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+  outline: none;
+}
+
+.searchInput::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* Safari 的搜索框自带清除按钮，和我们的关闭键重复 */
+.searchInput::-webkit-search-cancel-button {
+  display: none;
+}
+
+.listHint {
+  flex-shrink: 0;
+  margin: 0 2px 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.listError {
+  flex-shrink: 0;
+  margin: 0 2px 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-error, #d9534f);
+  overflow-wrap: anywhere;
+}
+
+/* ── 一行 = 主按钮 + 「⋯」 ── */
+.row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rowArchived {
+  opacity: 0.55;
+}
+
+.moreButton {
+  flex-shrink: 0;
+  opacity: 0;
+}
+
+.row:hover .moreButton,
+.row:focus-within .moreButton {
+  opacity: 1;
+}
+
+/* 触摸设备没有 hover：常驻显示，否则根本发现不了 */
+@media (pointer: coarse) {
+  .moreButton {
+    opacity: 1;
+  }
+}
+
+/* ── 下拉菜单（长按 / 右键 / ⋯） ── */
+.menu {
+  /* 与 base/Menu 同一套：浮层挂在 body 上，按视口坐标定位（position 必须显式给） */
+  position: fixed;
+  z-index: 900;
+  box-sizing: border-box;
+  min-width: 168px;
+  padding: 4px;
+  overflow-y: auto;
+  border-radius: 12px;
+  background-color: var(--dsw-specific-menu, var(--dsw-alias-bg-base));
+  box-shadow:
+    0 0 1px rgba(0, 0, 0, 0.2),
+    0 0 4px rgba(0, 0, 0, 0.02),
+    0 12px 32px rgba(0, 0, 0, 0.12);
+}
+
+.menuOption {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.menuOption:hover {
+  background-color: var(--dsw-specific-sidebar-nav-item-hover);
+}
+
+/* ── 重命名弹窗 ── */
+.renameInput {
+  box-sizing: border-box;
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background-color: transparent;
+  font: inherit;
+  font-size: 14px;
+  color: var(--dsw-alias-label-primary);
+  outline: none;
+}
+
+.renameInput:focus {
+  border-color: var(--dsw-alias-button-primary-fill);
+}
+
+.dialogButton {
+  padding: 8px 16px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.dialogButtonPrimary {
+  border-color: transparent;
+  background-color: var(--dsw-alias-button-primary-fill);
+  color: var(--dsw-alias-brand-primary-invert);
+}
+
+.dialogButton:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .item {
@@ -53,6 +221,36 @@
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+}
+
+.itemMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.archivedTag {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.itemBusy {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+  animation: list-spin 1s linear infinite;
+}
+
+@keyframes list-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .itemTitle {

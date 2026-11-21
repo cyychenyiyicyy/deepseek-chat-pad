@@ -40,7 +40,8 @@ import { Modal } from '../base/Modal.js'
 import { Select } from '../base/Select.js'
 import { showToast } from '../base/toastState.js'
 import { ApiKeyConfirm, ApiKeyField, useApiKeyEditor } from './ApiKeyField.js'
-import { closeSettings, useSettingsDialog, type SettingsSection } from './settingsDialogState.js'
+import { BackgroundPermissions } from './BackgroundPermissions.js'
+import { closeSettings, setSettingsSection, useSettingsDialog, type SettingsSection } from './settingsDialogState.js'
 import type { ImportProgress } from '../../services/chat/history/importArchive.js'
 import { formatFileSize } from '../../utils/format.js'
 import { ModelPanel } from '../models/ModelPanel.js'
@@ -71,8 +72,9 @@ const sections: { value: SettingsSection; label: TranslationKey; icon: ReactNode
 const SettingsContent = () => {
   const t = useTranslate()
   const isMobile = useIsMobile()
-  // 打开时按调用方指定的分组选中，之后在弹窗内切换
-  const [section, setSection] = useState(() => useSettingsDialog.getState().section)
+  // 当前分组放在 store 里（不是组件 state）：别的面板要能把用户带过来，见 settingsDialogState
+  const section = useSettingsDialog((state) => state.section)
+  const setSection = setSettingsSection
   // 切换分组不丢失正在输入的 API Key 与导入状态
   const apiKeyEditor = useApiKeyEditor()
   const historyImport = useHistoryImport()
@@ -116,6 +118,7 @@ const SettingsContent = () => {
               <SearchSetting />
               <LocationSetting />
               <UpdatePanel />
+              <BackgroundPermissions />
               <VersionSetting />
             </>
           ) : section === 'models' ? (

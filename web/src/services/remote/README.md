@@ -14,6 +14,8 @@ Chat Pad 连远端 DeepSeek Harness 的**账号与连接层**。协议权威是
 | `serverApi.ts` | REST 调用 + 统一错误映射 + 「401 刷新一次」+ OAuth 发现 / 扫码会话 / 账号资料 | `identity.ts`（base64url / 公钥校验）、`storage.ts`（类型） |
 | `identity.ts` | X25519 身份（`@noble/curves`）、UUIDv7、Device Descriptor | `@noble/curves`、`@noble/hashes` |
 | `storage.ts` | localStorage：服务器 / 账号 + token / Host 公钥 pin | 无 |
+| `autoConnect.ts` | **上次连接**（`dsp.remote.last-session.v1`，不含 token）+ 「重启后怎么连回去」的纯函数判定（`planAutoConnect`） | `storage.ts`（类型） |
+| `permissions.ts` | 原生权限中心（`/__ds_keepalive/permissions.json` / `open` / `notify`）：通知 / 电池 / 自启动 / 精确定时 / 悬浮窗 / 常驻通知 | 原生桥 |
 | `oauth.ts` | 多方式登录：QR 会话 + 浏览器 / 扫码两条入口、轮询状态机、token → 设备、**待完成会话的跨进程恢复**（`dsp.remote.pending-login.v1`） | `serverApi.ts`、`identity.ts`、`storage.ts`、原生桥 `/__ds_auth/*` |
 | `keepAlive.ts` | 原生保活服务（`/__ds_keepalive/*`）：连上就拉起、真断开就停、回前台自检 | 原生桥 |
 | `qr.ts` | `scanUrl` → 二维码（GIF data URL / SVG），纯前端、不用 canvas | `qrcode-generator` |
@@ -60,13 +62,55 @@ startProviderLogin ──► localStorage[dsp.remote.pending-login.v1]
 - **判定授权成功只看轮询结果**，`authPageState().open === false` 在 `external` 下是常态，
   拿它当「用户取消」会在打开浏览器的瞬间误判。
 
-### 原生保活（K1）：`/__ds_keepalive/*`
+### 重启后自动恢复登录（K4）：`dsp.remote.last-session.v1`
+
+**根因**：设备 token pair 一直存在 `dsp.remote.accounts.v1` 里，缺的是「启动时用它」的代码 ——
+`resumeLogin()` 只续「登录过程中」的 QR 会话，所以 App 一起来 `phase === 'idle'`，
+远程页显示「未连接」、设置页把邮箱密码表单原样摆出来。
+
+```
+连上（密码 / 浏览器授权 / 扫码 / 自动恢复成功）
+   └─► last-session = {serverUrl, email, hostDeviceId, hostName, capabilities?, transport?, savedAt}
+        （**不含 token**；token 的唯一归属仍是 storage.ts）
+
+启动 ──► autoConnectNow()（幂等单飞；装在 RemoteChatView + RemoteSettingsPanel 的挂载 effect 里）
+   ├ 没有记录 / 账号没了 / 还没注册设备 ─► 什么都不做（必要时删记录）
+   ├ refresh token 过期 ─► 删记录 + failed/SESSION_EXPIRED（「登录已过期，请重新登录」，邮箱还在）
+   ├ access token 快过期（60s 提前量） ─► POST /auth/refresh（原子替换）+ 建链
+   └ 其余 ─► 直接建链（优先连回 hostDeviceId 那台）
+         成功 ─► 写 last-session + autoConnect=done
+         失败 ─► **保留** last-session + autoConnect=failed（不写 state.error、不弹红条）
+```
+
+- `disconnect()` = **临时断开**：保留 last-session / 账号，下次启动照常自动连；
+  `signOut()` = **退出登录**：清 last-session + 删本机凭据。
+- `retryAutoConnect()`：用户点「重试连接」（远程页 / 设置页的横幅）；`disconnect()` 之后重连也走它。
+- 不在壳里（普通浏览器）直接跳过：没有 `/__ds_proxy`，连也连不上，白打一轮网络请求。
+
+### 原生权限中心（M2）：`/__ds_keepalive/*`
+
+权限 UI 在「**通用设置 → 后台与权限**」（`components/settings/BackgroundPermissions.tsx`），
+**不在**远程面板里 —— 通知 / 电池 / 自启动 / 精确定时 / 悬浮窗属于整个 App 的后台存活能力。
+
+| 行 | 判据 | 动作（`POST /open {target}`） |
+|---|---|---|
+| 通知权限 | `notifications.granted`（`channelBlocked` 另外提示渠道被关） | `notifications` |
+| 电池优化 | `battery.exempt \|\| battery.ignored` | `battery` |
+| 自启动 | `autoStart.intentAvailable`（标题带 `manufacturer`） | `autoStart`，不可用降级 `appDetails` |
+| 后台保活服务 | `foregroundService.running / shouldRun` 三态 | —（状态行） |
+| 精确定时 / 悬浮窗 | **只在 `declared:true` 时显示** | `exactAlarm` / `overlay` |
+
+- **业务失败也是 HTTP 200**：判定只看 `ok` / `fallback`，不看状态码；
+  `degraded:true` 要提示「已打开应用详情页，请在里面手动设置」。
+- 旧 APK：`permissions.json` 404（或回了 `index.html`）→ 整节不显示。
+
+### 原生保活服务（K1）：`/__ds_keepalive/start|stop|state.json`
 
 远程连接的心跳是页面定时器；用户切到系统浏览器时定时器被冻结，服务端 75 秒就踢连接。
 `keepAlive.ts` 负责：`phase==='ready'` 时 `POST /start`（幂等）、主动断开 / 终态 closed 时
 `POST /stop`、回前台 `GET /state.json` 后按 `shouldRun && !running` 补一次 `start`。
 探测**必须**用带 `.json` 的路径（旧 APK 的静态兜底会把未知路径回落成 `index.html` 且回 200）。
-`battery`（拉起「忽略电池优化」）只能由用户点击触发。快照记在 `store.keepAlive` 里给 UI 用。
+权限相关（通知 / 电池 / 自启动…）走上面的权限中心，不再由 `keepAlive.ts` 管。
 
 **传输不在这里**：控制 WS、Noise、分片、心跳都在 S2 的 `core/`。
 `connection.ts` 里有一份 `SecureLink` 结构副本，S2 的 `core/index.ts` 落地后改成
@@ -90,6 +134,7 @@ npx tsx src/services/remote/__selftest__/connection.selftest.mts   # 19 PASS（�
 npx tsx src/services/remote/__selftest__/oauth.selftest.mts        # 40 PASS（providers / 扫码状态机 / 原生桥 / 二维码）
 npx tsx src/services/remote/__selftest__/adapter.selftest.mts      # 27 PASS（线格式 → ChatItem）
 npx tsx src/services/remote/__selftest__/login-resume.selftest.mts # 18 PASS（登录会话恢复 / 原生保活）
+npx tsx src/services/remote/__selftest__/last-session.selftest.mts # 17 PASS（重启自动恢复 / 权限中心 404 降级）
 ```
 
 每个脚本失败都会 `exit 1`。

@@ -5,6 +5,7 @@ import { qrDataUrl } from '../../services/remote/qr.js'
 import { loadAccounts, loadServers, type LoginMethod } from '../../services/remote/storage.js'
 import { probeAuthBridge, useRemoteStore, type AuthBridgeStatus } from '../../services/remote/store.js'
 import { Button } from '../base/Button.js'
+import { openSettings } from '../settings/settingsDialogState.js'
 import { useRemoteAvailability } from './RemoteModeSwitch.js'
 import styles from './RemoteSettingsPanel.module.css'
 
@@ -29,10 +30,13 @@ import styles from './RemoteSettingsPanel.module.css'
  *     判断「授权成功」只看轮询结果，**绝不**看 `authPageState().open`（external 下恒 false）。
  *   - 状态区把 `phase / transport / capabilities` 与**错误原文**（`code: message`）都摊开，
  *     远程链路的失败原因没法靠一句「连接失败」定位。
- *   - **保活状态区（K3）**：状态胶囊下面是原生前台服务的三态徽标 + 两条权限提示。
- *     只认 `store.keepAlive.supported`，老 APK / 普通浏览器不显示；**不新增任何端点** ——
- *     通知权限没有页面可调的申请接口（`POST_NOTIFICATIONS` 只能由原生在主线程请求），
- *     所以只给文字说明；电池优化有端点，但**只在点击里**调，状态以原生回读的快照为准。
+ *   - **重启后自动恢复（K4）**：挂载时调一次 `autoConnectNow()`（幂等单飞，与远程页共用同一份
+ *     实现），所以「上次连过」的用户打开设置页看到的是**账号摘要**而不是登录表单；恢复失败
+ *     只显示一行「上次连接失败，点击重试」，不弹红条。
+ *   - **保活 / 权限区已经搬走（K4）**：通知权限、电池优化、自启动、精确定时、悬浮窗都是
+ *     「整个 App 的后台存活能力」，放在这里等于暗示「不连远程就不需要」。现在它们在
+ *     「通用设置 → 后台与权限」（`components/settings/BackgroundPermissions.tsx`），
+ *     这里只留一句小字 + 一个把用户带过去的按钮。
  */
 
 /** 官方托管服务器（决策见 `plan-P0P1-实施契约.md` 第 3 行）。 */
@@ -85,10 +89,14 @@ export const RemoteSettingsPanel = () => {
   /** 待完成登录（可能是**上个进程**留下的：`resumeLogin()` 会把它从 localStorage 恢复出来） */
   const pendingLogin = useRemoteStore((state) => state.pendingLogin)
   /**
-   * 原生保活服务的快照（K3）：`null` = 还没探过；`supported:false` = 这个环境没有这套端点
-   * （普通浏览器 / 旧 APK）。只有 `supported:true` 才渲染下面的保活状态区。
+   * 原生保活服务的快照（K1）：`null` = 还没探过；`supported:false` = 这个环境没有这套端点
+   * （普通浏览器 / 旧 APK）。**权限区已经不在这里渲染**（见文件头），这里只用于「回前台自检」。
    */
   const keepAlive = useRemoteStore((state) => state.keepAlive)
+  /** 重启后的自动恢复进度（K4）：`failed` 时给一行「点击重试」 */
+  const autoConnect = useRemoteStore((state) => state.autoConnect)
+  /** 上次连上的会话（`null` = 没有可恢复的）：连接表单隐藏时也能显示「上次连的是谁」 */
+  const lastSession = useRemoteStore((state) => state.lastSession)
   const { availability, retry } = useRemoteAvailability()
   // 预填上次用过的服务器与邮箱（storage 里已有的那份），没有就用默认值
   const [server, setServer] = useState(() => loadServers()[0]?.url ?? DEFAULT_SERVER)
@@ -103,8 +111,6 @@ export const RemoteSettingsPanel = () => {
   const [bridge, setBridge] = useState<AuthBridgeStatus | 'probing'>('probing')
   /** 倒计时用的当前时刻（每 1s 推一次） */
   const [now, setNow] = useState(() => Date.now())
-  /** 正在拉起「忽略电池优化」授权页（只驱动按钮 loading，状态以原生回读的快照为准） */
-  const [batteryAsking, setBatteryAsking] = useState(false)
   // 定时器回调里要读「最新的」服务器地址，避免把 effect 依赖写成 server（每敲一个字都重排）
   const serverRef = useRef(server)
   serverRef.current = server
@@ -117,6 +123,14 @@ export const RemoteSettingsPanel = () => {
   /** 第三方入口能否点：桥就绪 + 没有登录在跑 + 没连上（探测中一律先禁着，不猜） */
   const canStartProvider = !bridgeProbing && !appOnly && !busy && !connected
   const canConnect = !busy && !connected && !blocked && email.trim().length > 0 && password.length > 0
+  /** 正在静默恢复上次连接（K4）：这时不该显示登录表单，也不该说「未连接」 */
+  const restoring = autoConnect.state === 'connecting' && !connected
+  /** 上次连接失败且还能重试（凭据过期的会话已经被清掉，重试没有意义） */
+  const restoreFailed = autoConnect.state === 'failed' && autoConnect.code !== 'SESSION_EXPIRED'
+  /** 凭据过期：last-session 已清，账号邮箱还在，表单照常可填 */
+  const sessionExpired = autoConnect.state === 'failed' && autoConnect.code === 'SESSION_EXPIRED'
+  /** 有没有可恢复的「上次连接」（临时断开之后也还在，用来显示「重新连接」） */
+  const reconnectable = lastSession !== null && !connected && !busy && !blocked
 
   const selected = providers.find((item) => item.id === method) ?? null
   const providerName = (id: string): string =>
@@ -162,18 +176,20 @@ export const RemoteSettingsPanel = () => {
     return () => clearInterval(timer)
   }, [qrPending])
 
-  /* ── 3b. 会话恢复（K2）+ 回前台补拍 ──────────────────────────────────
+  /* ── 3b. 会话恢复（K2 + K4）+ 回前台补拍 ─────────────────────────────
    * 用户授权时要切到系统浏览器，App 进后台，进程随时可能被系统杀掉。所以：
-   *   ① 挂载就调一次 `resumeLogin()`：若是被杀进程前发起的那次登录，这里直接续上
+   *   ① 挂载就调一次 `autoConnectNow()`（K4）：上次连过的话这里**静默连回去**，
+   *      用户看到的是账号摘要而不是登录表单 —— 「重启后要重新登录」就是缺了这一步；
+   *   ② 再调一次 `resumeLogin()`：若是被杀进程前发起的那次登录，这里直接续上
    *      （`dsp.remote.pending-login.v1` 里有 qrId，服务端会话跟进程无关）；
-   *   ② `visibilitychange → visible`（用户从浏览器切回来）调 `onAppForeground()`：
+   *   ③ `visibilitychange → visible`（用户从浏览器 / 系统设置切回来）调 `onAppForeground()`：
    *      续登录 + **立刻补一拍**轮询（后台的 setTimeout 会被系统节流，别等 2s 定时器）
    *      + 保活服务自检（系统可能在后台把它杀掉）。
-   *   ③ 挂载顺带探一次保活（`refreshKeepAlive()`，已有的 store 动作，只读 `state.json`）：
-   *      真机上「切后台就被杀、连接都建不起来」时，用户正是**没连上**才需要看到
-   *      通知权限 / 电池优化这两条提示，所以探测不能只挂在 `phase==='ready'` 之后。
-   * 三条路径都是幂等的（数据层单飞），重复触发不会多发请求。 */
+   *   ④ 挂载顺带探一次保活（`refreshKeepAlive()`，只读 `state.json`）：连接建立后会用它
+   *      把前台服务拉起来（权限状态本身在「通用设置 → 后台与权限」里展示）。
+   * 四条路径都是幂等的（数据层单飞），重复触发不会多发请求；也都不 await —— 不挡首屏。 */
   useEffect(() => {
+    fireAndForget(() => useRemoteStore.getState().autoConnectNow())
     fireAndForget(() => useRemoteStore.getState().resumeLogin())
     fireAndForget(() => useRemoteStore.getState().refreshKeepAlive())
     if (typeof document === 'undefined') { return undefined }
@@ -257,22 +273,15 @@ export const RemoteSettingsPanel = () => {
     fireAndForget(() => useRemoteStore.getState().disconnect())
   }
 
-  /**
-   * 拉起「忽略电池优化」授权页。
-   *
-   * ⚠️ **只能在用户点击里调**：Android 10+ 禁止后台弹 Activity，非点击路径调只会白跑。
-   * store 里这条动作自己会 `POST /__ds_keepalive/battery` 再重新读一次 `state.json`，
-   * 所以这里不需要额外刷新状态；用户可能没立刻从系统设置返回，状态以后台回读的为准。
-   */
-  const askBatteryExemption = async (): Promise<void> => {
-    setBatteryAsking(true)
-    try {
-      await useRemoteStore.getState().requestBatteryExemption()
-    } catch {
-      // 数据层已静默（保活是锦上添花，失败不该影响连接，也不该弹红字）
-    } finally {
-      setBatteryAsking(false)
-    }
+  /** 退出登录：清掉本机保存的凭据 + last-session（下次启动不再自动连） */
+  const signOut = (): void => {
+    setPassword('')
+    fireAndForget(() => useRemoteStore.getState().signOut())
+  }
+
+  /** 按盘上的 last-session 再连一次（「上次连接失败」与「临时断开后重连」共用） */
+  const reconnect = (): void => {
+    fireAndForget(() => useRemoteStore.getState().retryAutoConnect())
   }
 
   /* ── 活动登录会话的展示 ─────────────────────────────────────────────── */
@@ -313,65 +322,97 @@ export const RemoteSettingsPanel = () => {
         <div className={styles.description}>{t('remoteSettingsDesc')}</div>
       </div>
 
-      <Field label={t('remoteServerLabel')}>
-        <input
-          className={styles.input}
-          type="url"
-          value={server}
-          disabled={busy || connected}
-          placeholder={DEFAULT_SERVER}
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          onChange={(event) => setServer(event.target.value)}
-          onBlur={() => {
-            // 换了服务器就重拉登录方式（数据层按 serverUrl 缓存，这里只是提前把清单对齐）
-            if (bridge !== 'ready') { return }
-            fireAndForget(() =>
-              useRemoteStore.getState().loadOAuthProviders(server.trim() === '' ? DEFAULT_SERVER : server.trim()),
-            )
-          }}
-        />
-      </Field>
-
-      {/* ── 登录方式：分段标签（选中不发起登录，避免误把用户弹到授权页） ── */}
-      <div className={styles.methodBlock}>
-        <div className={styles.label}>{t('remoteLoginMethodLabel')}</div>
-        <div role="tablist" aria-label={t('remoteLoginMethodLabel')} className={styles.methods}>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={method === 'password'}
-            className={clsx(styles.method, method === 'password' && styles.methodActive)}
-            disabled={busy}
-            onClick={() => setMethod('password')}
-          >
-            {t('remoteLoginMethodPassword')}
-          </button>
-          {providers.map((provider) => (
-            <button
-              key={provider.id}
-              type="button"
-              role="tab"
-              aria-selected={method === provider.id}
-              className={clsx(styles.method, method === provider.id && styles.methodActive)}
-              disabled={!canStartProvider}
-              title={appOnly ? t('remoteLoginAppOnly') : undefined}
-              onClick={() => setMethod(provider.id)}
-            >
-              {provider.displayName}
-            </button>
-          ))}
+      {/* ── 重启后自动恢复（K4）：一条横幅说清「在干什么 / 为什么没连上」 ──────
+       * 三态优先级：正在恢复 > 失败可重试 > 凭据过期 > 有记录但当前没连（临时断开后）。
+       * 失败**不弹红条**（数据层也不写 `state.error`），这里只给一行字 + 一个按钮。 */}
+      {restoring ? (
+        <div className={styles.waiting} role="status">
+          <span className={styles.waitingText}>{t('remoteAutoConnecting')}</span>
         </div>
-        {appOnly ? (
-          <div className={styles.description} role="status">
-            {t(bridge === 'outdated' ? 'remoteLoginAppUpdate' : 'remoteLoginAppOnly')}
+      ) : restoreFailed ? (
+        <div className={styles.waiting} role="status">
+          <span className={styles.waitingText}>{t('remoteAutoConnectFailed')}</span>
+          <Button variant="outlined" size="s" onClick={reconnect}>
+            {t('remoteAutoConnectRetry')}
+          </Button>
+        </div>
+      ) : sessionExpired ? (
+        <div className={styles.errorText} role="status">
+          {t('remoteSessionExpired')}
+        </div>
+      ) : reconnectable ? (
+        <div className={styles.waiting} role="status">
+          <span className={styles.waitingText}>
+            {t('remoteLastSession')} · {lastSession.email} · {lastSession.hostName}
+          </span>
+          <Button variant="primary" size="s" onClick={reconnect}>
+            {t('remoteReconnect')}
+          </Button>
+        </div>
+      ) : null}
+
+      {/* ── 登录表单：**连上了就整块不渲染**（K4 要求「切到远程页不出现登录表单」） ── */}
+      {connected ? null : (
+        <>
+          <Field label={t('remoteServerLabel')}>
+            <input
+              className={styles.input}
+              type="url"
+              value={server}
+              disabled={busy}
+              placeholder={DEFAULT_SERVER}
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              onChange={(event) => setServer(event.target.value)}
+              onBlur={() => {
+                // 换了服务器就重拉登录方式（数据层按 serverUrl 缓存，这里只是提前把清单对齐）
+                if (bridge !== 'ready') { return }
+                fireAndForget(() =>
+                  useRemoteStore.getState().loadOAuthProviders(server.trim() === '' ? DEFAULT_SERVER : server.trim()),
+                )
+              }}
+            />
+          </Field>
+
+          {/* ── 登录方式：分段标签（选中不发起登录，避免误把用户弹到授权页） ── */}
+          <div className={styles.methodBlock}>
+            <div className={styles.label}>{t('remoteLoginMethodLabel')}</div>
+            <div role="tablist" aria-label={t('remoteLoginMethodLabel')} className={styles.methods}>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={method === 'password'}
+                className={clsx(styles.method, method === 'password' && styles.methodActive)}
+                disabled={busy}
+                onClick={() => setMethod('password')}
+              >
+                {t('remoteLoginMethodPassword')}
+              </button>
+              {providers.map((provider) => (
+                <button
+                  key={provider.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={method === provider.id}
+                  className={clsx(styles.method, method === provider.id && styles.methodActive)}
+                  disabled={!canStartProvider}
+                  title={appOnly ? t('remoteLoginAppOnly') : undefined}
+                  onClick={() => setMethod(provider.id)}
+                >
+                  {provider.displayName}
+                </button>
+              ))}
+            </div>
+            {appOnly ? (
+              <div className={styles.description} role="status">
+                {t(bridge === 'outdated' ? 'remoteLoginAppUpdate' : 'remoteLoginAppOnly')}
+              </div>
+            ) : null}
+            {bridge === 'ready' && providers.length === 0 ? (
+              <div className={styles.description}>{t('remoteLoginNoProviders')}</div>
+            ) : null}
           </div>
-        ) : null}
-        {bridge === 'ready' && providers.length === 0 ? (
-          <div className={styles.description}>{t('remoteLoginNoProviders')}</div>
-        ) : null}
-      </div>
 
       {/* ── 邮箱密码 ── */}
       {method === 'password' ? (
@@ -381,7 +422,7 @@ export const RemoteSettingsPanel = () => {
               className={styles.input}
               type="email"
               value={email}
-              disabled={busy || connected}
+              disabled={busy}
               placeholder={t('remoteEmailPlaceholder')}
               autoCapitalize="off"
               autoCorrect="off"
@@ -395,7 +436,7 @@ export const RemoteSettingsPanel = () => {
               className={styles.input}
               type="password"
               value={password}
-              disabled={busy || connected}
+              disabled={busy}
               placeholder={t('remotePasswordPlaceholder')}
               autoComplete="off"
               onChange={(event) => setPassword(event.target.value)}
@@ -408,18 +449,16 @@ export const RemoteSettingsPanel = () => {
             />
           </Field>
 
-          {connected ? null : (
-            <div className={styles.actions}>
-              <Button
-                variant="primary"
-                size="m"
-                disabled={!canConnect}
-                onClick={() => void connectWithPassword()}
-              >
-                {t(busy ? 'remoteConnecting' : 'remoteConnect')}
-              </Button>
-            </div>
-          )}
+          <div className={styles.actions}>
+            <Button
+              variant="primary"
+              size="m"
+              disabled={!canConnect}
+              onClick={() => void connectWithPassword()}
+            >
+              {t(busy ? 'remoteConnecting' : 'remoteConnect')}
+            </Button>
+          </div>
         </>
       ) : selected === null ? (
         <div className={styles.description}>{t('remoteLoginNoProviders')}</div>
@@ -507,12 +546,18 @@ export const RemoteSettingsPanel = () => {
       ) : null}
 
       {cancelled ? <div className={styles.description}>{t('remoteLoginCancelled')}</div> : null}
+        </>
+      )}
 
-      {/* ── 已连接：账号 / 登录方式 + 刷新会话 / 断开 ── */}
+      {/* ── 已连接：账号 / 登录方式 + 刷新会话 / 断开 / 退出登录 ── */}
       {connected ? (
         <div className={styles.accountCard}>
           <div className={styles.status}>
-            <StatusChip label={t('remoteAccount')} value={account?.email ?? '—'} />
+            <StatusChip label={t('remoteAccount')} value={account?.email ?? lastSession?.email ?? '—'} />
+            <StatusChip
+              label={t('remoteHostLabel')}
+              value={lastSession?.hostName ?? '—'}
+            />
             <StatusChip label={t('remoteLoginMethodLabel')} value={t(loginMethodLabel(account?.loginMethod))} />
           </div>
           <div className={styles.actions}>
@@ -523,10 +568,14 @@ export const RemoteSettingsPanel = () => {
             >
               {t('remoteRefreshSessions')}
             </Button>
-            <Button variant="outlined" size="m" onClick={disconnect}>
+            <Button variant="outlined" size="m" onClick={disconnect} title={t('remoteDisconnectHint')}>
               {t('remoteDisconnect')}
             </Button>
+            <Button variant="outlined" size="m" onClick={signOut} title={t('remoteSignOutHint')}>
+              {t('remoteSignOut')}
+            </Button>
           </div>
+          <div className={styles.description}>{t('remoteDisconnectHint')}</div>
         </div>
       ) : null}
 
@@ -542,55 +591,20 @@ export const RemoteSettingsPanel = () => {
         </div>
       ) : null}
 
-      {/* ── 保活状态区（K3）：原生前台服务的三态 + 两条权限提示 ────────────
-       * 只在 `supported:true` 时出现（普通浏览器 / 旧 APK 没有 `/__ds_keepalive/*`）。
-       * 真机上「App 一切后台就被杀、登录都做不完」时，用户往往**还没连上**，
-       * 所以这一块必须不依赖 `phase==='ready'`。
-       * 通知权限没有可调的原生「申请」端点（`POST_NOTIFICATIONS` 只能由原生在主线程请求），
-       * 所以这里只给文字说明；电池优化有端点，但**只能在点击里**调。 */}
+      {/* ── 后台与权限：**已搬到通用设置**（K4）。这里只留一句小字 + 一个跳过去的入口：
+       * 通知权限 / 电池优化 / 自启动 / 精确定时 / 悬浮窗属于整个 App 的后台存活能力，
+       * 不只服务远程连接 —— 放在这里等于暗示「不连远程就不需要」。
+       * 只在原生真的支持 `/__ds_keepalive/*` 时出现（浏览器 / 旧 APK 那边整节也不显示，
+       * 指过去只会落空）。 */}
       {keepAlive !== null && keepAlive.supported ? (
-        <div className={styles.keepAlive} role="group" aria-label={t('remoteKeepAliveTitle')}>
-          <div className={styles.keepAliveHead}>
-            <span className={styles.keepAliveTitle}>{t('remoteKeepAliveTitle')}</span>
-            <span
-              className={clsx(
-                styles.chip,
-                keepAlive.running && styles.chipOn,
-                !keepAlive.running && keepAlive.shouldRun && styles.chipError,
-              )}
-            >
-              <span className={styles.chipLabel}>{t('remoteStatus')}</span>
-              <span className={styles.chipValue}>
-                {t(keepAliveStateLabel(keepAlive.running, keepAlive.shouldRun))}
-              </span>
-            </span>
+        <>
+          <div className={styles.actions}>
+            <Button variant="outlined" size="s" onClick={() => openSettings('general')}>
+              {t('remoteKeepAliveMovedAction')}
+            </Button>
           </div>
-
-          {keepAlive.notificationsGranted ? null : (
-            <>
-              <div className={styles.keepAliveWarn} role="status">
-                {t('remoteKeepAliveNotifyMissing')}
-              </div>
-              <div className={styles.description}>{t('remoteKeepAliveNotifyHowTo')}</div>
-            </>
-          )}
-
-          {keepAlive.batteryExempt ? null : (
-            <div className={styles.keepAliveRow}>
-              <span className={styles.keepAliveWarn}>{t('remoteKeepAliveBatteryMissing')}</span>
-              <Button
-                variant="outlined"
-                size="s"
-                disabled={batteryAsking}
-                onClick={() => void askBatteryExemption()}
-              >
-                {t(batteryAsking ? 'remoteKeepAliveBatteryAsking' : 'remoteKeepAliveBatteryAction')}
-              </Button>
-            </div>
-          )}
-
-          <div className={styles.description}>{t('remoteKeepAliveHint')}</div>
-        </div>
+          <div className={styles.description}>{t('remoteKeepAliveMovedHint')}</div>
+        </>
       ) : null}
     </div>
   )
@@ -639,19 +653,6 @@ const phaseLabel = (phase: string): TranslationKey => {
   if (phase === 'ready') return 'remotePhaseReady'
   if (phase === 'error') return 'remotePhaseError'
   return 'remotePhaseIdle'
-}
-
-/**
- * 保活三态 → 徽标文案 key。
- *
- * 三个状态来自原生快照的两个独立布尔（`running` / `shouldRun`），不是三选一枚举：
- *   - `running`            → 服务在跑；
- *   - `shouldRun && !running` → 该跑却没跑（系统在后台把它杀了），要提示用户；
- *   - 其它                → 没连上、本来就不该跑（未启用）。
- */
-const keepAliveStateLabel = (running: boolean, shouldRun: boolean): TranslationKey => {
-  if (running) return 'remoteKeepAliveRunning'
-  return shouldRun ? 'remoteKeepAliveEnabledIdle' : 'remoteKeepAliveInactive'
 }
 
 type Translate = ReturnType<typeof useTranslate>

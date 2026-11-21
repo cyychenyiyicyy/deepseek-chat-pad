@@ -1,0 +1,719 @@
+/*
+ * 工具卡：一行摘要（图标 + 动词 + 要点 + 状态），点开在下方长出详情。
+ *
+ * 视觉基线取 dsh-Go 的 32dp 工具行 + 「代码井」详情，但**不**照搬它的类别配色：
+ * 这里只有一层中性底色，成功是安静的，只有「失败」用错误色。理由是本地会话页
+ * 一屏里工具调用可能十几个，彩色块会把正文压没（见 input-L2 报告的「未抄什么」）。
+ */
+
+.card {
+  margin-bottom: 6px;
+  border-radius: 12px;
+  overflow: hidden;
+
+  &:first-child {
+    margin-top: 2px;
+  }
+}
+
+.cardOpen {
+  background-color: var(--dsw-alias-bg-layer-2);
+}
+
+/* ---------- 头部：一整行可点 ---------- */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+
+  @media (hover: hover) {
+    &:hover {
+      background-color: var(--dsw-alias-interactive-bg-hover);
+    }
+  }
+
+  &:active {
+    background-color: var(--dsw-alias-interactive-bg-active);
+  }
+}
+
+.headerStatic {
+  cursor: default;
+
+  @media (hover: hover) {
+    &:hover {
+      background-color: transparent;
+    }
+  }
+}
+
+/* 图标块：连续圆角方块（工具是「操作」而不是「人」，所以不用圆头像） */
+.glyph {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.glyphFailed {
+  background-color: var(--dsw-alias-interactive-bg-hover-danger);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.cardOpen .glyph {
+  background-color: var(--dsw-alias-bg-base);
+}
+
+.verb {
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+}
+
+.dot {
+  flex-shrink: 0;
+  margin: 0 -4px;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.tip {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 命令 / 路径 / 模式串：等宽，一眼能看出这是「原文」而不是描述 */
+.tipCode {
+  font-family: var(--ds-font-family-code);
+  font-size: 12.5px;
+}
+
+.tipFailed {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.extra {
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow: hidden;
+  font-size: 11.5px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.trail {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  margin-left: 2px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 运行中：细环转圈（不用大 spinner，一行摘要里不喧哗） */
+.spinner {
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--dsw-alias-border-l2);
+  border-top-color: var(--dsw-alias-brand-text);
+  border-radius: 50%;
+  animation: toolCardSpin 0.9s linear infinite;
+}
+
+@keyframes toolCardSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.done {
+  display: flex;
+  color: var(--dsw-alias-label-caption);
+}
+
+.failed {
+  display: flex;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.failedText {
+  font-size: 11.5px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-error-primary);
+  white-space: nowrap;
+}
+
+/* 图片缩略图也在这一层：不展开也能看到（用户要的就是「图片要能看到」） */
+.chevron {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ---------- 运行中的骨架 ---------- */
+
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 10px 10px 36px;
+}
+
+.skeletonBar {
+  height: 8px;
+  border-radius: 4px;
+  background-color: var(--dsw-alias-bg-skeleton);
+  animation: toolCardPulse 1.6s ease-in-out infinite;
+}
+
+.skeletonBar:nth-child(2) {
+  width: 62%;
+  animation-delay: 0.2s;
+}
+
+@keyframes toolCardPulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+/* ---------- 详情：代码井 ---------- */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px 10px 10px 36px;
+  font-size: 12.5px;
+  line-height: 19px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sectionLabel {
+  font-size: 11px;
+  line-height: 16px;
+  letter-spacing: 0.02em;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+}
+
+/* 长的单行/多行原文：等宽 + 井 */
+.code {
+  box-sizing: border-box;
+  max-height: 260px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background-color: var(--dsw-alias-markdown-code-block);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  line-height: 18px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  white-space: pre;
+  user-select: text;
+  tab-size: 2;
+}
+
+.codeWrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.command {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.promptSign {
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-caption);
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+}
+
+.commandText {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--ds-font-family-code);
+  font-size: 12.5px;
+  line-height: 19px;
+  color: var(--dsw-alias-label-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.metaLine {
+  font-family: var(--ds-font-family-code);
+  font-size: 11.5px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* 展开全部 / 收起 */
+.more {
+  align-self: flex-start;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-brand-text);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+/* ---------- diff ---------- */
+
+.diff {
+  box-sizing: border-box;
+  max-height: 300px;
+  padding: 6px 0;
+  border-radius: 8px;
+  background-color: var(--dsw-alias-markdown-code-block);
+  overflow: auto;
+  overscroll-behavior: contain;
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.diffFile {
+  padding: 2px 10px 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.diffLine {
+  display: flex;
+  gap: 6px;
+  padding: 0 10px;
+  white-space: pre;
+  user-select: text;
+}
+
+.diffSign {
+  flex-shrink: 0;
+  width: 8px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.diffText {
+  min-width: 0;
+  color: var(--dsw-alias-label-primary);
+}
+
+.diffAdd {
+  background-color: rgba(34, 197, 94, 0.13);
+
+  & .diffSign {
+    color: var(--dsw-static-green-500);
+  }
+}
+
+.diffDel {
+  background-color: rgba(242, 90, 90, 0.13);
+
+  & .diffSign {
+    color: var(--dsw-alias-state-error-primary);
+  }
+}
+
+/* ---------- 读文件：行号井 ---------- */
+
+.lines {
+  box-sizing: border-box;
+  max-height: 260px;
+  padding: 6px 0;
+  border-radius: 8px;
+  background-color: var(--dsw-alias-markdown-code-block);
+  overflow: auto;
+  overscroll-behavior: contain;
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.line {
+  display: flex;
+  gap: 10px;
+  padding: 0 10px;
+  white-space: pre;
+  user-select: text;
+}
+
+.lineNumber {
+  flex-shrink: 0;
+  min-width: 2.5ch;
+  color: var(--dsw-alias-label-caption);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.lineText {
+  color: var(--dsw-alias-label-primary);
+}
+
+/* ---------- 搜索 / 联网：条目列表 ---------- */
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.groupPath {
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.hit {
+  display: flex;
+  gap: 8px;
+  padding-left: 10px;
+  min-width: 0;
+}
+
+.hitLine {
+  flex-shrink: 0;
+  min-width: 2.5ch;
+  color: var(--dsw-alias-label-caption);
+  font-family: var(--ds-font-family-code);
+  font-size: 11.5px;
+  line-height: 18px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.hitText {
+  min-width: 0;
+  font-family: var(--ds-font-family-code);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+
+.result {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sourceTitle {
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.sourceLink {
+  font-size: 11.5px;
+  line-height: 17px;
+  color: var(--dsw-alias-brand-text);
+  overflow-wrap: anywhere;
+  text-decoration: none;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.sourceSnippet {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.markdownBody {
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ---------- 参数键值表 ---------- */
+
+.args {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.argRow {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.argKey {
+  flex-shrink: 0;
+  width: 36%;
+  max-width: 160px;
+  font-family: var(--ds-font-family-code);
+  font-size: 11.5px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.argValue {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+  user-select: text;
+  white-space: pre-wrap;
+}
+
+.argValueLong {
+  font-family: var(--ds-font-family-code);
+  font-size: 11.5px;
+  line-height: 17px;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.empty {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* ---------- 待办 ---------- */
+
+.todoRow {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.todoSign {
+  flex-shrink: 0;
+  width: 12px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  user-select: none;
+}
+
+.todoText {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.todoDone {
+  color: var(--dsw-alias-label-tertiary);
+  text-decoration: line-through;
+}
+
+/* ---------- 图片缩略图 ---------- */
+
+.images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 10px 8px 36px;
+}
+
+.thumb {
+  position: relative;
+  display: block;
+  box-sizing: border-box;
+  width: 96px;
+  height: 96px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 10px;
+  background-color: var(--dsw-alias-markdown-code-block);
+  overflow: hidden;
+  cursor: zoom-in;
+
+  &:focus-visible {
+    outline: 2px solid var(--dsw-alias-brand-primary);
+    outline-offset: 2px;
+  }
+}
+
+.thumbImage {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 拿不到像素时的占位：图标 + 文件名，不留空框 */
+.thumbPlaceholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  height: 100%;
+  padding: 4px;
+  box-sizing: border-box;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.thumbName {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 10.5px;
+  line-height: 14px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 全屏查看层 ---------- */
+
+.viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.88);
+  cursor: zoom-out;
+}
+
+.viewerImage {
+  max-width: 92vw;
+  max-height: 86vh;
+  object-fit: contain;
+  user-select: none;
+}
+
+.viewerCaption {
+  position: absolute;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  left: 50%;
+  max-width: 80vw;
+  transform: translateX(-50%);
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.viewerClose {
+  position: absolute;
+  top: calc(12px + var(--ds-top-offset));
+  right: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background-color: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+
+  &:active {
+    background-color: rgba(255, 255, 255, 0.22);
+  }
+}
+
+/* ---------- 窄屏 ---------- */
+
+@media not all and (min-width: 768px) {
+  .header {
+    min-height: 36px;
+    gap: 7px;
+  }
+
+  .body,
+  .skeleton,
+  .images {
+    padding-left: 8px;
+  }
+
+  .thumb {
+    width: 84px;
+    height: 84px;
+  }
+
+  .tip,
+  .verb {
+    font-size: 13.5px;
+  }
+}

@@ -16,11 +16,14 @@
  * 2. **三个会话动作**：`refreshSessions()` / `openSession(id)` / `loadOlder()`。
  * 3. **聊天动作**：`send(text)`（乐观上屏 + `session/prompt`）/ `cancel()` / `respondApproval()`。
  * 4. **把每一帧归约成 `items: ChatItem[]`**（真正干活的是 `adapter.ts`）。
+ * 5. **重启后自动连回来**（K4）：`autoConnectNow()` 读 `dsp.remote.last-session.v1`，
+ *    按 `autoConnect.planAutoConnect()` 的判定静默重连（必要时先刷 token）。
  *
  * ## 三条纪律
  *
- * - **不持久化**：远程会话不落 SQLite / IndexedDB / localStorage（方案 §4.3-②），
- *   连上就有、断开就没了。账号 token 是 S3 的 `storage.ts` 的事，这里不碰。
+ * - **远程会话内容不落盘**：远程会话记录不写 SQLite / IndexedDB（方案 §4.3-②），连上就有、
+ *   断开就没了。落盘的只有 S3 的凭据（`storage.ts`）与「上次连的是哪台 Host」
+ *   （`autoConnect.ts` 的 `dsp.remote.last-session.v1`，**不含 token**）。
  * - **不吞错、也不乱抛**：所有 action 都在内部 `catch`，把可读错误写进 `state.error`
  *   （`{code, message}`，`code` 是机器码、`message` 是中文），需要文案键时用
  *   `describeRemoteError()`。UI 用 `fireAndForget(() => store.getState().x())` 调用不会炸。
@@ -36,6 +39,15 @@
 
 import { create } from 'zustand'
 
+import {
+  clearLastSession,
+  describeLastSession,
+  isNativeShell,
+  planAutoConnect,
+  readLastSession,
+  writeLastSession,
+  type LastSession,
+} from './autoConnect.js'
 import {
   buildLinkOptions,
   createRemoteClient,
@@ -65,9 +77,19 @@ import {
   isRemoteApiError,
   normalizeServerUrl,
   oauthProviders as oauthProvidersApi,
+  refreshToken as refreshTokenApi,
   type OAuthProvider,
 } from './serverApi.js'
-import { loadServers } from './storage.js'
+import {
+  applyControlFrame,
+  bindSessionControls,
+  CONTROL_STREAM_ENDPOINT,
+  ingestEventsItem,
+  noteControlUnavailable,
+  selectControlSession,
+  unbindSessionControls,
+} from './sessionControls.js'
+import { loadAccounts, loadServers, removeAccount, upsertAccount } from './storage.js'
 import {
   DEFAULT_HISTORY_PAGE_SIZE,
   cancelSession,
@@ -185,6 +207,25 @@ export interface RemotePendingLogin {
   expiresAt: number
 }
 
+/**
+ * [契约之外的附加] **重启后自动恢复连接**的进度（K4）。
+ *
+ * 这条状态专门表达「用户什么都没点，我们在后台试着连回去」：
+ *   - `idle`       —— 没在恢复（没有 last-session，或本来就不在原生壳里）；
+ *   - `connecting` —— 正在静默重连（首屏照常渲染，`phase` 同时是 `connecting`）；
+ *   - `done`       —— 恢复成功（手动登录成功也记这里，两者都是「现在连上了」）；
+ *   - `failed`     —— 上次连接没连上。**不写 `error`、不弹红条**，界面只显示一行
+ *                     「上次连接失败，点击重试」；`code === 'SESSION_EXPIRED'` 时文案换成
+ *                     「登录已过期，请重新登录」（此时 last-session 已清，账号邮箱还在）。
+ */
+export interface RemoteAutoConnectState {
+  state: 'idle' | 'connecting' | 'done' | 'failed'
+  /** 失败原因码（`SESSION_EXPIRED` = 凭据过期；其余是这次连接本身的失败码） */
+  code?: string
+  /** 失败时的可读说明（中文，诊断 / 兜底用；界面优先按 code 取 i18n 文案） */
+  message?: string
+}
+
 export interface RemoteState {
   /**
    * `waiting-auth` 是 K2 新增的：用户在系统浏览器里授权，本机**没有连接**，只是在轮询
@@ -201,7 +242,16 @@ export interface RemoteState {
   streaming: boolean
   pendingApprovals: { eventId: string; title: string; detail?: string }[]
   connect(serverUrl: string, email: string, password: string): Promise<void>
+  /**
+   * **临时断开**：拆连接、停保活、复位界面，但**保留** `dsp.remote.last-session.v1`
+   * —— 下次启动仍然会自动连回来。要清凭据请用 `signOut()`。
+   */
   disconnect(): void
+  /**
+   * **退出登录**：断开 + 清 `last-session` + 删掉本机的设备 token（`storage.removeAccount`）。
+   * 与 `disconnect()` 的区别就是「下次还要不要自动连」。
+   */
+  signOut(): void
   refreshSessions(): Promise<void>
   openSession(id: string): Promise<void>
   loadOlder(): Promise<void>
@@ -260,6 +310,25 @@ export interface RemoteState {
   requestBatteryExemption(): Promise<void>
   /** 取消登录：停轮询、清持久化、关授权页，会话标成 `cancelled` */
   cancelProviderLogin(): Promise<void>
+
+  /* ── [重启后自动恢复] 契约之外的附加（K4） ─────────────────────────────
+   * 三件事：读盘上那条 last-session、静默重连、失败给一次性重试。
+   * 挂载点在 `RemoteChatView`（远程页）与 `RemoteSettingsPanel`（设置页），都是幂等单飞。 */
+
+  /** 上次连上的会话（`dsp.remote.last-session.v1` 的投影；`null` = 没有可恢复的） */
+  lastSession: LastSession | null
+  /** 自动恢复的进度（失败**不写** `error`，只落这里，见 `RemoteAutoConnectState`） */
+  autoConnect: RemoteAutoConnectState
+  /**
+   * 启动时静默恢复上次连接（**幂等单飞**，且每个进程只自动试一次）。
+   *
+   * 不阻塞首屏：调用方 `fireAndForget` 即可。分支见 `autoConnect.planAutoConnect()`：
+   * 没有记录 → 什么都不做；凭据过期 → 清记录 + `failed/SESSION_EXPIRED`；
+   * 需要刷 token → 先 `POST /api/v1/auth/refresh` 再连；其余直接连。
+   */
+  autoConnectNow(): Promise<void>
+  /** 用户点「重试」：无视「本进程已试过」，再按 last-session 连一次（`disconnect()` 之后也用它重连） */
+  retryAutoConnect(): Promise<void>
 }
 
 /**
@@ -300,9 +369,16 @@ interface ActiveSession {
   hasMore: boolean
   follow: RemoteStreamHandle | null
   events: RemoteStreamHandle | null
+  /** `session/control` 投影流（标题 / 模型 / 权限 / 队列 / 提问投影），拿得到才非 null。 */
+  control: RemoteStreamHandle | null
   /** `$events` 的 `ready.clientId`（应答审批必须带）。 */
   eventClientId: string | null
   sinks: Map<string, StreamSink>
+  /**
+   * 外部（别的模块自己开的流）按 streamId 注册的接收器，见 `registerRemoteStreamSink`。
+   * 与 `sinks` 分开存：内部审流 / 会话流的行为必须**逐字节不变**，内部永远优先。
+   */
+  listeners: Map<string, Set<(payload: StreamEventPayload) => void>>
   /** 句柄还没拿到、帧先到了的流：按 streamId 缓冲，注册 sink 时再倒出来。 */
   unrouted: Map<string, StreamEventPayload[]>
   /** 收尾标记：`link.onState('closed')` 不能把主动断开报成错误。 */
@@ -349,6 +425,19 @@ const abortResume = (): void => {
   controller?.abort()
 }
 
+/* ── 重启后自动恢复的模块级上下文（不进 zustand：不是渲染数据） ───────── */
+
+/** 单飞：远程页与设置页可能同时挂载，只允许一条恢复流程在飞 */
+let autoConnectInFlight: Promise<void> | null = null
+/**
+ * 本次进程是否已经**自动**试过一次。
+ *
+ * 为什么要有：挂载点不止一个（`RemoteChatView` + `RemoteSettingsPanel`），失败之后如果每个
+ * 挂载点都再来一轮，就会出现「刚进来就一直重连、一直失败」的观感。失败后要用户点「重试」
+ * （`retryAutoConnect()` 会把这里清掉）；`disconnect()` / `signOut()` 之后也不许再自动连。
+ */
+let autoConnectSettled = false
+
 /** `$events` 等到 `ready` 的预算（超时即认为这条连接不可用：审批应答没有 clientId）。 */
 const EVENTS_READY_TIMEOUT_MS = 10_000
 /** 等 `session/follow` 首帧快照的预算（首帧可能很大，给足；参考 client-core 的 60 s）。 */
@@ -368,6 +457,9 @@ const INITIAL_STATE = {
   qr: null as RemoteProviderLoginState | null,
   pendingLogin: null as RemotePendingLogin | null,
   keepAlive: null as KeepAliveSnapshot | null,
+  // 注意：`lastSession` 不在 INITIAL_STATE 里 —— 它属于**盘上的持久化状态**，不是界面状态。
+  // `disconnect()`（临时断开）复位界面时必须把它读回来（见那里的注释）。
+  autoConnect: { state: 'idle' } as RemoteAutoConnectState,
 }
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -406,6 +498,13 @@ const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number, code: stri
 
 const toTransport = (value: string): RemoteState['transport'] =>
   value === 'relay' || value === 'lan' || value === 'p2p' || value === 'turn' ? value : null
+
+/** 取错误码（外部流 / 能力探测只关心「是不是不支持」，拿不到码就当未知）。 */
+const errorCodeOf = (error: unknown): string | undefined => {
+  if (isRemoteApiError(error)) return error.code
+  const code = (error as { code?: unknown } | null)?.code
+  return typeof code === 'string' && code.length > 0 ? code : undefined
+}
 
 /** 把错误写进 `state.error`（不动 phase：操作级失败，连接还在）。 */
 const fail = (error: unknown): void => {
@@ -506,6 +605,8 @@ const routeStream = (session: ActiveSession, streamId: string, payload: StreamEv
     deliver(sink, payload)
     return
   }
+  // 外部注册的接收器（`registerRemoteStreamSink`）：整包投递，含 `closed`；内部 sink 优先。
+  if (routeToStreamListeners(session.listeners, streamId, payload)) return
   // 句柄还没返回、帧先到：按 streamId 缓冲（这个 id 由 `core/rpcMux.ts` 生成并复用，能对上）。
   const buffered = session.unrouted.get(streamId)
   if (buffered === undefined) session.unrouted.set(streamId, [payload])
@@ -535,6 +636,122 @@ const closeStreamQuietly = async (session: ActiveSession, handle: RemoteStreamHa
   } catch {
     // 关流失败不影响本地收尾：链路可能已经断了。
   }
+}
+
+/* ── 外部流订阅（给 W1 的 `workspace/follow` 等「自己开的流」用） ─────────
+ *
+ * 为什么需要：`link.onStreamEvent` 是**链路级**回调，所有流帧都先落到本文件的
+ * `routeStream()`；而本文件只认识它自己开的那三条（`$events` / `session/follow` /
+ * `session/control`）。别的模块自己 `openStream()` 之后拿到的帧，原先只能躺在
+ * `unrouted` 缓冲里等一个永远不会来的 sink。
+ *
+ * 纪律：
+ *   - **additive**：内部 `sinks` 仍优先（同 streamId 的两条审流 / 会话流行为不变）；
+ *   - 取消函数**幂等**：重复调用只生效一次；
+ *   - 流关闭时自动摘掉（`closed` 帧照样投给接收器一次）；
+ *   - 没连上时返回**空取消函数**（不抛）：调用方可以无条件 `cleanup()`。
+ */
+
+/** 把一条流的所有外部接收器摘掉，并且（可选）先投一帧 `closed`。 */
+const drainListeners = (session: ActiveSession, payload?: StreamEventPayload): void => {
+  const buckets = [...session.listeners.values()]
+  session.listeners.clear()
+  if (payload === undefined) return
+  for (const bucket of buckets) {
+    for (const listener of bucket) {
+      try {
+        listener(payload)
+      } catch {
+        // 外部回调异常不影响收尾
+      }
+    }
+  }
+}
+
+/** 外部接收器的集合类型（`ActiveSession.listeners` 的值） */
+type StreamListener = (payload: StreamEventPayload) => void
+type StreamListenerMap = Map<string, Set<StreamListener>>
+
+/**
+ * 把一帧投给某条流的外部接收器；返回 `true` 表示**被吃掉了**（调用方不要再缓冲）。
+ *
+ * 抽成导出函数是为了让「多条接收器各收一份 + 关闭即摘除」这段有单测
+ * （`__selftest__/sessionControls.selftest.mts` 的 F 组），`routeStream()` 里只有一行调用 ——
+ * 一份实现，不会出现「测试里对、线上不对」。
+ */
+export const routeToStreamListeners = (
+  listeners: StreamListenerMap,
+  streamId: string,
+  payload: StreamEventPayload,
+): boolean => {
+  const bucket = listeners.get(streamId)
+  if (bucket === undefined || bucket.size === 0) return false
+  // 复制一份再遍历：回调里可能自己取消注册
+  for (const listener of [...bucket]) {
+    try {
+      listener(payload)
+    } catch {
+      // 外部回调异常不能打断入站分发
+    }
+  }
+  // 流关闭即摘掉全部接收器（一次性的东西不该留着下次连接误用）
+  if (payload.type === 'closed') listeners.delete(streamId)
+  return true
+}
+
+/**
+ * 为任意 `streamId` 注册一个接收器；返回**幂等**的取消函数。
+ *
+ * ```ts
+ * const handle = await link.openStream('workspace/follow', { args: {} })
+ * const cancel = registerRemoteStreamSink(handle.streamId, (payload) => {
+ *   if (payload.type === 'closed') { …, cancel(), 重开流 }
+ *   else if (payload.hasValue) { … }
+ * })
+ * ```
+ *
+ * 同 streamId 允许多个接收器（**不抛错**，它们按注册顺序各收一份整包 payload）；
+ * 卸载时机：自己调返回的函数，或流关闭 / 断开连接（都会自动摘掉）。
+ */
+export const registerRemoteStreamSink = (
+  streamId: string,
+  onPayload: (payload: StreamEventPayload) => void,
+): (() => void) => {
+  const session = active
+  if (session === null || streamId.length === 0) return () => undefined
+  let bucket = session.listeners.get(streamId)
+  if (bucket === undefined) {
+    bucket = new Set()
+    session.listeners.set(streamId, bucket)
+  }
+  const listeners = bucket
+  listeners.add(onPayload)
+
+  let released = false
+  const release = (): void => {
+    if (released) return
+    released = true
+    listeners.delete(onPayload)
+    // 只剩自己这一份了就整条删掉（避免按 streamId 无限堆积空集合）
+    if (listeners.size === 0 && session.listeners.get(streamId) === listeners) {
+      session.listeners.delete(streamId)
+    }
+  }
+
+  // 帧比注册先到（`openStream()` 还没 resolve 时链路就把首帧推来了）：按顺序倒出来。
+  const buffered = session.unrouted.get(streamId)
+  if (buffered !== undefined) {
+    session.unrouted.delete(streamId)
+    for (const payload of buffered) {
+      try {
+        onPayload(payload)
+      } catch {
+        // 同 routeStream：外部回调异常不影响分发
+      }
+      if (payload.type === 'closed' || released) break
+    }
+  }
+  return release
 }
 
 /* ── 会话列表投影 ─────────────────────────────────────────────────────── */
@@ -597,8 +814,14 @@ const applyForwardedSessionEvent = (event: ForwardedSessionEvent): void => {
 
 type PickedHost = RemoteHost & { identityKey: string }
 
-/** 挑一台可连的 Host（在线优先）；公钥缺失直接 fail-closed —— Noise IK 没有它就握不上手。 */
-const pickHost = (hosts: RemoteHost[]): PickedHost => {
+/**
+ * 挑一台可连的 Host（在线优先）；公钥缺失直接 fail-closed —— Noise IK 没有它就握不上手。
+ *
+ * `preferredHostId` 来自 last-session：**上次连的是哪台就连回哪台**（多台 Host 时不能让
+ * 「列表里第一台在线的」把用户悄悄换到另一台机器上）。优先级：
+ *   上次那台且在线 → 任意在线 → 上次那台（离线也认，让用户看到真实的连接失败）→ 第一台。
+ */
+const pickHost = (hosts: RemoteHost[], preferredHostId?: string): PickedHost => {
   const usable = hosts.filter(host => host.identityMismatch !== true)
   if (usable.length === 0) {
     if (hosts.length > 0) {
@@ -606,7 +829,9 @@ const pickHost = (hosts: RemoteHost[]): PickedHost => {
     }
     throw new RemoteApiError('NO_HOST', '这个账号下没有可连接的 Host：请先在电脑上的 DSH 里开启远程访问并注册设备')
   }
-  const picked = usable.find(host => host.online === true) ?? usable[0]!
+  const preferred = preferredHostId === undefined ? undefined : usable.find(host => host.deviceId === preferredHostId)
+  const preferredOnline = preferred?.online === true ? preferred : undefined
+  const picked = preferredOnline ?? usable.find(host => host.online === true) ?? preferred ?? usable[0]!
   if (picked.identityKey === undefined || picked.identityKey.length === 0) {
     throw new RemoteApiError(
       'HOST_IDENTITY_MISSING',
@@ -635,6 +860,9 @@ const openEventsStream = async (session: ActiveSession): Promise<void> => {
       }
       const forwarded = forwardedSessionEvent(value)
       if (forwarded !== undefined) applyForwardedSessionEvent(forwarded)
+      // 会话内控制（W2）：`user-questions/request` 要在 `attachWait` 里抢窗口，
+      // 所以和「落时间线」分开投喂 —— 时间线归 adapter，应答状态归 sessionControls。
+      ingestEventsItem(value, session.sessionId)
       if (session.sessionId !== null) {
         const next = reduceEventsItem(session.transcript.items, value, session.sessionId)
         if (next !== session.transcript.items) {
@@ -658,6 +886,41 @@ const openEventsStream = async (session: ActiveSession): Promise<void> => {
   await withTimeout(ready.promise, EVENTS_READY_TIMEOUT_MS, 'EVENT_STREAM_NOT_READY', '等待 $events ready 超时')
 }
 
+/**
+ * 打开 `session/control` 投影流（W2）：会话标题 / 模型 / 权限 / 队列（`inbox`）/ 提问投影
+ * 全部从这一条流来（input-B §2.5，`harness-alpha-client.ts:1439-1471`）。
+ *
+ * **不 await、失败静默**：它是「补充信息」而不是连接前提（没有它照样能聊）。
+ * `METHOD_NOT_FOUND` / `CAPABILITY_NOT_SUPPORTED` 时只把 UI 的信息入口关掉，不写 `state.error`。
+ *
+ * 注意 `session/control` 与 `$events` 是两条独立的流：前者是「状态投影」，后者是「需要应答的
+ * waterfall」。两边都不做重放：断线后重新开流读 baseline（`docs/protocol.md:1854-1860`）。
+ */
+const openControlStream = async (session: ActiveSession): Promise<void> => {
+  if (session.control !== null) return
+  let closed = false
+  const sink: StreamSink = {
+    onValue: (value) => {
+      applyControlFrame(value)
+    },
+    onClosed: (reason, failure) => {
+      closed = true
+      session.control = null
+      if (reason === 'failed') noteControlUnavailable(failure?.code)
+    },
+  }
+  try {
+    const handle = await openWithSink(
+      session,
+      () => session.link.openStream(CONTROL_STREAM_ENDPOINT, { args: {} }, { timeoutMs: 30_000 }),
+      sink,
+    )
+    session.control = closed ? null : handle
+  } catch (error) {
+    noteControlUnavailable(errorCodeOf(error))
+  }
+}
+
 /** 拆掉当前连接（幂等；主动断开时不能把 `closed` 报成错误）。 */
 const shutdown = async (): Promise<void> => {
   const session = active
@@ -666,11 +929,17 @@ const shutdown = async (): Promise<void> => {
   session.closing = true
   session.sinks.clear()
   session.unrouted.clear()
+  // 外部接收器要先收到一次「连不上了」，否则它们会一直等一个永远不会来的帧
+  drainListeners(session, { type: 'closed', reason: 'peer-disconnected' })
   await closeStreamQuietly(session, session.follow)
   await closeStreamQuietly(session, session.events)
+  await closeStreamQuietly(session, session.control)
   session.follow = null
   session.events = null
+  session.control = null
   session.eventClientId = null
+  // 会话内控制的状态（模型 / 权限 / 队列 / 提问认领）都属于这条连接：一起作废
+  unbindSessionControls()
   try {
     session.link.close()
   } catch {
@@ -721,20 +990,73 @@ const stopKeepAliveFlow = (): void => {
     .catch(() => undefined)
 }
 
+/* ── 上次连接（K4）：连上了就把「连的是谁」记下来 ───────────────────────
+ * 只记非敏感字段（服务器 / 邮箱 / Host 标识 / 能力快照），token 仍然只在 `storage.ts`。
+ * 写盘失败（配额满 / 隐私模式）**不影响连接结果**：这一次照常用，只是下次启动恢复不了。 */
+
+interface RememberLastSessionInput {
+  serverUrl: string
+  account: Pick<RemoteAccount, 'email'>
+  host: Pick<RemoteHost, 'deviceId' | 'name'>
+  capabilities: readonly string[]
+  transport: string
+}
+
+const rememberLastSession = (input: RememberLastSessionInput): void => {
+  const saved = writeLastSession({
+    serverUrl: input.serverUrl,
+    email: input.account.email,
+    hostDeviceId: input.host.deviceId,
+    hostName: input.host.name,
+    capabilities: input.capabilities,
+    transport: input.transport,
+  })
+  // 连上了 = 这个进程的「自动恢复」有了结论：就算上一次是 fail，也已经是过去式
+  autoConnectSettled = true
+  useRemoteStore.setState({
+    ...(saved === null ? {} : { lastSession: saved }),
+    autoConnect: { state: 'done' },
+  })
+}
+
+/** 连接收尾（临时断开与退出登录共用）：停连接、停保活、清「登录中」的会话、复位本地游标 */
+const teardownConnection = (): void => {
+  void shutdown()
+  setPaging(false, false)
+  // 登录会话也跟着作废：浏览器授权页还开着的话顺手关掉（不 await：断开不该被原生桥拖住）
+  if (useRemoteStore.getState().qr?.mode === 'browser') void closeAuthPage()
+  abortResume()
+  // 断开 = 主动放弃这次登录：盘上的待完成会话必须清掉，否则下次启动会自己续上
+  clearPendingLogin()
+  // 保活服务必须停（它守护的连接已经没了）
+  stopKeepAliveFlow()
+  loginServerUrl = null
+  loginTokenClaimed = false
+}
+
 /* ── 动作实现 ─────────────────────────────────────────────────────────── */
 
 /**
- * 登录拿到**设备账号**之后的全部动作：列 Host → 建安全通道 → 握手 → `$events` → 首屏列表。
+ * 登录拿到**设备账号**之后的全部动作：列 Host → 建安全通道 → 握手 → `$events` → 首屏列表，
+ * 最后**记下这次连接**（`dsp.remote.last-session.v1`，下次启动据此自动连回来）。
  *
- * 为什么抽出来：`connect()`（邮箱密码）、浏览器授权、扫码登录最终都换回**同一个**
- * 设备账号，后面这段必须只有一份实现 —— 否则三条路会各自漂移（审批要 `clientId`、
- * 首屏要约会话列表，漏一处就是「连上了但空白」）。
+ * 为什么抽出来：`connect()`（邮箱密码）、浏览器授权、扫码登录、以及**重启后的自动恢复**
+ * 最终都换回**同一个**设备账号，后面这段必须只有一份实现 —— 否则几条路会各自漂移
+ * （审批要 `clientId`、首屏要约会话列表，漏一处就是「连上了但空白」；
+ * 漏记 last-session 就是「重启又要重新登录」，也就是这个函数被拆出来修的那个 bug）。
  * `connect()` 的签名与对外行为一字未改，只是它的第 3-7 步搬进了这里。
+ *
+ * `options.preferredHostId`：自动恢复时优先连回上次那台 Host（见 `pickHost`）。
  */
-const establishSession = async (client: RemoteClient, server: RemoteServer, device: RemoteAccount): Promise<void> => {
+const establishSession = async (
+  client: RemoteClient,
+  server: RemoteServer,
+  device: RemoteAccount,
+  options: { preferredHostId?: string } = {},
+): Promise<void> => {
   try {
     // 3. 列 Host（内部已经补好 presence 与 identityKey pin）
-    const host = pickHost(await client.listHosts(server, device))
+    const host = pickHost(await client.listHosts(server, device), options.preferredHostId)
 
     useRemoteStore.setState({ phase: 'connecting' })
 
@@ -776,8 +1098,10 @@ const establishSession = async (client: RemoteClient, server: RemoteServer, devi
       hasMore: false,
       follow: null,
       events: null,
+      control: null,
       eventClientId: null,
       sinks: new Map(),
+      listeners: new Map(),
       unrouted: new Map(),
       closing: false,
     }
@@ -793,12 +1117,34 @@ const establishSession = async (client: RemoteClient, server: RemoteServer, devi
       transport: toTransport(connected.transport),
       error: null,
     })
+    // 1-5 都过了就是「连上了」：立刻记下来（`$events` / 首屏列表再抖，下次启动也能恢复 ——
+    // 那两步是被动拉数据，失败不该剥夺用户的「记住这台 Host」）
+    rememberLastSession({
+      serverUrl: server.url,
+      account: device,
+      host,
+      capabilities: connected.capabilities,
+      transport: connected.transport,
+    })
     // 连上了就把原生保活拉起来：用户随时可能切到系统浏览器授权，页面定时器会被冻结。
     // 不 await：保活失败不该拖住首屏（也不该影响连接结果）。
     void refreshKeepAliveFlow()
 
     // 6. `$events` 必须先 ready（审批 / 目录增量都靠它）
     await openEventsStream(session)
+    /*
+     * 6b. 会话内控制（W2）：把这条连接交给 `sessionControls.ts`，并开 `session/control` 投影流。
+     *
+     * 依赖是**反向注入**的（不 import 那个模块的 store）：这样 `store.ts → sessionControls`
+     * 单向，sessionControls 不需要反过来 import 本文件，也就没有循环 import 的初始化顺序坑。
+     * `openControlStream` 不 await：投影只是补充信息，拿不到不影响聊天。
+     */
+    bindSessionControls({
+      target: link,
+      registerStreamSink: registerRemoteStreamSink,
+      eventClientId: () => active?.eventClientId ?? null,
+    })
+    void openControlStream(session)
     // 7. 首屏列表
     useRemoteStore.setState({ sessions: projectSessions(await listSessions(link)) })
   } catch (error) {
@@ -1229,6 +1575,158 @@ const connectFlow = async (serverUrl: string, email: string, password: string): 
   }
 }
 
+/* ── 重启后自动恢复（K4） ─────────────────────────────────────────────── */
+
+/** 「这条错误 = 凭据不能用了，必须重新登录」的错误码（服务器与本地都可能给） */
+const SESSION_EXPIRED_CODES = new Set([
+  'SESSION_EXPIRED',
+  'AUTH_REQUIRED',
+  'AUTH_INVALID',
+  'TOKEN_EXPIRED',
+  'ACCOUNT_AUTH_REQUIRED',
+  'DEVICE_REVOKED',
+  'DEVICE_OWNERSHIP_REQUIRED',
+])
+
+const isSessionExpiredError = (error: unknown): boolean => {
+  if (!isRemoteApiError(error)) return false
+  if (SESSION_EXPIRED_CODES.has(error.code)) return true
+  // 401 / 403 一律当「凭据不行」：refresh 撞这两码说明 refresh token 也废了
+  return error.status === 401 || error.status === 403
+}
+
+/**
+ * 恢复失败：**不写 `state.error`、不留在 `error` 相位**。
+ *
+ * 用户什么都没点，App 自己没连上不该弹红条 —— 界面只显示一行「上次连接失败，点击重试」，
+ * 想登录的人照样去设置页。这是任务书「失败不要弹错」的直接落点。
+ */
+const failAutoConnect = (code: string, message: string): void => {
+  useRemoteStore.setState({
+    autoConnect: { state: 'failed', code, message },
+    error: null,
+    phase: 'idle',
+    transport: null,
+    streaming: false,
+  })
+}
+
+/** 凭据过期：清 last-session（留着只会每次启动白试一轮），账号邮箱保留给登录表单预填 */
+const expireLastSession = (message: string): void => {
+  clearLastSession()
+  useRemoteStore.setState({ lastSession: null })
+  failAutoConnect('SESSION_EXPIRED', message)
+}
+
+/**
+ * 一次恢复尝试（真实实现，非幂等；外面包 `autoConnectFlow`）。
+ *
+ * 时序（与 `input-M2-登录持久化与权限设置.md` 的图一致）：
+ *
+ * ```
+ * 读 last-session ──无──► 什么都不做（不写状态、不打网络）
+ *    │有
+ *    ▼ planAutoConnect(记录, 账号表)
+ *   none/no-account      ─► 删记录（凭据没了，续不上）
+ *   none/account-incomplete ─► 删记录
+ *   expired              ─► 删记录 + failed/SESSION_EXPIRED（「登录已过期，请重新登录」）
+ *   connect(refresh:true)  ─► POST /api/v1/auth/refresh → 原子替换账号 token → 建链
+ *   connect(refresh:false) ─► 直接建链（401 还有一次刷新兜底，见 withRefreshRetry）
+ *    ▼
+ *  establishSession(..., {preferredHostId}) ──成功──► 写 last-session + autoConnect=done
+ *                                          └─失败──► keep last-session + failed（可重试）
+ * ```
+ */
+const runAutoConnect = async (force: boolean): Promise<void> => {
+  if (!force && autoConnectSettled) return
+  const current = useRemoteStore.getState()
+  // 有别的建链在进行（手动登录 / 授权轮询 / 已经连上）：这条恢复流程没有意义
+  if (connecting) return
+  if (active !== null || current.phase === 'ready') return
+  if (current.phase === 'authing' || current.phase === 'waiting-auth') return
+  // 普通浏览器没有 `/__ds_proxy`：连也连不上，还会把「上次连接失败」的提示摆出来。
+  // 那边本来就有「只能在 App 内使用」的降级文案，这里直接不做。
+  if (!isNativeShell()) return
+
+  const session = readLastSession()
+  if (session === null) {
+    useRemoteStore.setState({ lastSession: null, autoConnect: { state: 'idle' } })
+    return
+  }
+
+  const plan = planAutoConnect(session, loadAccounts(), Date.now())
+  if (plan.kind === 'none') {
+    // 账号记录已经没了 / 还没注册设备：这条 last-session 续不上，删掉（否则每次启动都白试一轮）。
+    // 内存里也一起清掉 —— 留着一个「点不动的重新连接」比没有更糟。
+    clearLastSession()
+    useRemoteStore.setState({ lastSession: null, autoConnect: { state: 'idle' } })
+    return
+  }
+  if (plan.kind === 'expired') {
+    expireLastSession('上次的登录凭据已经过期，请重新登录')
+    return
+  }
+
+  // 从现在起界面上是「正在恢复上次连接」：phase 也进 connecting，远程页不会闪一下「未连接」
+  useRemoteStore.setState({
+    lastSession: session,
+    autoConnect: { state: 'connecting' },
+    phase: 'connecting',
+    error: null,
+  })
+
+  const server: RemoteServer = { url: plan.session.serverUrl }
+  const client = createRemoteClient()
+  try {
+    let account = plan.account
+    if (plan.refresh) {
+      // refresh token 会轮换：拿到新 pair 必须**原子替换**本地那一条（storage 是唯一真源）
+      const pair = await refreshTokenApi(server, account.deviceId, account.refreshToken)
+      account = upsertAccount({ ...account, ...pair })
+    }
+    await establishSession(client, server, account, { preferredHostId: plan.session.hostDeviceId })
+    const after = useRemoteStore.getState()
+    if (after.phase === 'ready') return
+    // `establishSession` 自己已经 `failConnection` 过：把那份错误翻译成「恢复失败」的两种语气
+    const failure = after.error
+    if (failure !== null && SESSION_EXPIRED_CODES.has(failure.code)) {
+      expireLastSession(failure.message)
+      return
+    }
+    failAutoConnect(failure?.code ?? 'CONNECT_FAILED', failure?.message ?? '上次连接失败')
+  } catch (error) {
+    // 走到这里只可能是 refresh 抛的（establishSession 内部自己接住了所有建链错误）
+    if (isSessionExpiredError(error)) {
+      expireLastSession('上次的登录凭据已经过期，请重新登录')
+      return
+    }
+    const info = describeRemoteError(error)
+    failAutoConnect(info.code, info.text)
+  }
+}
+
+/**
+ * `autoConnectNow()` / `retryAutoConnect()` 的外壳：单飞 + 兜底。
+ *
+ * 这条路径永远不该把异常抛给界面（它挂在渲染后的 effect 里，抛了就是一次未捕获错误）。
+ */
+const autoConnectFlow = (force = false): Promise<void> => {
+  if (autoConnectInFlight !== null) return autoConnectInFlight
+  const task: Promise<void> = runAutoConnect(force)
+    .catch(() => undefined)
+    .finally(() => {
+      autoConnectSettled = true
+      if (autoConnectInFlight === task) autoConnectInFlight = null
+    })
+  autoConnectInFlight = task
+  return task
+}
+
+const retryAutoConnectFlow = (): Promise<void> => {
+  autoConnectSettled = false
+  return autoConnectFlow(true)
+}
+
 const refreshSessionsFlow = async (): Promise<void> => {
   try {
     const session = requireSession()
@@ -1251,6 +1749,8 @@ const openSessionFlow = async (id: string): Promise<void> => {
   session.sessionId = id
   session.transcript = createTranscriptState()
   session.hasMore = false
+  // 会话内控制（W2）跟着切会话：投影 / 提问 / 队列都是「当前会话」的
+  selectControlSession(id)
   useRemoteStore.setState({
     activeSessionId: id,
     items: [],
@@ -1460,24 +1960,39 @@ const respondApprovalFlow = async (eventId: string, decision: ApprovalDecision):
 
 export const useRemoteStore = create<RemoteState>(() => ({
   ...INITIAL_STATE,
+  // 启动时同步读一次盘（一次 localStorage 读取，微秒级）：远程页/设置页在自动恢复跑完之前
+  // 就能显示「上次连的是哪台」，而不是先闪一下「未连接」。
+  lastSession: readLastSession(),
 
   connect: async (serverUrl: string, email: string, password: string): Promise<void> => {
     await connectFlow(serverUrl, email, password)
   },
 
   disconnect: (): void => {
-    void shutdown()
-    setPaging(false, false)
-    // 登录会话也跟着作废：浏览器授权页还开着的话顺手关掉（不 await：断开不该被原生桥拖住）
-    if (useRemoteStore.getState().qr?.mode === 'browser') void closeAuthPage()
-    abortResume()
-    // 断开 = 主动放弃这次登录：盘上的待完成会话必须清掉，否则下次启动会自己续上
-    clearPendingLogin()
-    // 主动断开 / 退出登录：保活服务必须停（它守护的连接已经没了）
-    stopKeepAliveFlow()
-    loginServerUrl = null
-    loginTokenClaimed = false
-    useRemoteStore.setState({ ...INITIAL_STATE })
+    teardownConnection()
+    // 本次进程内不再自动恢复：用户是**主动**断开的，别过几秒又自己连回去
+    autoConnectSettled = true
+    // 临时断开：`dsp.remote.last-session.v1` **保留**（下次启动照常自动连回来）。
+    // 复位界面时把它读回来，设置页才能显示「上次连接的账号 + 重新连接」。
+    useRemoteStore.setState({ ...INITIAL_STATE, lastSession: readLastSession() })
+  },
+
+  signOut: (): void => {
+    teardownConnection()
+    const session = readLastSession()
+    // 退出登录 = 不留凭据：删掉那条账号（设备 token pair 就在里面），再清 last-session
+    if (session !== null) removeAccount(session.serverUrl, session.email)
+    clearLastSession()
+    autoConnectSettled = true
+    useRemoteStore.setState({ ...INITIAL_STATE, lastSession: null })
+  },
+
+  autoConnectNow: async (): Promise<void> => {
+    await autoConnectFlow(false)
+  },
+
+  retryAutoConnect: async (): Promise<void> => {
+    await retryAutoConnectFlow()
   },
 
   refreshSessions: async (): Promise<void> => {
@@ -1563,3 +2078,15 @@ export const describeRemoteLink = (): string | null => {
   if (session === null) return null
   return `${session.server.url}#${session.host.deviceId.slice(0, 8)} transport=${session.link.transport} state=${session.link.state}`
 }
+
+/** 诊断用：自动恢复的状态 + 盘上那条 last-session 的安全摘要（**不含 token**）。 */
+export const describeRemoteRecovery = (): string => {
+  const { autoConnect } = useRemoteStore.getState()
+  const tail = autoConnect.code === undefined ? '' : `|${autoConnect.code}`
+  return `${autoConnect.state}${tail}|${describeLastSession(readLastSession())}`
+}
+
+/** 上次连接的记录与自动恢复状态：UI 想直接 import 类型时走这里，不用碰 `autoConnect.ts`。 */
+export type { LastSession } from './autoConnect.js'
+export { readLastSession } from './autoConnect.js'
+

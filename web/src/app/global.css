@@ -3,11 +3,22 @@
    * 顶部安全区（状态栏高度）。
    * Android WebView 里 env(safe-area-inset-top) 恒为 0，所以壳会用
    * evaluateJavascript 把真实高度写进 --ds-safe-top；浏览器里回退到 env()。
+   * 注意壳写的就是**状态栏本身的高度**，没有额外叠加，前端只消费一次。
    */
   --ds-safe-top: env(safe-area-inset-top, 0px);
-  /* 在安全区之上再多让一点，避免贴着状态栏显得被压住 */
-  --ds-safe-top-extra: 8px;
+  /**
+   * 状态栏之上再多让一点。归零：之前 8px 会让"状态栏 + 8px + 行内居中留白"
+   * 叠出一条明显空白带（真机上顶栏被压下去两次的观感）。
+   */
+  --ds-safe-top-extra: 0px;
   --ds-top-offset: calc(var(--ds-safe-top, 0px) + var(--ds-safe-top-extra));
+  /**
+   * 顶栏内容行高：左侧栏 logo 行、右侧会话标题行**共用**这一个值。
+   * 两栏都用 `height: calc(var(--ds-topbar-h) + var(--ds-top-offset))` +
+   * `padding-top: var(--ds-top-offset)`，内容区恰好剩 topbar-h，居中之后
+   * logo 中心 = 标题中心 = offset + topbar-h / 2（平板与手机同值）。
+   */
+  --ds-topbar-h: 56px;
   --message-list-max-width: 840px;
   --message-list-padding-horizontal: 44px;
 }
