@@ -130,7 +130,10 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
         <div className={styles.list}>
           {visibleGroups.map((group) => (
             <div key={group.key} className={styles.section}>
-              <div className={styles.sectionHeader}>{group.label}</div>
+              <div className={styles.sectionHeader}>
+                {group.label}
+                {group.key === 'pinned' ? ` · ${group.sessions.length}` : null}
+              </div>
               {group.sessions.map((session) => (
                 <SessionItem
                   key={session.id}
