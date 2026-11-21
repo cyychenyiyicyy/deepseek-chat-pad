@@ -378,6 +378,19 @@ export const en = {
   remoteTransportP2p: 'P2P',
   remoteTransportTurn: 'TURN',
   remoteTransportUnknown: 'unknown',
+  // ---- Keep-alive (K3): foreground service state + the two system permissions ----
+  remoteKeepAliveTitle: 'Keep-alive',
+  remoteKeepAliveRunning: 'Running',
+  remoteKeepAliveEnabledIdle: 'Enabled, not running',
+  remoteKeepAliveInactive: 'Off',
+  remoteKeepAliveNotifyMissing: 'Notification permission not granted — the system may kill the app in the background',
+  remoteKeepAliveNotifyHowTo:
+    'Tap Allow in the system prompt the next time you open the app, or enable notifications for it under Settings → Apps',
+  remoteKeepAliveBatteryMissing: 'Battery optimization is still on — the system may throttle it when locked or in the background',
+  remoteKeepAliveBatteryAction: 'Allow background activity',
+  remoteKeepAliveBatteryAsking: 'Opening system settings…',
+  remoteKeepAliveHint:
+    'Once enabled, the connection survives switching to the browser to sign in or locking the screen',
   remoteSessionEmpty: 'No chats on the host yet',
   remoteSessionUntitled: 'Untitled chat',
   remoteTimeJustNow: 'just now',

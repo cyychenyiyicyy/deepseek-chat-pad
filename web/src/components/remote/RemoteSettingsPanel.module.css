@@ -380,6 +380,64 @@
   opacity: 0.8;
 }
 
+/* ── 保活状态区（K3）────────────────────────────────────────────────────
+ * 与 .accountCard / .waiting 同一套卡片语言（1px 边框 + 14px 圆角 + bg-layer-2），
+ * 颜色只用已有的 brand / error 别名 —— 主题里没有 success / warning 色，
+ * 「运行中」用品牌色（与 .methodActive 同一套语气），「该跑没跑」用错误色。 */
+.keepAlive {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-sizing: border-box;
+  margin: 10px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  background-color: var(--dsw-alias-bg-layer-2);
+}
+
+.keepAliveHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.keepAliveTitle {
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* 提示文字 + 右侧按钮：窄屏折行，别把文字压成一条竖线 */
+.keepAliveRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 权限提示正文：用「次级红」而不是主红 —— 它要显眼，但不是连接失败那种终态 */
+.keepAliveWarn {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-error-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* 运行中的徽标：品牌色底 + 品牌字（与 .methodActive 同一套「选中」语气） */
+.chipOn {
+  border-color: transparent;
+  background-color: var(--dsw-alias-button-ghost-active-fill);
+}
+
+.chipOn .chipValue {
+  color: var(--dsw-alias-brand-text);
+}
+
 @media not all and (min-width: 768px) {
   .field {
     flex-wrap: wrap;
@@ -432,6 +490,17 @@
   .waiting {
     flex-wrap: wrap;
     gap: 8px;
+  }
+
+  /* 保活提示行同样折成上下排，按钮撑满一行好点（44px 触摸目标） */
+  .keepAliveRow {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  .keepAliveRow > button {
+    min-height: 44px;
   }
 
   .modeRow {
