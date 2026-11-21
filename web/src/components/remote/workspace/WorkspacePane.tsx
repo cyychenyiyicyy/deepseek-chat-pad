@@ -1,12 +1,13 @@
 import clsx from 'clsx'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useIsMobile } from '../../../app/viewport.js'
 import { useTranslate } from '../../../i18n/index.js'
 import { useNewSessionStore } from '../../../services/remote/newSessionStore.js'
+import { downloadFromUrl, downloadWorkspacePath } from '../../../services/remote/download.js'
 import { useRemoteStore } from '../../../services/remote/store.js'
 import { IconButton } from '../../base/IconButton.js'
-import { IconCloseOutline16, IconRefreshOutline16 } from '../../base/icons.js'
+import { IconCloseOutline16, IconDownloadOutline16, IconRefreshOutline16 } from '../../base/icons.js'
 import { Select, type SelectOption } from '../../base/Select.js'
 import { FilePreview } from './FilePreview.js'
 import { baseNameOf, parentRelativePath } from '../../../services/remote/filesApi.js'
@@ -48,6 +49,30 @@ export const WorkspacePane = () => {
 
   const close = (): void => useWorkspacePane.getState().closePane()
   const rootNode = nodes['']
+
+  /**
+   * 下载当前预览（文本 / 图片）。
+   *
+   * 只做「取字节 → 交给原生 /__ds_download/save」这一件事，文案与失败原因都在
+   * `services/remote/download.ts` 里统一处理（toast 一次），这里只管按钮的忙碌态。
+   * 图片优先用预览里已经建好的 blob URL（省一次远端往返），文本按整份文件重读。
+   */
+  const [downloading, setDownloading] = useState(false)
+  const downloadPreview = (): void => {
+    const current = useWorkspacePane.getState().preview
+    if (current === null || downloading) return
+    setDownloading(true)
+    const scopeId = useWorkspacePane.getState().scopeId
+    const task =
+      current.kind === 'image' && current.url !== undefined
+        ? downloadFromUrl(current.url, baseNameOf(current.path), current.mimeType)
+        : downloadWorkspacePath(current.path, { scopeId })
+    void task
+      .catch(() => undefined)
+      .then(() => setDownloading(false))
+  }
+  const downloadVisible =
+    preview !== null && (preview.kind === 'text' || preview.kind === 'image') && preview.status !== 'loading'
 
   // Esc 关闭（手机上等价于「返回」）；预览优先退到目录
   useEffect(() => {
@@ -114,6 +139,15 @@ export const WorkspacePane = () => {
               {displayPath}
             </div>
           </div>
+          {downloadVisible ? (
+            <IconButton
+              size="xs"
+              tooltip={t('downloadAction')}
+              icon={<IconDownloadOutline16 />}
+              disabled={downloading}
+              onClick={downloadPreview}
+            />
+          ) : null}
           <IconButton
             size="xs"
             tooltip={t('workspacePaneRefresh')}

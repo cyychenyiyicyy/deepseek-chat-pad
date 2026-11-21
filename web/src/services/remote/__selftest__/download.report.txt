@@ -1,0 +1,12 @@
+[PASS] A1 状态：正常形状 → canWrite / dir / sdkInt 都对
+[PASS] A2 状态：旧 APK 的 SPA 回落（200 + HTML）判成不支持
+[PASS] B1 保存：POST /save，body 带 name/mime/dataBase64，成功 toast 用实际文件名
+[PASS] B2 保存：服务端 413 → too_large + 可读 toast
+[PASS] B3 保存：原生 error 码 bad_name 原样上传给界面
+[PASS] B4 保存：旧 APK 回 HTML（200）→ unsupported，不装成功
+[PASS] B5 保存：超过 32 MiB 的 base64 本地就挡掉，一个请求都不发
+[PASS] B6 保存：data: URL 的图片 → 原样取 base64 和 MIME
+[PASS] C1 权限流：403 permission_denied → 申请 → 轮询到 canWrite → 重试一次成功
+[PASS] D1 工作区下载：没连接 → not_connected，给「保存失败」而不是静默
+
+总计 10 项，10 PASS / 0 FAIL

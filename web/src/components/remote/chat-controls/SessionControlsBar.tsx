@@ -10,16 +10,17 @@ import type { RemoteUsage } from '../../../services/remote/sessionControls.js'
 import { IconCloseOutline16 } from '../../base/icons.js'
 import styles from './Controls.module.css'
 import { ChatMenu, showsChatMenu } from './ChatMenu.js'
-import { ModelCapsule } from './ModelCapsule.js'
-import { PermissionCapsule } from './PermissionCapsule.js'
 
 /**
- * 会话顶栏**右侧的一组控制**：模型胶囊 + 权限预设胶囊 + `⋯` 菜单。
+ * 会话顶栏**右侧**的那一个入口：`⋯` 菜单。
  *
- * 挂载点只有 `RemoteChatView` 的顶栏（`SessionView` 那种本地会话没有这些远端能力，
- * 不应出现同一组按钮）。
+ * 这一批的改动（用户真机反馈「模型选择和权限选择应该挪到输入框里面」）：
+ * 模型胶囊 / 权限胶囊已经搬到 `components/remote/composer/**`，顶栏只剩
+ * 会话标题 + transport 徽标 + 这个 `⋯`。**没有删掉旧的 `SessionControlsBar` 行为**：
+ * 探测（`probe()`）与能力门禁仍在这里跑一遍 —— 它幂等，输入区那边也挂了一次，
+ * 两条入口谁先到都一样（顶栏先挂载，通常这里先探）。
  *
- * 能力门禁一律**在渲染层判**（`showsModelCapsule` 等选择器）：三个胶囊各自独立降级，
+ * 能力门禁一律**在渲染层判**：`⋯` 里的三项（命令 / 会话信息 / 清空队列）各自独立降级，
  * Host 缺哪个就只少哪个，不互相牵连，也不报错。
  */
 export const SessionControlsBar = ({
@@ -36,24 +37,18 @@ export const SessionControlsBar = ({
   onInsertCommand: (line: string) => void
 }) => {
   const probe = useChatControls((state) => state.probe)
-  const showsModel = useChatControls(showsModelCapsule)
-  const showsPermission = useChatControls(showsPermissionCapsule)
   const showsMenu = useChatControls(showsChatMenu)
 
-  // 换会话 / 首次挂载：三个入口各探一次（内部有「已有数据就不重复拉」的短路）
+  // 换会话 / 首次挂载：各入口各探一次（内部有「已有数据就不重复拉」的短路）
   useEffect(() => {
     void probe()
   }, [probe, sessionId])
 
-  if (!showsModel && !showsPermission && !showsMenu) return null
+  if (!showsMenu) return null
 
   return (
     <div className={styles.bar}>
-      {showsModel ? <ModelCapsule /> : null}
-      {showsPermission ? <PermissionCapsule /> : null}
-      {showsMenu ? (
-        <ChatMenu sessionId={sessionId} title={title} usage={usage} onInsertCommand={onInsertCommand} />
-      ) : null}
+      <ChatMenu sessionId={sessionId} title={title} usage={usage} onInsertCommand={onInsertCommand} />
     </div>
   )
 }

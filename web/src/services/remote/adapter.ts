@@ -160,6 +160,24 @@ export interface ApprovalActivity extends ChatItemBase {
   /** `$events` 的 eventId（同时充当审批应答的 `$events/result.eventId`）。 */
   frameRpcId?: string
   outcome?: ApprovalOutcome
+  /**
+   * Host 若显式给了可选决定，这里只保留 v1 允许的两种。
+   *
+   * `allow_session` / session grant **一律丢弃**（协议安全不变量 8、`AGENTS.md` 的
+   * Harness Carrier 节）：v1 只允许「允许一次 / 拒绝」。不给「保留但标灰」这种中间态，
+   * 因为灰按钮仍然暗示「这条路存在」。
+   */
+  options?: ApprovalOption[]
+}
+
+/** v1 允许的审批决定（`$events/result` 的 `outcome.value`）。 */
+export type ApprovalOption = 'allow_once' | 'deny'
+
+/** 把 Host 给的决定列表按 v1 白名单过一遍；保留为空时返回 `undefined`（= 按默认两种处理）。 */
+const approvalOptionsOf = (raw: unknown): ApprovalOption[] | undefined => {
+  if (!Array.isArray(raw)) return undefined
+  const kept = raw.filter((value): value is ApprovalOption => value === 'allow_once' || value === 'deny')
+  return kept.length === 0 ? undefined : [...new Set(kept)]
 }
 
 /** 限时问答的可选项（对应官方 `AskUserQuestionOption`）。 */
@@ -844,6 +862,7 @@ function addApproval(current: ChatItem[], payload: UnknownRecord, frameRpcId: st
   const existing = current.find(item => item.id === id)
   const callId = stringValue(payload.callId)
   const turn = requestTurn(current, payload, callId)
+  const options = approvalOptionsOf(payload.options ?? payload.decisions)
   const activity: ApprovalActivity = {
     kind: 'approval' as const,
     id,
@@ -854,10 +873,14 @@ function addApproval(current: ChatItem[], payload: UnknownRecord, frameRpcId: st
     ...(turn === undefined ? {} : { turn }),
     ...(stringValue(payload.reason) === undefined ? {} : { reason: stringValue(payload.reason) }),
     ...(frameRpcId.length === 0 ? {} : { frameRpcId }),
+    ...(options === undefined ? {} : { options }),
     createdAt: Date.now(),
   }
   if (existing === undefined) return [...current, activity]
-  if (existing.kind === 'approval' && (existing.outcome === 'allowed-once' || existing.outcome === 'rejected')) return current
+  // 同一 eventId 只留一张卡（Host 断线重连会**重投同一 eventId**，见协议 §2.6）。
+  // 已经有结论的（allowed-once / rejected / cancelled / unavailable）一律不再翻回 pending：
+  // 「已失效」的卡片被重投拉回等待，用户会对着一条死句柄反复点。
+  if (existing.kind === 'approval' && existing.outcome !== undefined) return current
   return current.map(item => item.id === id ? {
     ...activity,
     createdAt: item.createdAt,
@@ -898,14 +921,13 @@ function addQuestion(current: ChatItem[], payload: UnknownRecord, frameRpcId: st
   if (existing === undefined) return [...current, activity]
   return current.map(item => {
     if (item.id !== id) return item
-    const preservedOutcome = item.kind === 'question' && (item.outcome === 'answered' || item.outcome === 'queued')
-      ? item.outcome
-      : undefined
+    // 终态粘住（answered / queued / cancelled）：重投同一 eventId 不能把答过的卡翻回可答，
+    // 也不能把 Host 已经撤回的那条重新弹出来让人答。
+    if (item.kind === 'question' && item.outcome !== undefined) return item
     return {
       ...activity,
       createdAt: item.createdAt,
       ...(item.turn !== undefined && activity.turn === undefined ? { turn: item.turn } : {}),
-      ...(preservedOutcome === undefined ? {} : { outcome: preservedOutcome }),
     }
   })
 }
@@ -1496,6 +1518,9 @@ export function reduceEventsItem(items: ChatItem[], item: unknown, sessionId: st
         toolName: typeof request.toolName === 'string' ? request.toolName : 'Harness',
         ...(typeof request.callId === 'string' ? { callId: request.callId } : {}),
         ...(typeof request.reason === 'string' ? { reason: request.reason } : {}),
+        // Host 若给了决定集合，交给 `approvalOptionsOf` 按 v1 白名单过滤（allow_session 丢掉）
+        ...(request.options === undefined ? {} : { options: request.options }),
+        ...(request.decisions === undefined ? {} : { decisions: request.decisions }),
       }, item.eventId)
     }
     if (item.event === 'user-questions/request') {
@@ -1546,6 +1571,18 @@ export function addOptimisticUserMessage(
     sendState: 'queued',
   }
   return [...items, message]
+}
+
+/**
+ * 发送已被 Host 接受：清掉本地挂起标记（`sendState` 缺省 = 正常消息）。
+ *
+ * 为什么必须有这一步：`steer`/插话路径下 Host 不一定会把这条用户消息回显，
+ * 只留 `markSendState(..., 'failed')` 的话，成功的插话会永远停在「发送中」。
+ */
+export function clearSendState(items: ChatItem[], requestRpcId: string): ChatItem[] {
+  return items.map(item => item.kind === 'message' && item.requestRpcId === requestRpcId
+    ? { ...item, sendState: undefined }
+    : item)
 }
 
 /** 标记某条乐观消息的投递状态（`failed` 时带上可读原因）。 */

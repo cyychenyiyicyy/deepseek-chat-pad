@@ -10,7 +10,8 @@ import {
   readWorkspaceImage,
   readWorkspaceText,
   statWorkspaceFile,
-  uploadSessionFile,
+  MAX_INLINE_UPLOAD_BYTES,
+  MAX_WORKSPACE_UPLOAD_BYTES,
   TEXT_PREVIEW_BYTES,
   TEXT_PREVIEW_MAX_BYTES,
   type UploadPhase,
@@ -18,7 +19,19 @@ import {
   type WorkspaceFileKind,
 } from '../../../services/remote/filesApi.js'
 import { useNewSessionStore } from '../../../services/remote/newSessionStore.js'
-import { describeRemoteError, lastRemoteTarget } from '../../../services/remote/sessionsApi.js'
+import { describeRemoteError, lastRemoteTarget, workspaceReferenceToken } from '../../../services/remote/sessionsApi.js'
+import {
+  isUploadUnavailable,
+  outcomeReference,
+  planUpload,
+  readRemoteCapabilities,
+  readRemoteTransport,
+  uploadAttachment,
+  uploadErrorReasonOf,
+  workspaceUploadLimitBytes,
+  type UploadStrategy,
+  type UploadUnavailableReason,
+} from '../../../services/remote/upload.js'
 import { useRemoteStore } from '../../../services/remote/store.js'
 
 /**
@@ -34,6 +47,23 @@ import { useRemoteStore } from '../../../services/remote/store.js'
  *  2. **大文件不整块进内存**：文本按 256 KiB 分块累加（上限 4 MiB 封顶），
  *     图片按 `readWorkspaceBytesRange()` 的 512 KiB 分块拼，超过 8 MiB 直接拒。
  *  3. **blob URL 必须释放**：图片预览被替换 / 关闭 / 换会话时立刻 `revokeObjectURL`。
+ *
+ * ## 附件上传（R15：分级 + 不再拿 405 关 UI）
+ *
+ * 上传不再直连 `fileUploads/upload`，而是 `services/remote/upload.ts` 的 `uploadAttachment()`：
+ * 先试会话附件收据，被拒（`METHOD_NOT_ALLOWED` / `METHOD_NOT_FOUND` / 405 / 旧 codec）就自动
+ * 降级到 `workspace.upload.open|chunk|commit|abort`。两种结果在这张表里各占一列：
+ *
+ * | 通道 | 成功凭据 | 发送时怎么进消息 |
+ * |---|---|---|
+ * | `receipt` | `receiptId` | `{type:'file', receiptId}`（老路径） |
+ * | `workspace` | `{name, path}` | 正文 `@name` 引用（`readyReceipts()` 出令牌，`sendPrompt()` 落成引用） |
+ *
+ * **`uploadSupported` 的三态（别再退回两态）**：
+ *  - `null` = 还没试过 ⇒ 「+」照常渲染（先信任，与 `newSessionStore` 同一套）；
+ *  - `true` = 至少一条通道成功过；
+ *  - `false` = **两条**都明确不可用（`UPLOAD_UNAVAILABLE`）⇒ 按钮变**不可用**并带可读原因，
+ *    **不是**直接不渲染 —— 静默消失正是「用户以为 + 坏了」的根因。
  */
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -91,6 +121,9 @@ export interface BinaryPreview {
 
 export type PreviewState = TextPreview | ImagePreview | BinaryPreview
 
+/** `openAt()` 的三种结论（见接口注释）。 */
+export type OpenAtResult = 'ok' | 'missing' | 'unavailable'
+
 /** 输入区里待发送的附件。 */
 export interface DraftAttachment {
   id: string
@@ -98,10 +131,17 @@ export interface DraftAttachment {
   size: number
   mediaType?: string
   status: 'uploading' | 'done' | 'error'
-  /** 0..1（编码阶段映射到 0–0.7，单帧在飞 0.9，完成 1）。 */
+  /** 0..1（编码阶段映射到 0–0.3，真在飞/在传 0.3–0.9，完成 1）。 */
   progress: number
   phase?: UploadPhase
+  /** 走的是哪条通道（R15；`undefined` = 还没成功过，界面按「上传中」显示）。 */
+  strategy?: UploadStrategy
+  /** `receipt` 通道的收据（发送时进 `{type:'file', receiptId}`）。 */
   receiptId?: string
+  /** `workspace` 通道落盘后的路径（`./name`；发送时转成正文 `@name`）。 */
+  remotePath?: string
+  /** 界面直接显示的引用写法（`@a.png`），失败时为空。 */
+  reference?: string
   error?: string
   /** 重试用的原始字节（失败时留着；成功后释放）。 */
   bytes?: Uint8Array
@@ -112,8 +152,16 @@ export interface WorkspacePaneState {
   open: boolean
   /** `false` = Host 没有工作区文件端点 ⇒ 入口按钮与抽屉**整块隐藏**。`null` = 还没探过。 */
   filesSupported: boolean | null
-  /** `false` = Host 没有 `fileUploads/upload` ⇒ 输入区「+」隐藏。`null` = 还没试过。 */
+  /**
+   * `false` = **两条**上传通道都明确不可用（`UPLOAD_UNAVAILABLE`）；`null` = 还没试过；`true` = 至少一条成功过。
+   *
+   * 单次失败**不再**把它置 `false`（R15）：`fileUploads/upload` 回 405 只说明那条路不认。
+   */
   uploadSupported: boolean | null
+  /** `uploadSupported === false` 时的可读原因（按钮 tooltip / 附件条的提示都用它）。 */
+  uploadUnavailableReason: string | null
+  /** 同上的稳定原因码（界面据此翻 i18n；`null` = 不是「没通道」这类失败）。 */
+  uploadUnavailableCode: UploadUnavailableReason | null
   /** 会话作用域（= `workspaceFileScopeId`）。 */
   scopeId: string | null
   /** 顶部显示的工作区路径（会话工作区 / cwd；空串 = Host 没告诉我们）。 */
@@ -143,6 +191,14 @@ export interface WorkspacePaneState {
   refresh(path?: string): Promise<void>
   toggleDir(path: string): Promise<void>
   openFile(path: string): Promise<void>
+  /**
+   * 「按路径打开预览」—— 交付文件面板（`artifacts/**`）点一个 chip 就走这里：
+   * 抽屉自己打开、作用域自己绑、文件不存在时**返回 `'missing'`** 而不去读一个空文件。
+   *
+   * 返回值就是给调用方的全部结论：`ok` 已经在预览 / `missing` 文件已不存在 /
+   * `unavailable` 还没连上或这台 Host 没有文件端点（调用方据此说一句人话，不自己猜）。
+   */
+  openAt(path: string): Promise<OpenAtResult>
   closePreview(): void
   loadMoreText(): Promise<void>
   /* ── 附件 ── */
@@ -181,9 +237,17 @@ const SCOPE_REASON_TEXT: Record<string, string> = {
   'outside-root': '这个路径在会话工作区之外，Host 拒绝了',
   symlink: '这个路径是越界的符号链接，Host 拒绝了',
   'not-regular-file': '这不是一个普通文件（可能是设备或管道）',
-  'not-found': '这个文件或目录不见了',
+  // 交付文件面板（`artifacts/**`）点开后最常见的失败：一句确定的话，别让人对着一行「不见了」猜
+  'not-found': '文件已不存在',
   'too-large': '文件太大，Host 拒绝读出',
   io: 'Host 读文件时出错了',
+}
+
+/** 文件不存在（Host 的 `scope-rejected` + `reason: 'not-found'`）。 */
+const isNotFoundError = (error: unknown): boolean => {
+  if (!isScopeRejection(error)) return errorCodeOf(error) === 'not_found'
+  const details = (error as { details?: Record<string, unknown> }).details
+  return details?.['reason'] === 'not-found'
 }
 
 /** 把任意失败变成一句人话（中文），不改数据层的错误码。 */
@@ -222,6 +286,8 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
   open: false,
   filesSupported: null,
   uploadSupported: null,
+  uploadUnavailableReason: null,
+  uploadUnavailableCode: null,
   scopeId: null,
   rootPath: '',
   rootSource: 'unknown',
@@ -237,6 +303,11 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
     if (sessionId === state.scopeId) return
     // 换会话：目录缓存、预览、展开状态全丢（它们是上一个会话的工作区）
     releasePreview(state.preview)
+    /*
+     * 上传通道的「试过没有」**不跟着会话清**：它记在 `upload.ts` 里、按连接（target 引用）
+     * 隔离，换连接自动重来。清得太勤的代价是：每换一次会话都要把一个大文件重新 base64
+     * 编码一遍才发现 `fileUploads/upload` 不认（0.5.22 上必然如此）。
+     */
     const root = sessionId === null ? { path: '', source: 'unknown' as const } : rootForSession(sessionId)
     useWorkspacePane.setState({
       scopeId: sessionId,
@@ -246,6 +317,7 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
       expanded: {},
       preview: null,
       error: null,
+      uploadError: null,
     })
     if (sessionId !== null && state.open && state.filesSupported !== false) await useWorkspacePane.getState().refresh('')
   },
@@ -457,6 +529,35 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
     }
   },
 
+  openAt: async (path: string): Promise<OpenAtResult> => {
+    // 抽屉还没绑会话（例如交付文件面板挂在时间线里、`bind` 还没跑完）：先补一次作用域
+    if (useWorkspacePane.getState().scopeId === null) {
+      const active = useRemoteStore.getState().activeSessionId
+      if (active === null) return 'unavailable'
+      await useWorkspacePane.getState().bind(active)
+    }
+    const state = useWorkspacePane.getState()
+    if (state.filesSupported === false) return 'unavailable'
+    const target = targetOrNull()
+    const scope = state.scopeId
+    if (target === null || scope === null) return 'unavailable'
+    /*
+     * 先 `stat` 一次再读：`readBytes` 对不存在的文件只会回一个笼统的错误，
+     * 而「文件已不存在」是这一条路径最常见的失败（模型改了名 / 用户删了）。
+     * 一次 stat 换一句确定的话，比让预览停在半截加载上强。
+     */
+    try {
+      await statWorkspaceFile(target, scope, path)
+    } catch (error) {
+      if (isNotFoundError(error)) return 'missing'
+      // 其它错误（权限 / 太大 / 通道抽风）不在这里拦：交给 openFile 报它自己的原因
+    }
+    releasePreview(state.preview)
+    useWorkspacePane.setState({ open: true, error: null, preview: null })
+    await useWorkspacePane.getState().openFile(path)
+    return 'ok'
+  },
+
   closePreview: (): void => {
     releasePreview(useWorkspacePane.getState().preview)
     useWorkspacePane.setState({ preview: null })
@@ -511,24 +612,33 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
     if (files.length === 0) return
     // 先占位（每个文件一条「上传中」），再按顺序上传：单帧上传并发没有收益，反而抢带宽
     const queued: DraftAttachment[] = []
+    const tooLarge: DraftAttachment[] = []
     for (const file of files) {
-      queued.push({
+      const entry: DraftAttachment = {
         id: attachmentId(),
         name: file.name,
         size: file.size,
         ...(file.type.length === 0 ? {} : { mediaType: file.type }),
         status: 'uploading',
         progress: 0,
-      })
+      }
+      // 两条通道都装不下：本地就判死，别把几十上百 MiB 读进内存再被拒
+      if (uploadTooLargeHint(file.size)) {
+        queued.push({ ...entry, status: 'error', error: '这个文件超过本条连接的上传上限' })
+        tooLarge.push(entry)
+        continue
+      }
+      queued.push(entry)
     }
     useWorkspacePane.setState((current) => ({
       attachments: [...current.attachments, ...queued],
-      uploadError: null,
+      uploadError: tooLarge.length > 0 ? '有文件超过本条连接的上传上限，已标红' : null,
     }))
     for (let index = 0; index < files.length; index += 1) {
       const entry = queued[index]
       const file = files[index]
       if (entry === undefined || file === undefined) continue
+      if (entry.status === 'error') continue
       await uploadOne(entry.id, file)
     }
   },
@@ -540,7 +650,19 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
     const bytes = entry.bytes
     useWorkspacePane.setState((current) => ({
       attachments: current.attachments.map((item) =>
-        item.id === id ? { ...item, status: 'uploading', progress: 0, error: undefined } : item,
+        item.id === id
+          ? {
+              ...item,
+              status: 'uploading',
+              progress: 0,
+              error: undefined,
+              // 上一次的凭据/通道结论全部作废：重试会重新走一遍分级链
+              receiptId: undefined,
+              remotePath: undefined,
+              reference: undefined,
+              strategy: undefined,
+            }
+          : item,
       ),
       uploadError: null,
     }))
@@ -562,12 +684,18 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
  * 四、上传（内部）
  * ──────────────────────────────────────────────────────────────────────── */
 
-/** 单帧上传：编码阶段映射到 0–0.7，单帧在飞 0.9，完成 1。 */
+/**
+ * 进度映射：编码 0–0.3 → 真正在传 0.3–0.9（按已确认字节）→ 完成 1。
+ *
+ * `receipt` 通道没有字节级回执，`uploading` 那一拍 `sentBytes === totalBytes`（0.9），
+ * 所以对老通道的表现与改版前一致；`workspace` 通道每一块都有 ack，进度是真的。
+ */
 const progressOf = (phase: UploadPhase, done: number, total: number): number => {
   if (phase === 'done') return 1
-  if (phase === 'uploading') return 0.9
   if (total <= 0) return 0
-  return Math.min(0.7, (done / total) * 0.7)
+  const ratio = Math.min(1, Math.max(0, done / total))
+  if (phase === 'uploading') return 0.3 + ratio * 0.6
+  return ratio * 0.3
 }
 
 const patchAttachment = (id: string, patch: Partial<DraftAttachment>): void => {
@@ -591,6 +719,35 @@ const uploadOne = async (id: string, file: File): Promise<void> => {
   )
 }
 
+/** 上传失败 → 一句人话（附件的错误码映射；`UPLOAD_UNAVAILABLE` 再带上原因）。 */
+const describeUploadError = (error: unknown): string => {
+  const code = errorCodeOf(error)
+  if (code === 'UPLOAD_TOO_LARGE') {
+    return error instanceof Error && error.message.length > 0
+      ? error.message
+      : `文件太大：这条连接的上传上限是工作区 ${MAX_WORKSPACE_UPLOAD_BYTES / 1024 / 1024} MiB / 会话附件 ${MAX_INLINE_UPLOAD_BYTES / 1024 / 1024} MiB`
+  }
+  if (code === 'UPLOAD_LIMIT') return 'Host 侧上传配额/并发已满（每个连接最多 2 个活动上传），稍后重试'
+  if (code === 'UPLOAD_INVALID_NAME') return '文件名不被 Host 接受（含非法字符或保留名），改个名字再传'
+  if (code === 'UPLOAD_WORKSPACE_UNAVAILABLE') return '这个会话没有可写的工作区目录，Host 拒绝了落盘'
+  if (code === 'UPLOAD_INCOMPLETE') return '文件没有传完就被提交了，重试一次'
+  if (code === 'UPLOAD_NOT_FOUND') return '这次上传在 Host 侧已经失效（可能超时被清理），重试一次'
+  if (isUploadUnavailable(error)) {
+    const reason = uploadErrorReasonOf(error)
+    const text = error instanceof Error && error.message.length > 0 ? error.message : ''
+    if (reason === 'too-large' && text.length === 0) return '文件太大，这条连接传不了'
+    return text.length > 0 ? text : '这台 Host 暂时发不了附件'
+  }
+  return describeFileError(error)
+}
+
+/**
+ * 真正的上传：交给 `upload.ts` 的分级链（收据 → 工作区），这里只管三件界面事
+ * ——进度、成功凭据（`receiptId` 或 `remotePath`）、失败原因。
+ *
+ * **单次失败不再隐藏入口**：只有 `UPLOAD_UNAVAILABLE`（两条通道都明确不可用）才把
+ * `uploadSupported` 置 `false`，并把原因写进 `uploadUnavailableReason` 供按钮/附件条显示。
+ */
 const uploadBytes = async (
   id: string,
   payload: { name: string; bytes: Uint8Array; mediaType?: string },
@@ -604,42 +761,72 @@ const uploadBytes = async (
   }
   patchAttachment(id, { bytes: payload.bytes, size })
   try {
-    const receipt = await uploadSessionFile(target, scope, payload, {
+    const outcome = await uploadAttachment(target, scope, payload, {
       onProgress: (progress) => {
         patchAttachment(id, {
           progress: progressOf(progress.phase, progress.sentBytes, progress.totalBytes),
           phase: progress.phase,
+          strategy: progress.strategy,
         })
       },
     })
+    const reference = outcomeReference(outcome)
+    const done: Partial<DraftAttachment> = {
+      status: 'done',
+      progress: 1,
+      strategy: outcome.strategy,
+      bytes: undefined,
+      error: undefined,
+      ...(outcome.strategy === 'receipt'
+        ? { receiptId: outcome.receiptId, remotePath: undefined, reference: undefined }
+        : { remotePath: outcome.path, receiptId: undefined, ...(reference === null ? {} : { reference }) }),
+      ...(outcome.name === undefined ? {} : { name: outcome.name }),
+    }
     useWorkspacePane.setState((current) => ({
       uploadSupported: true,
-      attachments: current.attachments.map((item) =>
-        item.id === id
-          ? { ...item, status: 'done', progress: 1, receiptId: receipt.receiptId, bytes: undefined, error: undefined }
-          : item,
-      ),
+      uploadUnavailableReason: null,
+      uploadUnavailableCode: null,
+      uploadError: null,
+      attachments: current.attachments.map((item) => (item.id === id ? { ...item, ...done } : item)),
     }))
   } catch (error) {
-    if (isMissingEndpoint(error)) {
-      // Host 没有 `fileUploads/upload`：收起「+」按钮，并把这条标成不可用
+    if (isUploadUnavailable(error)) {
+      // 两条通道都不可用：把「+」标成不可用并给出原因（不静默消失）
+      const reason = describeUploadError(error)
       useWorkspacePane.setState({
         uploadSupported: false,
-        uploadError: '这台 Host 不支持会话附件上传',
+        uploadUnavailableReason: reason,
+        uploadUnavailableCode: uploadErrorReasonOf(error) ?? 'both-unavailable',
+        uploadError: reason,
         attachments: useWorkspacePane.getState().attachments.filter((item) => item.id !== id),
       })
       return
     }
-    const text = describeFileError(error)
+    const text = describeUploadError(error)
     useWorkspacePane.setState({ uploadError: text })
     patchAttachment(id, { status: 'error', progress: 0, error: text, bytes: payload.bytes })
   }
 }
 
-/** 已上传成功、可以带进 `session/prompt` 的收据。 */
+/** 已上传成功、可以带进 `session/prompt` 的凭据（收据 id 或工作区引用令牌）。 */
 export const readyReceipts = (attachments: readonly DraftAttachment[]): string[] =>
-  attachments.flatMap((item) => (item.status === 'done' && item.receiptId !== undefined ? [item.receiptId] : []))
+  attachments.flatMap((item) => {
+    if (item.status !== 'done') return []
+    if (item.receiptId !== undefined) return [item.receiptId]
+    // 工作区通道没有收据：用引用令牌穿过附件数组，由 `sendPrompt()` 落成正文 `@name`
+    if (item.remotePath !== undefined) return [workspaceReferenceToken(item.remotePath)]
+    return []
+  })
 
 /** 还有附件在传（发送按钮要等它们）。 */
 export const hasUploadingAttachment = (attachments: readonly DraftAttachment[]): boolean =>
   attachments.some((item) => item.status === 'uploading')
+
+/** 这次选择里最坏的那个文件会不会超过上限（给 `pickFiles` 做本地提示用；不发网络）。 */
+export const uploadTooLargeHint = (size: number, transport: string = readRemoteTransport()): boolean => {
+  const plan = planUpload({ bytes: size, capabilities: readRemoteCapabilities(), transport })
+  return plan.order.length === 0 && plan.reason === 'too-large'
+}
+
+/** 当前连接上工作区上传的上限（界面提示用）。 */
+export const currentWorkspaceUploadLimit = (): number => workspaceUploadLimitBytes(readRemoteTransport())

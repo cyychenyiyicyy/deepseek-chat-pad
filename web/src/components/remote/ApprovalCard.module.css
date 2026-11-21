@@ -1,10 +1,17 @@
-/* 审批卡片：一条待办事项的强提示，颜色取「警告」而不是「错误」——它等着人做决定，不是失败 */
+/*
+ * 审批卡片（时间线里的一行，不是浮层）。
+ *
+ * 语气按风险分档（`data-risk`）：只读是中性灰、写入/外网用淡红、删除用正红。
+ * 二次确认时按钮换成 `danger` 变体（错误色）并在下面多一行提示。
+ * 手机窄屏：两个按钮等宽、最小 44px 高（触控要求）。
+ */
 .card {
   display: flex;
   flex-direction: column;
   gap: 8px;
   box-sizing: border-box;
   width: 100%;
+  margin-bottom: 14px;
   padding: 12px 14px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 16px;
@@ -16,6 +23,11 @@
   [data-ds-dark-theme] & {
     box-shadow: none;
   }
+}
+
+/* 删除类：整张卡换成错误描边，扫一眼就知道这条不能随手点 */
+.card[data-risk='delete'][data-status='pending'] {
+  border-color: var(--dsw-alias-state-error-secondary);
 }
 
 .head {
@@ -32,28 +44,195 @@
   color: var(--dsw-alias-brand-primary);
 }
 
-.title {
+.iconMuted {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  height: 22px;
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.headCopy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
   min-width: 0;
+}
+
+.title {
   font-size: 14px;
   line-height: 22px;
   font-weight: 500;
   color: var(--dsw-alias-label-primary);
-  overflow-wrap: anywhere;
 }
 
-.detail {
+.toolRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 工具名做成中性胶囊：它是「谁要动手」，不是按钮 */
+.toolPill {
   box-sizing: border-box;
-  max-height: 168px;
-  padding: 8px 10px;
-  border-radius: 10px;
+  max-width: 100%;
+  padding: 1px 8px;
+  border-radius: 999px;
   background-color: var(--dsw-alias-interactive-bg-hover);
   color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toolNote {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.statusPending {
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 22px;
+}
+
+.statusDone {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 3px;
+  color: var(--dsw-alias-brand-text);
+  font-size: 12px;
+  line-height: 22px;
+}
+
+.statusDead {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 3px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 22px;
+}
+
+.noTarget {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.targetBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background-color: var(--dsw-alias-markdown-code-block);
+}
+
+.targetLabel {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.targetCode {
+  box-sizing: border-box;
+  max-height: 168px;
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--font-family-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
   font-size: 12px;
   line-height: 18px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   overflow-y: auto;
   user-select: text;
+}
+
+.targetText {
+  box-sizing: border-box;
+  max-height: 168px;
+  margin: 0;
+  color: var(--dsw-alias-label-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+  user-select: text;
+}
+
+.truncated {
+  color: var(--dsw-alias-label-caption);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.reason {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* 风险提示：同一行字，语气不同 */
+.riskRead,
+.riskWrite,
+.riskNetwork,
+.riskDelete,
+.riskUnknown {
+  padding-left: 8px;
+  border-left: 2px solid transparent;
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.riskRead {
+  border-left-color: var(--dsw-alias-border-l3);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.riskWrite {
+  border-left-color: var(--dsw-alias-state-error-secondary);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.riskNetwork {
+  border-left-color: var(--dsw-alias-state-error-secondary);
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* 不可撤销的删除：正红 + 加粗半档 */
+.riskDelete {
+  border-left-color: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-state-error-primary);
+  font-weight: 500;
+}
+
+.riskUnknown {
+  border-left-color: var(--dsw-alias-border-l3);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.expiredHint {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
 }
 
 .actions {
@@ -64,6 +243,18 @@
   margin-top: 2px;
 }
 
+.button {
+  /* 触控目标下限：手机上按钮至少 44px 高，别让人点偏 */
+  min-height: 36px;
+}
+
+.armedHint {
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: right;
+}
+
 @media not all and (min-width: 768px) {
   .actions {
     gap: 10px;
@@ -71,6 +262,10 @@
 
   .actions > button {
     flex: 1 1 0;
+    min-height: 44px;
+  }
+
+  .button {
     min-height: 44px;
   }
 }

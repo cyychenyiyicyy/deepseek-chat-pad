@@ -60,6 +60,16 @@
   opacity: 0.7;
 }
 
+/*
+ * 胶囊上的第二段：思考档位（按档位着色）。
+ * 模型没声明 `efforts` 时这一段**整个不渲染** —— 用户要的「折叠」就是不留空占位。
+ */
+.pillEffort {
+  flex-shrink: 0;
+  font-weight: 500;
+  transition: color 0.2s ease;
+}
+
 /* 图标按钮形态的胶囊（`⋯`） */
 .iconPill {
   display: inline-flex;
@@ -109,6 +119,69 @@
   flex-direction: column;
   gap: 2px;
   padding: 4px;
+}
+
+/* ---------- 模型胶囊里的思考强度面板 ---------- */
+
+/* 标题行整行可点：点它就是「去换模型」 */
+.effortHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+/* 标题行右端：当前模型名 + 箭头 */
+.panelTail {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  max-width: 55%;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 滑条容器：上下留白，滑条自己撑满宽度 */
+.effortPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 12px 10px;
+}
+
+/* 面板底部的「完成」：拖完档位自己收起来 */
+.closeRow {
+  width: 100%;
+  margin-top: 2px;
+  padding: 8px 10px;
+  border: none;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-brand-text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
 }
 
 .sectionTitle {

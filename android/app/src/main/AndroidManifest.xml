@@ -19,6 +19,18 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!--
+        保存到「下载」目录（/__ds_download/save）：
+        * Android 10（API 29）起走 MediaStore.Downloads，**不需要**任何存储权限；
+        * Android 9（API 28，本应用 minSdk）只能直接写公共下载目录，
+          需要 WRITE_EXTERNAL_STORAGE，运行时在 28 上申请。
+        因此这条权限必须带 maxSdkVersion="28"：29+ 声明它既没用、又会让安装器提示
+        「需要访问所有照片/媒体」之类的敏感权限，属于审核与体验双重扣分。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!--
         权限中心（/__ds_keepalive/permissions.json + /open）刻意**不**新增任何权限：
         「通知 / 省电 / 自启动 / 应用详情 / 流量」全部靠跳系统设置页 + 读系统状态实现，
         精确闹钟与悬浮窗这两格也只跳页面、不申请（本应用不排精确定时任务，也不需要悬浮窗，

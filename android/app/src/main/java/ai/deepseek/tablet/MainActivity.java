@@ -1,10 +1,13 @@
 package ai.deepseek.tablet;
 
 import android.Manifest;
+import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
@@ -31,6 +34,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
@@ -65,9 +69,34 @@ public final class MainActivity extends AppCompatActivity {
     private static final int REQ_POST_NOTIFICATIONS = 4712;
     private static final String LOOPBACK_HOST = "127.0.0.1";
 
-    /** 壳自己的轻量设置（目前只有「通知权限问过没有」这一项） */
-    private static final String PREFS_SHELL = "dsp.shell.v1";
-    private static final String KEY_NOTIF_ASKED = "notif_requested";
+    /**
+     * 附件上传的「来源记忆」（A 段）。
+     *
+     * <p>用户第一次点「+」时弹原生面板让他选来源（系统文件 / MT 管理器 / 其他应用），
+     * 选完记在这里；之后直接走上次那个来源，不再每次问。想换来源就长按「+」
+     * （页面通过 {@link PickerBridge#reset()} 清掉记忆，见那边的注释）。
+     */
+    private static final String PREFS_PICKER = "dsp.picker.v1";
+    private static final String KEY_PICKER_SOURCE = "source";
+    /** 系统文件：`ACTION_OPEN_DOCUMENT`（SAF），可多选，始终可用 */
+    private static final String SOURCE_SYSTEM = "system";
+    /** MT 管理器：`ACTION_GET_CONTENT` + `setPackage("bin.mt.plus")`，解析不到就不跳 */
+    private static final String SOURCE_MT = "mt";
+    /** 其他应用：`createChooser(ACTION_GET_CONTENT)`，让系统列出所有能选文件的应用 */
+    private static final String SOURCE_CHOOSER = "chooser";
+    /** MT 管理器的包名（官方版；共存版是 bin.mt.plus.canary，不在本次范围） */
+    private static final String MT_PACKAGE = "bin.mt.plus";
+
+    /**
+     * 等窗口拿到焦点再弹权限框的节奏。
+     *
+     * <p>为什么必须等：{@code requestPermissions} 在 Activity 还没真正可见/获得焦点时调用，
+     * 一部分 ROM 会<b>静默丢掉</b>这次请求（不弹框、也不回调），调用方却以为已经问过了 ——
+     * 这正是用户反馈的「通知权限根本没有请求」。所以这里轮询窗口焦点，最多等
+     * {@code 5 × 350ms ≈ 1.75s}，等不到就放弃（不落盘「问过」，下次 onResume 还有机会）。
+     */
+    private static final int NOTIFY_ASK_MAX_ATTEMPTS = 5;
+    private static final long NOTIFY_ASK_INTERVAL_MS = 350L;
 
     private static final int COLOR_BACKGROUND = 0xFF0F1115;
     /** 浅色主题时的窗口底色，与网页 --dsw-alias-bg-base 对齐 */
@@ -94,6 +123,12 @@ public final class MainActivity extends AppCompatActivity {
     private OkHttpClient httpClient;
 
     private ValueCallback<Uri[]> filePathCallback;
+    /**
+     * 来源面板是**异步**的：`AlertDialog` 弹出来时 `onShowFileChooser` 已经返回，
+     * 所以参数得拍成快照，等用户点完面板还能按原来的 accept / 多选设置拼 Intent。
+     */
+    private String[] pendingAcceptTypes;
+    private boolean pendingMultiple;
     private String loadedUrl;
     private boolean renderProcessRestartScheduled;
     /**
@@ -108,6 +143,13 @@ public final class MainActivity extends AppCompatActivity {
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Log.i(TAG, "onCreate");
+        /*
+         * [R14 通知直达] 进程被杀之后用户点通知，系统是**新建**这个 Activity 并把那条
+         * PendingIntent 当启动 intent 送进来 —— 所以冷启动这条路必须也读一次 getIntent()。
+         * 必须在 startServerAsync() 之前：页面一起来就会 GET /__ds_notify/open.json，
+         * 晚一步读就等于这次直达丢了。
+         */
+        captureNotifyIntent(getIntent());
         configureWindow();
         buildContentView();
         configureWebView();
@@ -207,6 +249,144 @@ public final class MainActivity extends AppCompatActivity {
         }
     }
 
+    // ---------------------------------------------------------------- 通知直达（R14）
+
+    /**
+     * 点通知带进来的会话 id 的**进程内信箱**（页面通过 `GET /__ds_notify/open.json` 取走）。
+     *
+     * <p>为什么用静态字段：{@link LocalServer}（以及它的 {@link RemoteNotifyHandler}）拿到的
+     * 只有 Application context，拿不到 Activity；而「刚刚点了哪条通知」这件事本身就属于
+     * <b>进程</b>而不是某个 Activity 实例。Activity 因渲染进程回收重建时，这份信箱也不会丢。
+     *
+     * <p>为什么不落 SharedPreferences：这是一次性的**投递**，不是设置。落盘会带来两个新问题 ——
+     * 「取走之后崩溃，重启又弹一遍」以及「清不干净的老 id」。进程死掉时语义就是「这次直达没了」，
+     * 用户再点一次通知即可（这也是系统通知的正常心智）。
+     */
+    private static final Object PENDING_SESSION_LOCK = new Object();
+    /** 待页面取走的会话 id（`null` = 没有）。只在锁内读写。 */
+    private static String pendingSessionId;
+    /** 累计投递次数：诊断 + 前端判断「是不是新的一次」。只在锁内自增。 */
+    private static int pendingSessionRev;
+
+    /**
+     * 通知点进来时走这里：Activity 已在栈顶（`FLAG_ACTIVITY_SINGLE_TOP`），**不会**重建。
+     *
+     * <p>三条纪律：
+     * <ol>
+     *   <li>先收下会话 id，再把 `getIntent()` 换成一个干净的 Intent —— 系统在 Activity 重建时
+     *       会把 ActivityRecord 里那份**原始** intent 再交回来一次，不抹掉就等于同一条通知投递两遍；</li>
+     *   <li>App 此刻已经在前台：页面收不到 `visibilitychange`，所以必须由原生**推一下**
+     *       （{@link #notifyPageDeepLink()}），否则用户点了通知却什么都不会发生；</li>
+     *   <li>整个过程不碰 WebView 的生命周期，不重建、不重载页面。</li>
+     * </ol>
+     */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        Log.i(TAG, "onNewIntent");
+        boolean captured = captureNotifyIntent(intent);
+        setIntent(cleanIntent());
+        if (captured) {
+            notifyPageDeepLink();
+        }
+    }
+
+    /**
+     * 从 intent 里取出会话 id 放进信箱。
+     *
+     * @return true = 这次真的带来了一个**新的**会话 id（调用方据此决定要不要推事件）
+     */
+    private boolean captureNotifyIntent(@Nullable Intent intent) {
+        if (intent == null) {
+            return false;
+        }
+        String raw;
+        try {
+            // 键名只在 RemoteNotifyHandler 里定义一次（那边发通知时 putExtra 用的就是它）
+            raw = intent.getStringExtra(RemoteNotifyHandler.EXTRA_SESSION_ID);
+        } catch (RuntimeException broken) {
+            Log.w(TAG, "读通知 extra 失败", broken);
+            return false;
+        }
+        if (raw == null) {
+            // 普通启动 / 汇总通知（不带会话）：不是直达，什么都不做
+            return false;
+        }
+        final String sessionId = raw.trim();
+        if (sessionId.isEmpty()) {
+            return false;
+        }
+        int rev;
+        synchronized (PENDING_SESSION_LOCK) {
+            pendingSessionId = sessionId;
+            pendingSessionRev++;
+            rev = pendingSessionRev;
+        }
+        Log.i(TAG, "通知直达：收到会话 " + maskSessionId(sessionId) + "（第 " + rev + " 次投递）");
+        // 收下即抹掉 extra：重建时系统交回的是原始 intent，不能让同一条通知再投一遍
+        setIntent(cleanIntent());
+        return true;
+    }
+
+    /**
+     * 取走待处理的会话 id，**读后清空**。
+     *
+     * <p>清空是幂等的关键：页面在「启动 + 每次回到前台」都会拉一次这个接口，如果不清，
+     * 一次点通知会让用户被反复拽回同一个会话（他刚切走就被拽回来）。清空之后第二次读返回空串。
+     *
+     * @return 没有待处理时返回空串，永不为 null（调用方不用判空）
+     */
+    static String consumePendingSessionId() {
+        synchronized (PENDING_SESSION_LOCK) {
+            String value = pendingSessionId;
+            pendingSessionId = null;
+            return value == null ? "" : value;
+        }
+    }
+
+    /** 累计投递次数（诊断用；只读，不清）。 */
+    static int pendingSessionRev() {
+        synchronized (PENDING_SESSION_LOCK) {
+            return pendingSessionRev;
+        }
+    }
+
+    /** 一个不含任何 extra 的空 intent：抹掉已经处理过的 deep link，防止重建时重复投递。 */
+    private Intent cleanIntent() {
+        return new Intent(this, MainActivity.class);
+    }
+
+    /** 日志里只留 id 前缀：会话 id 本身不该整段进 logcat。 */
+    private static String maskSessionId(String sessionId) {
+        if (sessionId.length() <= 8) {
+            return sessionId;
+        }
+        return sessionId.substring(0, 8) + "…";
+    }
+
+    /**
+     * 告诉页面「有新的 deep link 了，去 `/__ds_notify/open.json` 取」。
+     *
+     * <p>为什么需要它：App 已经在前台时点通知**不会**触发 `visibilitychange`，页面那两次
+     * （启动 + 回前台）轮询都赶不上。这里只发一个空事件，取数据和「会话在不在」全由
+     * `services/remote/deepLink.ts` 判定 —— 原生不多知道一件业务上的事。
+     *
+     * <p>页面还没加载完成时注入会失败（没有监听者），这是可接受的一类失败：
+     * 那种情况下页面的**启动轮询**会自己把同一个 id 取走。
+     */
+    private void notifyPageDeepLink() {
+        WebView view = webView;
+        if (view == null) {
+            return;
+        }
+        String script = "(function(){try{window.dispatchEvent(new Event('ds:deeplink'));}catch(e){}})()";
+        try {
+            view.evaluateJavascript(script, null);
+        } catch (RuntimeException broken) {
+            Log.d(TAG, "投递 deep link 事件失败（页面未就绪时由启动轮询兜住）", broken);
+        }
+    }
+
     // ---------------------------------------------------------------- 后台保活 / 通知权限
 
     /**
@@ -215,28 +395,127 @@ public final class MainActivity extends AppCompatActivity {
      * <p>没有它，后台保活的前台服务照样跑，只是那条「Chat Pad 正在保持远程连接」的常驻通知
      * 不显示 —— 用户看不到后台有东西在跑，就会觉得「怎么偷偷跑了」。所以能要就要一次。
      *
+     * <p><b>这里才是真正发起申请的地方</b>（R3 修正）。以前 {@code KeepAliveHandler} 在页面
+     * 连上时也试过一次，但那个时机经常没有窗口焦点，请求会被 ROM 吃掉；而「问过没问过」的标志
+     * 又先落了盘，于是本安装再也不会问 —— 用户看到的正是「根本没有请求，却显示已设置成功」。
+     * 现在：
+     * <ul>
+     *   <li>发起处只有这里（onResume），以及页面点按钮时 {@code KeepAliveHandler.requestNotificationNow}</li>
+     *   <li>判定「能不能看到通知」用 {@link KeepAliveHandler#isNotificationVisible(Context)}，
+     *       它把 33+ 权限 / 总开关 / 渠道三层都算进来（Android 9 上也不会假报成功）</li>
+     *   <li>「装一次只问一次」的标志落在 {@link KeepAliveHandler#hasAskedNotificationPermission}
+     *       里（跨进程有效，且和页面按钮共用同一个闸门）</li>
+     *   <li>只有真的把 requestPermissions 调出去了才记「问过」</li>
+     * </ul>
+     *
      * <p>只用框架 API：{@code Activity.requestPermissions(int, String[], int)} 自 API 23 起就有，
-     * 不必引入 androidx 的 ActivityCompat（本项目虽已依赖 androidx.appcompat，但没必要为此多一层）。
-     * 每装一次只问一次：用户拒绝后不再反复弹（拒绝不影响保活本身）。
+     * 不必引入 androidx 的 ActivityCompat。
+     *
+     * <p><b>为什么这里不用 {@code shouldShowRequestPermissionRationale} 当闸门</b>：它返回 false
+     * 有两种完全相反的含义 —— 「从没问过」和「拒绝且不再询问」。拿它挡第一次申请会把正常路径
+     * 一起挡掉（首次启动永远弹不出来）。所以闸门只用 {@link KeepAliveHandler#hasAskedNotificationPermission}
+     * 这一份「我们自己问过没有」的记录，rationale 留给页面的 {@code canRequest} 去解释。
      */
     private void requestNotificationPermissionOnce() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            // 12 及以下没有这个运行时权限：通知开关只在系统设置里
             return;
         }
-        if (RemoteKeepAliveService.isNotificationAllowed(this)) {
+        if (KeepAliveHandler.isNotificationPermissionGranted(this)) {
+            // 权限本身已经授予：这时看不到通知只可能是总开关/渠道被关，弹框没有任何用
             return;
         }
-        SharedPreferences preferences = getSharedPreferences(PREFS_SHELL, MODE_PRIVATE);
-        if (preferences.getBoolean(KEY_NOTIF_ASKED, false)) {
+        if (KeepAliveHandler.hasAskedNotificationPermission(this)) {
+            // 装一次只问一次：问过之后（哪怕被拒）不再弹，页面会如实显示「未开启 + 去设置」
             return;
         }
-        preferences.edit().putBoolean(KEY_NOTIF_ASKED, true).apply();
+        scheduleNotificationPermissionRequest(0);
+    }
+
+    /**
+     * 等窗口有焦点再弹（最多 {@link #NOTIFY_ASK_MAX_ATTEMPTS} 次）。
+     *
+     * <p>用 {@code mainHandler.postDelayed} 而不是 {@code Window.getDecorView().post}：
+     * 后者在窗口还没 attach 时会直接丢掉任务，而这里需要「等一会儿再试」的语义。
+     *
+     * <p><b>为什么「没焦点就不申请、也不落盘」</b>：没焦点时 {@code requestPermissions} 在多数
+     * ROM 上会静默丢掉（不弹框、也不回调）。此时如果顺手记下「问过了」，本安装就再也不会问 ——
+     * 这正好复现了用户反馈的「根本没有请求，却显示已经设置成功」。所以宁可这次不申请，
+     * 让下一次 onResume（用户切走再回来）再试。
+     */
+    private void scheduleNotificationPermissionRequest(final int attempt) {
+        if (attempt > NOTIFY_ASK_MAX_ATTEMPTS) {
+            Log.i(TAG, "等不到窗口焦点，这次不申请通知权限（下次 onResume 再试）");
+            return;
+        }
+        mainHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (isFinishing() || isDestroyed()) {
+                    return;
+                }
+                if (!hasWindowFocus()) {
+                    if (attempt < NOTIFY_ASK_MAX_ATTEMPTS) {
+                        scheduleNotificationPermissionRequest(attempt + 1);
+                    } else {
+                        // 一直没焦点（例如被系统弹窗压着）：放弃本次，**不落盘**
+                        Log.i(TAG, "等不到窗口焦点，这次不申请通知权限");
+                    }
+                    return;
+                }
+                askNotificationPermissionNow();
+            }
+        }, attempt == 0 ? 0L : NOTIFY_ASK_INTERVAL_MS);
+    }
+
+    /**
+     * 真的把系统权限框弹出去。
+     *
+     * <p>顺序讲究：<b>先调用、成功了才落盘</b>。反过来的话，万一这次调用被 ROM 吃掉，
+     * 本安装就再也不会问了 —— 那正是「根本没有请求，却显示已经设置成功」的另一半成因。
+     */
+    private void askNotificationPermissionNow() {
+        if (KeepAliveHandler.hasAskedNotificationPermission(this)) {
+            return;
+        }
+        if (KeepAliveHandler.isNotificationVisible(this)) {
+            return;
+        }
+        boolean posted = false;
         try {
             requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS},
                     REQ_POST_NOTIFICATIONS);
+            posted = true;
+            Log.i(TAG, "已发出 POST_NOTIFICATIONS 申请");
         } catch (RuntimeException failed) {
-            // 个别 ROM 在窗口还没拿到焦点时会抛；失败就算了，拒绝也只是一条通知不显示
+            // 个别 ROM 在窗口还没拿到焦点时会抛；失败就算了，不落盘，下次再试
             Log.w(TAG, "request POST_NOTIFICATIONS failed", failed);
+        }
+        if (posted) {
+            KeepAliveHandler.markNotificationPermissionAsked(this);
+        }
+    }
+
+    /**
+     * 权限框的结果：只有它才能真正说明「用户点了什么」。
+     *
+     * <p>以前这个回调根本没实现，结果被系统静默丢弃，日志里什么都看不到 —— 真机排障时
+     * 「到底弹没弹、用户点了什么」全靠猜。现在至少留一条明确日志，并在授予后立刻把常驻通知
+     * 重建一遍（没权限期间 startForeground 挂上去的那条通知，授予后未必会自己刷新出来）。
+     */
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
+            @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_POST_NOTIFICATIONS) {
+            return;
+        }
+        boolean granted = grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        Log.i(TAG, "POST_NOTIFICATIONS result: granted=" + granted);
+        if (granted) {
+            // 有权限了：把「正在保持远程连接 · N 个任务」那条通知立刻刷出来
+            RemoteKeepAliveService.refreshResident(getApplicationContext());
         }
     }
 
@@ -319,17 +598,35 @@ public final class MainActivity extends AppCompatActivity {
         setContentView(rootLayout);
     }
 
-    /** 上次告诉网页的状态栏高度，页面加载完成时补发一次（避免页面晚于 inset 就绪） */
+    /** 最近一次拿到的状态栏高度（**物理像素**，换算成 CSS px 由 publishSafeTop 负责）；
+     *  页面加载完成时补发一次，避免页面晚于 inset 就绪。 */
     private int lastSafeTop = -1;
 
-    /** 把状态栏高度写进网页的 CSS 变量 --ds-safe-top */
+    /**
+     * 把状态栏高度写进网页的 CSS 变量 --ds-safe-top。
+     *
+     * <p><b>单位必须换算。</b> {@link WindowInsetsCompat} 给的是**物理像素**（px），
+     * 而 CSS 变量要的是 **CSS 像素**。页面用的是 {@code width=device-width,initial-scale=1}
+     * + {@code setUseWideViewPort(true)}，所以 1 CSS px 恒等于 1 dp，
+     * 换算就是除以 {@code displayMetrics.density}。
+     *
+     * <p>不除会怎样（2026-11-21 真机反馈的根因）：320dpi 的平板上 density=2，24dp 的状态栏
+     * 被写成 {@code 48px}；480dpi 上 density=3，写成 {@code 72px}。前端把这份"CSS px"原样
+     * 作为安全区，整条顶栏于是被多推下去 {@code 24×(density−1)} 像素 —— 就是用户说的
+     * "最顶上这一整条挪得太下面了"。物理像素只在这里出现一次，出去必须是 CSS px。
+     */
     private void publishSafeTop(int topPx) {
         lastSafeTop = topPx;
         if (webView == null) {
             return;
         }
+        float density = getResources().getDisplayMetrics().density;
+        int cssTop = density > 0f ? Math.round(topPx / density) : topPx;
+        // 真机上 logcat 搜 "safe top" 就能看到「物理 / density / CSS」三个数，
+        // 下次有人怀疑状态栏高度时不用再猜（本次根因就是这三个数没人核对过）。
+        Log.i(TAG, "safe top: " + topPx + "px physical / density " + density + " -> " + cssTop + "px css");
         String script = "(function(){try{document.documentElement.style.setProperty("
-                + "'--ds-safe-top','" + topPx + "px');}catch(e){}})()";
+                + "'--ds-safe-top','" + cssTop + "px');}catch(e){}})()";
         try {
             webView.evaluateJavascript(script, null);
         } catch (RuntimeException ignored) {
@@ -375,6 +672,8 @@ public final class MainActivity extends AppCompatActivity {
             webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_BOUND, true);
         }
         webView.addJavascriptInterface(new ThemeBridge(), "DSNative");
+        // 来源记忆的读/清（页面长按「+」时用 reset() 换来源，见 PickerBridge 注释）
+        webView.addJavascriptInterface(new PickerBridge(), "DSNativePicker");
 
         webView.setWebViewClient(new ShellWebViewClient());
         webView.setWebChromeClient(new ShellWebChromeClient());
@@ -560,18 +859,21 @@ public final class MainActivity extends AppCompatActivity {
         public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
                 WebChromeClient.FileChooserParams params) {
             if (filePathCallback != null) {
-                // 上一个选择还没回，先按取消收尾
-                filePathCallback.onReceiveValue(new Uri[0]);
+                // 上一个选择还没回，先按取消收尾（null = WebView 认的「取消」）
+                filePathCallback.onReceiveValue(null);
                 filePathCallback = null;
             }
             if (callback == null) {
                 return false;
             }
             filePathCallback = callback;
-            if (!launchFileChooser(params)) {
-                // 拉不起选择器也要回调，否则页面上的 <input type=file> 会一直挂住
-                filePathCallback = null;
-                callback.onReceiveValue(new Uri[0]);
+            // 面板是异步的：先把这次请求的参数拍快照
+            pendingAcceptTypes = params == null ? null : params.getAcceptTypes();
+            pendingMultiple = params != null
+                    && params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE;
+            if (!launchFileChooser()) {
+                // 连来源面板都弹不出来：必须回调，否则页面上的 <input type=file> 会一直挂住
+                cancelFileChooser();
             }
             return true;
         }
@@ -631,50 +933,287 @@ public final class MainActivity extends AppCompatActivity {
 
     // ---------------------------------------------------------------- 文件选择
 
-    private boolean launchFileChooser(WebChromeClient.FileChooserParams params) {
-        String[] acceptTypes = params == null ? null : params.getAcceptTypes();
-        boolean multiple = params != null
-                && params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE;
-        String[] mimeTypes = toMimeTypes(acceptTypes);
+    /**
+     * 附件上传的文件选择器，**来源可切换**（A 段）。
+     *
+     * <p>为什么不再只用系统 DocumentsUI：用户反馈「有的设备它有点小问题」——
+     * 那台设备上系统文件选择器打不开某些目录 / 选完读不到，用户习惯用 MT 管理器
+     * 这类国产文件管理器挑文件。所以这里给三个来源，各用不同的 Intent：
+     *
+     * | 来源 | Intent | 说明 |
+     * |---|---|---|
+     * | 系统文件 | {@code ACTION_OPEN_DOCUMENT} + {@code CATEGORY_OPENABLE} | SAF，返回的 `content://` 一定可读；支持多选；**始终可用** |
+     * | MT 管理器 | {@code ACTION_GET_CONTENT} + 通配 MIME + {@code setPackage("bin.mt.plus")} | 先 {@code resolveActivity}，解析不到**不硬跳**（硬跳就是 ActivityNotFound 闪退） |
+     * | 其他应用 | {@code createChooser(ACTION_GET_CONTENT)} | 让系统列出所有能选文件的应用；**刻意不加** `CATEGORY_OPENABLE`，否则会把没声明它的国产管理器挡在候选之外 |
+     *
+     * <p>MT 管理器那边有官方依据：它的更新日志从 v2.13.4 起就写着「优化文件选择器界面并
+     * **支持外部程序调用**」（v2.13.0 还修过「外部程序调用 MT 管理器打开文件时容易出现
+     * Permission Denial」）。也就是说它**注册了**给外部应用选文件的入口；但不同版本 /
+     * 不同 ROM 上注册的 action 不完全一样，所以只把它当成「候选来源之一」，解析不到就退回
+     * 系统或应用选择器，靠 {@link AlertDialog} 让用户自己决定。
+     *
+     * <p>记忆：选过的来源落 {@link SharedPreferences}，下次直接走它；长按「+」由页面调
+     * {@link PickerBridge#reset()} 清掉记忆，下次就又弹面板。
+     */
+    private boolean launchFileChooser() {
+        String remembered = rememberedPickerSource();
+        if (remembered != null && launchPickerSource(remembered)) {
+            return true;
+        }
+        // 没有记忆，或记忆的来源这次拉不起来（被卸载 / 换了 ROM）：请用户选一次
+        return showPickerSourcePanel(remembered != null);
+    }
 
-        // 优先用 SAF（ACTION_OPEN_DOCUMENT）：返回的 content:// 一定可读，
-        // GET_CONTENT 在部分国产 ROM 上会给出读不了的地址，表现为"选了文件但页面没反应"
+    /** @return true 表示已经接管这次选择（面板或选择器已弹出）；false 表示连面板都弹不出来 */
+    private boolean showPickerSourcePanel(boolean fallback) {
+        final List<String> sources = new ArrayList<>();
+        final List<String> labels = new ArrayList<>();
+        sources.add(SOURCE_SYSTEM);
+        labels.add(getString(R.string.pick_source_system));
+        // 没装 MT 管理器就不画这一项：列一个装不上的来源只会让人以为「点了没反应」
+        if (isMountManagerInstalled()) {
+            sources.add(SOURCE_MT);
+            labels.add(getString(mtPickerUsable()
+                    ? R.string.pick_source_mt
+                    : R.string.pick_source_mt_unavailable));
+        }
+        sources.add(SOURCE_CHOOSER);
+        labels.add(getString(R.string.pick_source_other));
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this);
+        builder.setTitle(R.string.pick_source_title);
+        if (fallback) {
+            builder.setMessage(R.string.pick_source_fallback);
+        }
+        builder.setItems(labels.toArray(new CharSequence[0]), new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                // 防御：列表项与来源数组理论上等长，索引越界不能把页面卡住
+                if (which < 0 || which >= sources.size()) {
+                    cancelFileChooser();
+                    return;
+                }
+                String source = sources.get(which);
+                if (!launchPickerSource(source)) {
+                    Toast.makeText(MainActivity.this, R.string.pick_source_failed,
+                            Toast.LENGTH_SHORT).show();
+                    cancelFileChooser();
+                    return;
+                }
+                rememberPickerSource(source);
+            }
+        });
+        builder.setNegativeButton(R.string.pick_source_cancel, new DialogInterface.OnClickListener() {
+            @Override
+            public void onClick(DialogInterface dialog, int which) {
+                cancelFileChooser();
+            }
+        });
+        // 返回键 / 点外面关掉面板也算取消：不回调的话页面的「+」会一直挂着
+        builder.setOnCancelListener(new DialogInterface.OnCancelListener() {
+            @Override
+            public void onCancel(DialogInterface dialog) {
+                cancelFileChooser();
+            }
+        });
+        try {
+            builder.show();
+            return true;
+        } catch (RuntimeException broken) {
+            // 窗口正在销毁等极端情况：弹不出来也要把这次选择收尾
+            Log.w(TAG, "来源面板弹不出来", broken);
+            cancelFileChooser();
+            return false;
+        }
+    }
+
+    /** 按来源拼 Intent 并拉起；false = 这个来源这次用不了（不会抛、也不会硬跳）。 */
+    private boolean launchPickerSource(String source) {
+        if (SOURCE_SYSTEM.equals(source)) {
+            return launchSystemDocumentPicker();
+        }
+        if (SOURCE_MT.equals(source)) {
+            return launchMountManagerPicker();
+        }
+        if (SOURCE_CHOOSER.equals(source)) {
+            return launchOtherAppsPicker();
+        }
+        return false;
+    }
+
+    /**
+     * 系统文件：`ACTION_OPEN_DOCUMENT`（SAF）。
+     *
+     * <p>SAF 返回的 `content://` 一定可读，这也是「选了文件但页面没反应」最稳的一条路。
+     * 用 `createChooser` 包一层：部分 ROM 上直接 start 会被默认文件管理器独占，
+     * 包一层至少让用户看得到「文件」这个来源。
+     */
+    private boolean launchSystemDocumentPicker() {
+        String[] mimeTypes = toMimeTypes(pendingAcceptTypes);
         Intent document = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         document.addCategory(Intent.CATEGORY_OPENABLE);
         document.setType(resolveIntentType(mimeTypes));
         if (mimeTypes.length > 0) {
             document.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
         }
-        if (multiple) {
+        if (pendingMultiple) {
             document.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         }
         document.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        return startForFileChooser(Intent.createChooser(document, getString(R.string.pick_file)));
+    }
+
+    /**
+     * MT 管理器：`ACTION_GET_CONTENT` + 通配 MIME + `setPackage("bin.mt.plus")`。
+     *
+     * <p><b>先 resolveActivity 再跳</b>：MT 管理器虽然从 v2.13.4 起「支持外部程序调用」，
+     * 但那是它的**文件选择器**入口，不同版本注册的 action / MIME 不完全一样；直接把
+     * 带 package 的 Intent 扔出去，解析不到就是 {@code ActivityNotFoundException}。
+     * 解析不到时返回 false，由面板回退到「其他应用」或让用户重选 —— 绝不硬跳。
+     */
+    private boolean launchMountManagerPicker() {
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.setType("*/*");
+        intent.setPackage(MT_PACKAGE);
+        if (pendingMultiple) {
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        }
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        if (intent.resolveActivity(getPackageManager()) == null) {
+            Log.i(TAG, "MT 管理器没有注册 GET_CONTENT，不硬跳（回退到来源面板）");
+            return false;
+        }
+        return startForFileChooser(intent);
+    }
+
+    /**
+     * 其他应用：`createChooser(ACTION_GET_CONTENT)`。
+     *
+     * <p><b>刻意不加 `CATEGORY_OPENABLE`</b>：MT 管理器这类第三方文件管理器很多不声明它，
+     * 加上就等于把它们从候选列表里筛掉 —— 那正好是这次要解决的问题。代价是可能选到
+     * 不可流式读的地址，所以 {@link #extractPickedUris} 那边统一只收 `content://`。
+     */
+    private boolean launchOtherAppsPicker() {
+        String[] mimeTypes = toMimeTypes(pendingAcceptTypes);
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.setType("*/*");
+        if (mimeTypes.length > 0) {
+            intent.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
+        }
+        if (pendingMultiple) {
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        }
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        return startForFileChooser(Intent.createChooser(intent, getString(R.string.pick_file)));
+    }
+
+    private boolean startForFileChooser(Intent chooser) {
         try {
-            startActivityForResult(Intent.createChooser(document, getString(R.string.pick_file)),
-                    REQ_FILE_CHOOSER);
+            startActivityForResult(chooser, REQ_FILE_CHOOSER);
             return true;
-        } catch (ActivityNotFoundException noDocument) {
-            Log.w(TAG, "no document picker, falling back to GET_CONTENT", noDocument);
+        } catch (ActivityNotFoundException noPicker) {
+            Log.w(TAG, "文件选择器拉不起来", noPicker);
+            return false;
+        } catch (RuntimeException broken) {
+            // 个别 ROM 在窗口不可见时抛 SecurityException 之类：当成「这次用不了」
+            Log.w(TAG, "文件选择器启动失败", broken);
+            return false;
+        }
+    }
+
+    /** 取消这次选择：**必须**回 `null`（空数组在单选 `<input type=file>` 上会让「+」一直挂着）。 */
+    private void cancelFileChooser() {
+        ValueCallback<Uri[]> callback = filePathCallback;
+        filePathCallback = null;
+        pendingAcceptTypes = null;
+        pendingMultiple = false;
+        if (callback != null) {
+            callback.onReceiveValue(null);
+        }
+    }
+
+    private SharedPreferences pickerPreferences() {
+        return getSharedPreferences(PREFS_PICKER, MODE_PRIVATE);
+    }
+
+    @Nullable
+    private String rememberedPickerSource() {
+        String value;
+        try {
+            value = pickerPreferences().getString(KEY_PICKER_SOURCE, null);
+        } catch (RuntimeException broken) {
+            return null;
+        }
+        if (SOURCE_SYSTEM.equals(value) || SOURCE_MT.equals(value) || SOURCE_CHOOSER.equals(value)) {
+            return value;
+        }
+        return null;
+    }
+
+    private void rememberPickerSource(String source) {
+        try {
+            pickerPreferences().edit().putString(KEY_PICKER_SOURCE, source).apply();
+        } catch (RuntimeException broken) {
+            // 记不住就下次再问一遍，不影响本次选择
+            Log.w(TAG, "来源记忆没写进去", broken);
+        }
+    }
+
+    private void forgetPickerSource() {
+        try {
+            pickerPreferences().edit().remove(KEY_PICKER_SOURCE).apply();
+        } catch (RuntimeException broken) {
+            Log.w(TAG, "来源记忆清不掉", broken);
+        }
+    }
+
+    /** MT 管理器装没装（共存版 `bin.mt.plus.canary` 不算）。 */
+    private boolean isMountManagerInstalled() {
+        try {
+            getPackageManager().getPackageInfo(MT_PACKAGE, 0);
+            return true;
+        } catch (PackageManager.NameNotFoundException notInstalled) {
+            return false;
+        } catch (RuntimeException broken) {
+            Log.w(TAG, "查 MT 管理器安装状态失败", broken);
+            return false;
+        }
+    }
+
+    /** MT 管理器有没有给通配 MIME 的 `GET_CONTENT` 注册入口（决定面板上那一项画成哪个文案）。 */
+    private boolean mtPickerUsable() {
+        Intent probe = new Intent(Intent.ACTION_GET_CONTENT);
+        probe.setType("*/*");
+        probe.setPackage(MT_PACKAGE);
+        try {
+            return probe.resolveActivity(getPackageManager()) != null;
+        } catch (RuntimeException broken) {
+            Log.w(TAG, "解析 MT 管理器入口失败", broken);
+            return false;
+        }
+    }
+
+    /**
+     * 页面用的极小原生桥：只服务于「来源记忆」。
+     *
+     * <p>为什么要它：`onShowFileChooser` **拿不到「长按」这个手势**，而需求要求
+     * 「记忆上次来源，长按可换」。页面在长按「+」时先调
+     * `window.DSNativePicker.reset()` 把记忆清掉，下一次 {@code onShowFileChooser}
+     * 就会重新弹面板 —— 为此不必新开一条 HTTP 路由。
+     */
+    public class PickerBridge {
+
+        /** 当前记住的来源（`system` / `mt` / `chooser`；空串 = 还没选过）。 */
+        @android.webkit.JavascriptInterface
+        public String current() {
+            String value = rememberedPickerSource();
+            return value == null ? "" : value;
         }
 
-        // 没有 SAF 文档选择器的老 ROM，退回 GET_CONTENT
-        Intent legacy = new Intent(Intent.ACTION_GET_CONTENT);
-        legacy.addCategory(Intent.CATEGORY_OPENABLE);
-        legacy.setType(resolveIntentType(mimeTypes));
-        if (mimeTypes.length > 0) {
-            legacy.putExtra(Intent.EXTRA_MIME_TYPES, mimeTypes);
-        }
-        if (multiple) {
-            legacy.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        }
-        legacy.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        try {
-            startActivityForResult(Intent.createChooser(legacy, getString(R.string.pick_file)),
-                    REQ_FILE_CHOOSER);
-            return true;
-        } catch (ActivityNotFoundException noChooser) {
-            Log.w(TAG, "no file chooser available", noChooser);
-            return false;
+        /** 清掉记忆：下一次点「+」重新弹来源面板。 */
+        @android.webkit.JavascriptInterface
+        public void reset() {
+            forgetPickerSource();
         }
     }
 
@@ -686,23 +1225,44 @@ public final class MainActivity extends AppCompatActivity {
         }
         ValueCallback<Uri[]> callback = filePathCallback;
         filePathCallback = null;
+        pendingAcceptTypes = null;
+        pendingMultiple = false;
         if (callback == null) {
             return;
         }
-        // 用户取消时回空数组，WebView 认为没有选中文件
-        callback.onReceiveValue(extractPickedUris(resultCode, data));
+        Uri[] picked = extractPickedUris(resultCode, data);
+        if (picked.length == 0) {
+            // 用户取消 / 选到的都不是 content://：一律回 null。
+            // 空数组是「选了 0 个文件」，在单选 input 上会让页面的「+」永远卡住。
+            Log.i(TAG, "file chooser returned nothing (resultCode=" + resultCode + ")");
+            callback.onReceiveValue(null);
+            return;
+        }
+        callback.onReceiveValue(picked);
     }
 
-    private static Uri[] extractPickedUris(int resultCode, @Nullable Intent data) {
+    /**
+     * 从结果里取 URI。**只收 `content://`**：WebView 关着 `setAllowFileAccess(false)`，
+     * `file://` 地址进来只会「选了没反应」—— 挡掉并给一句人话，比静默失败强。
+     */
+    private Uri[] extractPickedUris(int resultCode, @Nullable Intent data) {
         if (resultCode != RESULT_OK || data == null) {
             return new Uri[0];
         }
         List<Uri> uris = new ArrayList<>();
+        boolean skippedUnreadable = false;
         ClipData clipData = data.getClipData();
         if (clipData != null) {
             for (int index = 0; index < clipData.getItemCount(); index++) {
                 Uri uri = clipData.getItemAt(index).getUri();
-                if (uri != null && !uris.contains(uri)) {
+                if (uri == null) {
+                    continue;
+                }
+                if (!isReadablePickedUri(uri)) {
+                    skippedUnreadable = true;
+                    continue;
+                }
+                if (!uris.contains(uri)) {
                     uris.add(uri);
                 }
             }
@@ -710,10 +1270,25 @@ public final class MainActivity extends AppCompatActivity {
         if (uris.isEmpty()) {
             Uri single = data.getData();
             if (single != null) {
-                uris.add(single);
+                if (isReadablePickedUri(single)) {
+                    uris.add(single);
+                } else {
+                    skippedUnreadable = true;
+                }
+            }
+        }
+        if (skippedUnreadable) {
+            Log.w(TAG, "选中的文件里有非 content:// 地址，已忽略（WebView 读不了 file://）");
+            if (uris.isEmpty()) {
+                Toast.makeText(this, R.string.pick_source_unreadable, Toast.LENGTH_LONG).show();
             }
         }
         return uris.toArray(new Uri[0]);
+    }
+
+    private static boolean isReadablePickedUri(Uri uri) {
+        String scheme = uri.getScheme();
+        return scheme != null && "content".equalsIgnoreCase(scheme);
     }
 
     private static String[] toMimeTypes(@Nullable String[] acceptTypes) {
@@ -844,6 +1419,8 @@ public final class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         Log.i(TAG, "onDestroy");
+        // 选择器面板可能还挂着：Activity 走了必须把回调收尾，否则页面的「+」会一直等
+        cancelFileChooser();
         if (server != null) {
             // 关闭监听 socket + 取消在途代理请求
             server.stop();

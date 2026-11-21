@@ -406,3 +406,92 @@
     height: 40px;
   }
 }
+
+/* ── [R8 缓存] 加载态与提示条 ───────────────────────────────────────────
+   三态都在这里：骨架（首次拉取未完成）/ 顶部细提示（缓存直出 · 正在同步 ·
+   没同步上）/ 空态沿用 .placeholder。视觉与 App.module.css 的骨架同一套。 */
+
+/* 缓存直出时顶部那条细提示：粘在时间线顶部，滚动时不跟着走 */
+.syncBar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-sizing: border-box;
+  margin: -8px 0 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--dsw-alias-border-l1);
+  background-color: var(--dsw-alias-bg-base);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 「重试」：细提示条里的文字按钮，不抢视觉 */
+.syncAction {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--dsw-alias-brand-text);
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* 骨架：几条呼吸的灰条（与 App.module.css 的 .skeleton 同一套视觉） */
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 24px 0 24px;
+}
+
+.skeletonRow {
+  height: 14px;
+  border-radius: 7px;
+  background: linear-gradient(
+    90deg,
+    var(--dsw-alias-border-l1) 25%,
+    var(--dsw-alias-border-l2) 37%,
+    var(--dsw-alias-border-l1) 63%
+  );
+  background-size: 300% 100%;
+  animation: timeline-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.skeletonRow[data-width='60'] {
+  width: 60%;
+}
+
+.skeletonRow[data-width='74'] {
+  width: 74%;
+}
+
+.skeletonRow[data-width='88'] {
+  width: 88%;
+}
+
+.skeletonRow[data-width='92'] {
+  width: 92%;
+}
+
+@keyframes timeline-skeleton-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+
+  100% {
+    background-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeletonRow {
+    animation: none;
+  }
+}

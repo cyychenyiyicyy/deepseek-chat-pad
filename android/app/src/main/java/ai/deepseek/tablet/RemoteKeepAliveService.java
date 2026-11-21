@@ -18,6 +18,8 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 
+import java.util.Locale;
+
 /**
  * 后台保活前台服务（远程连接在用，通用设置的「后台与权限」也在用）。
  *
@@ -44,6 +46,21 @@ import android.util.Log;
  *   <li>维护一个「常驻通知文案」的持久开关（{@link #setNotificationEnabled}）：页面说「不要通知」
  *       时只把文案降级成「后台保持」，<b>绝不</b>撤掉前台地位</li>
  * </ol>
+ *
+ * <p><b>与通知中心（{@link RemoteNotifyHandler}）的关系</b>：这一条常驻通知是「后台在跑」的常驻
+ * 证据，通知中心那几条是「谁在跑」的详情。两者：
+ * <ul>
+ *   <li>挂<b>同一个通知组</b> {@link RemoteNotifyHandler#GROUP_KEY}（`setGroup` 在 7.0+ 生效），
+ *       系统会把它们堆成一摞，展开就能一起看到</li>
+ *   <li><b>不共用 id、也不互相覆盖</b>：工作通知撤自己的 id，本类只认
+ *       {@link #NOTIFICATION_ID}；工作通知绝不会把这条挤掉（挤掉 = 服务失去前台地位）</li>
+ *   <li><b>同一个数字</b>：页面推快照时通知中心调 {@link #setActiveWorkCount}，这条通知的标题
+ *       随即变成「正在保持远程连接 · N 个任务」，不用页面再调一次接口</li>
+ * </ul>
+ *
+ * <p><b>Android 9（API 28）注意</b>：8.0 起渠道是硬前提（没渠道 = 通知静默消失），所以
+ * {@link #ensureResidentChannel(Context)} 在服务 onCreate、权限快照、通知中心三处都会被调；
+ * {@code setForegroundServiceBehavior} 是 12+ 的，本类没用；{@code startForeground} 走两参重载。
  *
  * <p>刻意<b>不</b>做的事：
  * <ul>
@@ -113,6 +130,17 @@ public final class RemoteKeepAliveService extends Service {
     /** 通知文案被页面降级时用的两行（不说「远程连接」，只说「在后台保持」） */
     private static final String TITLE_QUIET = "Chat Pad 在后台保持";
     private static final String CONTENT_QUIET = "后台服务仍在运行；点一下回到对话，退出应用后自动停止";
+    /**
+     * 有任务在跑时的标题后缀：`Chat Pad 正在保持远程连接 · 3 个任务`。
+     *
+     * <p>为什么并到这一条：用户要「常驻通知显示当前正在进行的工作」。前台服务那条通知本来就是
+     * 常驻的，再单独发一条「N 个任务」会和它抢同一个位置，而且两条常驻通知在 Android 9 上
+     * 会互相折叠。所以把任务数写进这里，详细列表在 {@link RemoteNotifyHandler} 的汇总通知里。
+     */
+    private static final String WORK_SUFFIX_FORMAT = " · %d 个任务";
+    private static final String WORK_CONTENT_FORMAT = "有 %d 个任务正在进行；点一下回到对话";
+    /** 当前进行中的任务数（由 {@link RemoteNotifyHandler} 推快照时更新，0 表示没有） */
+    private static volatile int activeWorkCount;
 
     /**
      * 服务是否活着。只在本进程内有意义（进程被杀后静态变量自然没了），
@@ -276,6 +304,39 @@ public final class RemoteKeepAliveService extends Service {
         return running;
     }
 
+    /** 当前进行中的任务数（0 = 没有；页面从 /__ds_notify/state 也能读到同一个值）。 */
+    static int activeWorkCount() {
+        return activeWorkCount;
+    }
+
+    /**
+     * 页面推来的进行中任务数变了：更新静态计数并立刻刷新常驻通知的文案。
+     *
+     * <p>服务没跑时只更新计数、不刷新（没有通知可刷）。刷新失败也只是文案旧一行，
+     * 「刷新通知失败就退出服务」是本工程明令禁止的写法。
+     */
+    static void setActiveWorkCount(Context context, int count) {
+        int safe = count < 0 ? 0 : count;
+        if (safe == activeWorkCount) {
+            return;
+        }
+        activeWorkCount = safe;
+        refreshResident(context);
+    }
+
+    /**
+     * 把常驻通知按当前状态重建一遍（当前没有服务实例时什么都不做）。
+     *
+     * <p>用在：任务数变化、用户刚授予通知权限（之前那条通知其实一直没显示）。
+     */
+    static void refreshResident(Context context) {
+        RemoteKeepAliveService current = instance;
+        if (current == null) {
+            return;
+        }
+        current.refreshNotification();
+    }
+
     /** 页面是否要求过保活。落盘的，跨进程重启仍然有效。 */
     static boolean shouldRun(Context context) {
         Context app = appContext(context);
@@ -417,22 +478,56 @@ public final class RemoteKeepAliveService extends Service {
 
     /** 建通知渠道：低打扰（无声、无振动、无角标、不亮屏），用户不会被打扰但看得到。 */
     private void createChannel() {
-        NotificationManager manager =
-                (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        if (manager == null) {
+        // 保活自己这条渠道 + 通知中心的两条（工作进度 / 提醒）：
+        // 服务起来正好是「马上就要发通知」的时刻，一起确保，省得工作通知因为渠道缺失静默消失
+        ensureResidentChannel(this);
+        RemoteNotifyHandler.ensureChannels(this);
+    }
+
+    /**
+     * 确保「后台保活」这条渠道存在（幂等，随时可调）。
+     *
+     * <p>独立成静态方法是因为{@link RemoteNotifyHandler#ensureChannels(Context)} 也要调它：
+     * 页面可能在保活服务起来之前就读权限快照，那时候渠道还不存在会被判成「通知不可见」。
+     *
+     * <p>8.0 起渠道的 importance 是「第一次创建时定、之后由用户说了算」：重复 create 只会
+     * 更新名字/描述，不会把用户调过的重要性抢回来 —— 所以这里每次都传 LOW 是安全的。
+     */
+    static void ensureResidentChannel(Context context) {
+        Context app = appContext(context);
+        if (app == null) {
             return;
         }
-        // minSdk 28 > 26：渠道 API 无条件可用，不需要 API 等级判断
-        NotificationChannel channel = new NotificationChannel(
-                CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW);
-        channel.setDescription(CHANNEL_DESCRIPTION);
-        // IMPORTANCE_LOW 本身就不响，这里再把声音/振动/灯显式关掉，防止 ROM 改过默认值
-        channel.setSound(null, null);
-        channel.enableVibration(false);
-        channel.enableLights(false);
-        channel.setShowBadge(false);
-        channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
-        manager.createNotificationChannel(channel);
+        try {
+            NotificationManager manager =
+                    (NotificationManager) app.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager == null) {
+                return;
+            }
+            // minSdk 28 > 26：渠道 API 无条件可用，不需要 API 等级判断
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW);
+            channel.setDescription(CHANNEL_DESCRIPTION);
+            // IMPORTANCE_LOW 本身就不响，这里再把声音/振动/灯显式关掉，防止 ROM 改过默认值
+            channel.setSound(null, null);
+            channel.enableVibration(false);
+            channel.enableLights(false);
+            channel.setShowBadge(false);
+            channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+            manager.createNotificationChannel(channel);
+        } catch (RuntimeException broken) {
+            // ROM 删了渠道 / NotificationManager 被禁：留给调用方的 catch 兜，别在这里炸
+            Log.w(TAG, "建保活通知渠道失败", broken);
+        }
+    }
+
+    /** 常驻通知标题：有任务时带上任务数（「正在保持远程连接 · N 个任务」）。 */
+    private static String titleWithWork(String base) {
+        int count = activeWorkCount();
+        if (count <= 0) {
+            return base;
+        }
+        return base + String.format(Locale.CHINA, WORK_SUFFIX_FORMAT, Integer.valueOf(count));
     }
 
     private Notification buildNotification() {
@@ -453,8 +548,14 @@ public final class RemoteKeepAliveService extends Service {
         builder.setSmallIcon(R.mipmap.ic_launcher);
         // 通知开关关掉时只换文案（不能真隐藏：前台服务必须有一条通知，见 KEY_NOTIFY_ENABLED）
         boolean resident = isNotificationEnabled(this);
-        builder.setContentTitle(resident ? TITLE : TITLE_QUIET);
-        builder.setContentText(resident ? CONTENT : CONTENT_QUIET);
+        builder.setContentTitle(titleWithWork(resident ? TITLE : TITLE_QUIET));
+        int count = activeWorkCount;
+        if (count > 0) {
+            builder.setContentText(String.format(Locale.CHINA, WORK_CONTENT_FORMAT,
+                    Integer.valueOf(count)));
+        } else {
+            builder.setContentText(resident ? CONTENT : CONTENT_QUIET);
+        }
         builder.setContentIntent(contentIntent);
         // 常驻：用户滑不掉，也保证它不会被当成「可清理」的通知
         builder.setOngoing(true);
@@ -462,6 +563,10 @@ public final class RemoteKeepAliveService extends Service {
         builder.setOnlyAlertOnce(true);
         builder.setVisibility(Notification.VISIBILITY_PUBLIC);
         builder.setCategory(Notification.CATEGORY_SERVICE);
+        // 与工作通知同一个组：Android 7+ 会把它们堆成一摞，用户展开就能看到「后台在跑 + 谁在跑」。
+        // 刻意不给任何一条设 setGroupSummary(true)：一旦有组摘要，这条常驻通知就被折进摘要里，
+        // 用户会以为「保活通知没了」。
+        builder.setGroup(RemoteNotifyHandler.GROUP_KEY);
         return builder.build();
     }
 

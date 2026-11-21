@@ -3,17 +3,26 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslate, type TranslationKey } from '../../../i18n/index.js'
 import type { ChatImage, ToolActivity, ToolDisplayDetail } from '../../../services/remote/adapter.js'
+import { downloadFromUrl } from '../../../services/remote/download.js'
+import {
+  isRemoteAborted,
+  isRemoteNotReady,
+  toolImageLoader,
+  type AttachmentReference,
+} from '../../../services/remote/filesApi.js'
 import {
   IconCheckOutline16,
   IconChevronDownOutline14,
   IconChevronRightOutline14,
   IconCloseOutline16,
+  IconDownloadOutline16,
   IconPhotoErrorFill20,
+  IconRefreshOutline16,
   IconWarningOutline16,
 } from '../../base/icons.js'
 import { CodeBlock } from '../../markdown/CodeBlock.js'
 import { Markdown } from '../../markdown/Markdown.js'
-import { readToolOpen, takeAutoOpen, writeToolOpen } from './toolCardState.js'
+import { followToolItem, readToolOpen, toggleToolOpen, type ToolCardOpenView } from './toolCardState.js'
 import {
   argumentRows,
   computeLineDiff,
@@ -114,22 +123,22 @@ export const ToolCard = ({ item }: { item: ToolActivity }) => {
     }
   )
 
-  const [open, setOpen] = useState(() => readToolOpen(item.id))
-  // running 第一次出现时自动展开一次；之后（含用户收起过）不再自动弹开
-  useEffect(() => {
-    if (item.state !== 'running') return
-    if (!takeAutoOpen(item.id)) return
-    setOpen(true)
-    writeToolOpen(item.id, true)
-  }, [item.id, item.state])
+  // 折叠状态：**默认收起**，只有点击才展开（没有任何「自动展开一次」）。
+  // 状态按 item id 记在 `toolCardState` 里；同一条 item 上新帧到达时这里不会动它，
+  // 只有 id 变了（列表复用组件实例）才回记忆里读 —— 见 `followToolItem`。
+  const [view, setView] = useState<ToolCardOpenView>(() => ({
+    id: item.id,
+    open: readToolOpen(item.id),
+  }))
+  const current = followToolItem(view, item.id)
+  if (current !== view) setView(current)
+  const open = current.open
 
   const failed = item.state === 'failed'
   const hasDetail = item.callDetail !== undefined || item.resultDetail !== undefined
   const toggle = () => {
     if (!hasDetail) return
-    const next = !open
-    setOpen(next)
-    writeToolOpen(item.id, next)
+    setView({ id: item.id, open: toggleToolOpen(item.id) })
   }
 
   const rawName = item.toolKey ?? item.toolName
@@ -189,13 +198,8 @@ export const ToolCard = ({ item }: { item: ToolActivity }) => {
         ) : null}
       </button>
 
-      {item.state === 'running' && !open ? (
-        <div className={styles.skeleton} aria-hidden="true">
-          <div className={styles.skeletonBar} />
-          <div className={styles.skeletonBar} />
-        </div>
-      ) : null}
-
+      {/* 运行中的「还在跑」信号只放在头部转圈里：收起状态下不再长出一条骨架，
+          否则一屏十几个工具调用会被这些没有内容的横条顶得很长（真机反馈）。 */}
       {open ? (
         <ToolDetailBody item={item} kind={kind} args={args} failed={failed} blocks={blocks} />
       ) : null}
@@ -659,16 +663,30 @@ const ArgTable = ({ rows }: { rows: ArgRow[] }) => (
 /* ────────────────────────────── 图片 ────────────────────────────── */
 
 /**
- * 工具结果里的图片：**常驻**在摘要下面（不展开也能看到），点击进全屏查看层。
+ * 工具结果里的图片：**常驻**在摘要下面（卡片折叠着也能看到），点击进全屏查看层。
  *
- * 数据形态（`ChatImage`，见 `services/remote/adapter.ts` 的 `messageImages()`）：
+ * 数据形态（`ChatImage`，见 `services/remote/adapter.ts` 里的 `messageImages()`）：
  *   - `uri`：`data:image/png;base64,…`（结果块里带内联像素时才有）；
- *   - `attachmentId` + `sessionId`：持久引用。Web 端**没有**按 attachmentId 取字节的接口
- *     （`sessionsApi.ts` 只有 prompt 上传），所以只有它的时候画占位方块 + 文件名，
- *     不画空框、也不假装加载。
+ *   - `attachmentId` + `sessionId`：**持久引用**，没有像素 —— 走 `session/attachment`
+ *     把它取回来（`services/remote/filesApi.ts` 的 `toolImageLoader`）。
+ *
+ * 三个必须守住的点（真机「裂图」事故的教训，见 `input-R2-工具卡修复.md`）：
+ *   1. **绝不把没校验过的 uri 塞进 `<img>`** —— 相对路径会被解析成
+ *      `http://127.0.0.1:18888/…`，`file:` 被 WebView 拦，两种都只会画出一张裂图；
+ *      能不能用由 loader 判定，这里只认它返回的 `src`。
+ *   2. **加载中给骨架**，成功才出 `<img>`，失败给「图标 + 文件名 + 重试」，不留空框。
+ *   3. 没有连接（`REMOTE_NOT_READY`）就是**占位**，不报错、不闪红。
  */
+
+/** 一张缩略图的加载状态。只有 `ready` 才有 `<img>`。 */
+type ToolImageState =
+  | { status: 'loading' }
+  | { status: 'ready'; src: string }
+  | { status: 'failed'; reason: string }
+  | { status: 'empty'; kind: 'offline' | 'none' }
+
 const ToolImageStrip = ({ images }: { images: ChatImage[] }) => {
-  const [preview, setPreview] = useState<ChatImage | undefined>(undefined)
+  const [preview, setPreview] = useState<{ src: string; name: string } | undefined>(undefined)
   return (
     <>
       <div className={styles.images}>
@@ -676,43 +694,151 @@ const ToolImageStrip = ({ images }: { images: ChatImage[] }) => {
           <Thumbnail
             key={`${image.attachmentId ?? image.name ?? 'image'}:${index}`}
             image={image}
-            onOpen={() => setPreview(image)}
+            onOpen={(src, name) => setPreview({ src, name })}
           />
         ))}
       </div>
-      {preview === undefined ? null : <ImageViewer image={preview} onClose={() => setPreview(undefined)} />}
+      {preview === undefined ? null : (
+        <ImageViewer src={preview.src} name={preview.name} onClose={() => setPreview(undefined)} />
+      )}
     </>
   )
 }
 
-const Thumbnail = ({ image, onOpen }: { image: ChatImage; onOpen: () => void }) => {
+const Thumbnail = ({
+  image,
+  onOpen,
+}: {
+  image: ChatImage
+  onOpen: (src: string, name: string) => void
+}) => {
   const t = useTranslate()
-  const [broken, setBroken] = useState(false)
+  const [state, setState] = useState<ToolImageState>({ status: 'loading' })
+  // 用户点了「重试」就 +1：既能重新发请求（loader 里配上 force），也能让 effect 重跑
+  const [attempt, setAttempt] = useState(0)
   const label = image.name ?? t('remoteToolImage')
-  const src = image.uri
-  return (
-    <button
-      type="button"
-      className={styles.thumb}
-      onClick={src === undefined || broken ? undefined : onOpen}
-      aria-label={label}
-      disabled={src === undefined || broken}
-    >
-      {src !== undefined && !broken ? (
-        <img className={styles.thumbImage} src={src} alt={label} onError={() => setBroken(true)} />
-      ) : (
-        <span className={styles.thumbPlaceholder}>
-          <IconPhotoErrorFill20 />
-          <span className={styles.thumbName}>{label}</span>
-        </span>
-      )}
-    </button>
+
+  // 数据层每帧都可能给出**新的对象**（`messageImages()` 每次调用都重建），但同一张图的
+  // 字段不变 —— 把真正参与请求的几个字段钉成一份稳定引用，新帧就不会把图重新拉一遍。
+  const reference = useMemo<AttachmentReference>(
+    () => ({
+      attachmentId: image.attachmentId,
+      sessionId: image.sessionId,
+      uri: image.uri,
+      name: image.name,
+      mediaType: image.mediaType,
+      bytes: image.bytes,
+      width: image.width,
+      height: image.height,
+    }),
+    [
+      image.attachmentId,
+      image.sessionId,
+      image.uri,
+      image.name,
+      image.mediaType,
+      image.bytes,
+      image.width,
+      image.height,
+    ]
   )
+
+  useEffect(() => {
+    const controller = new AbortController()
+    setState({ status: 'loading' })
+    toolImageLoader(reference, reference.sessionId, { signal: controller.signal, force: attempt > 0 })
+      .then((src) => {
+        if (controller.signal.aborted) return
+        setState(src === null ? { status: 'empty', kind: 'none' } : { status: 'ready', src })
+      })
+      .catch((error: unknown) => {
+        // 卸载 / 换图导致的取消：什么都不做（不是失败，不该弹重试）
+        if (controller.signal.aborted || isRemoteAborted(error)) return
+        // 没连上远端：画「未连接」占位，不报错
+        if (isRemoteNotReady(error)) {
+          setState({ status: 'empty', kind: 'offline' })
+          return
+        }
+        setState({
+          status: 'failed',
+          // 只存**原始原因**（`RemoteApiError` 的中文消息，例如「地址是相对路径…」）；
+          // 可见文案在渲染时翻译，effect 里不碰 `t`，换语言不会把图重新拉一遍
+          reason: error instanceof Error ? error.message : '',
+        })
+      })
+    return () => controller.abort()
+  }, [reference, attempt])
+
+  const body = ((): ReactNode => {
+    if (state.status === 'ready') {
+      return (
+        <button
+          type="button"
+          className={styles.thumbButton}
+          onClick={() => onOpen(state.src, label)}
+          aria-label={t('remoteToolImageOpen', { name: label })}
+        >
+          <img
+            className={styles.thumbImage}
+            src={state.src}
+            alt={label}
+            // 像素坏掉（截断的 data URL / 地址 404）也不能留裂图：直接转失败占位
+            onError={() => setState({ status: 'failed', reason: t('remoteToolImageFailed') })}
+          />
+        </button>
+      )
+    }
+    if (state.status === 'loading') {
+      return (
+        <span className={styles.thumbSkeleton} aria-busy="true" aria-label={t('remoteToolImageLoading')}>
+          <span className={styles.thumbSkeletonBar} />
+          <span className={styles.thumbSkeletonBar} />
+        </span>
+      )
+    }
+    if (state.status === 'failed') {
+      return (
+        // 完整原因放 `title`（绝对路径 / 相对路径 / 非图片 data URL 之类），
+        // 卡片里只留「加载失败 + 重试」，96px 的方块塞不下长句子
+        <span className={styles.thumbPlaceholder} title={state.reason.length > 0 ? state.reason : undefined}>
+          <span className={styles.thumbFailed} aria-hidden="true">
+            <IconPhotoErrorFill20 />
+          </span>
+          <span className={styles.thumbName}>{label}</span>
+          <span className={styles.thumbReason}>{t('remoteToolImageFailed')}</span>
+          <button
+            type="button"
+            className={styles.thumbRetry}
+            onClick={() => setAttempt((value) => value + 1)}
+          >
+            <IconRefreshOutline16 />
+            {t('remoteToolImageRetry')}
+          </button>
+        </span>
+      )
+    }
+    return (
+      <span className={styles.thumbPlaceholder}>
+        <span className={styles.thumbUnavailable} aria-hidden="true">
+          <ToolIcon kind="image" />
+        </span>
+        <span className={styles.thumbName}>{label}</span>
+        <span className={styles.thumbReason}>
+          {t(state.kind === 'offline' ? 'remoteToolImageOffline' : 'remoteToolImageUnavailable')}
+        </span>
+      </span>
+    )
+  })()
+
+  return <div className={styles.thumb}>{body}</div>
 }
 
 /** 全屏查看层：点击任意位置关闭（也响应 Esc）。portal 到 body，避免被时间线裁掉。 */
-const ImageViewer = ({ image, onClose }: { image: ChatImage; onClose: () => void }) => {
+const ImageViewer = ({ src, name, onClose }: { src: string; name: string; onClose: () => void }) => {
   const t = useTranslate()
+  // 「下载」（R7）：把这一张图交给原生写进系统「下载」目录。
+  // src 可能是 data:（结果块内联像素）或 blob:，两种 downloadFromUrl 都认。
+  const [saving, setSaving] = useState(false)
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') onClose()
@@ -720,16 +846,35 @@ const ImageViewer = ({ image, onClose }: { image: ChatImage; onClose: () => void
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
-  const label = image.name ?? t('remoteToolImage')
   return createPortal(
-    <div className={styles.viewer} role="dialog" aria-modal="true" aria-label={label} onClick={onClose}>
+    <div className={styles.viewer} role="dialog" aria-modal="true" aria-label={name} onClick={onClose}>
       <button type="button" className={styles.viewerClose} aria-label={t('close')} onClick={onClose}>
         <IconCloseOutline16 />
       </button>
-      {image.uri === undefined ? null : (
-        <img className={styles.viewerImage} src={image.uri} alt={label} onClick={(event) => event.stopPropagation()} />
-      )}
-      <span className={styles.viewerCaption}>{label}</span>
+      <button
+        type="button"
+        className={styles.viewerDownload}
+        aria-label={t('downloadAction')}
+        title={t('downloadAction')}
+        disabled={saving}
+        onClick={(event) => {
+          // 不能让点击冒到遮罩上（那会立刻关掉查看层）
+          event.stopPropagation()
+          setSaving(true)
+          void downloadFromUrl(src, name)
+            .catch(() => undefined)
+            .then(() => setSaving(false))
+        }}
+      >
+        <IconDownloadOutline16 />
+      </button>
+      <img
+        className={styles.viewerImage}
+        src={src}
+        alt={name}
+        onClick={(event) => event.stopPropagation()}
+      />
+      <span className={styles.viewerCaption}>{name}</span>
     </div>,
     document.body
   )

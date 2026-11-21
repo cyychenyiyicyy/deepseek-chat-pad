@@ -49,6 +49,18 @@ import {
   type LastSession,
 } from './autoConnect.js'
 import {
+  advanceRecoveryState,
+  classifyFailure,
+  INITIAL_RECOVERY_STATE,
+  MAX_RECONNECT_ATTEMPTS,
+  parseLinkCloseDetail,
+  planRecoveryStep,
+  type FailureInput,
+  type FailureKind,
+  type RecoveryState,
+  type RecoveryStep,
+} from './reconnect.js'
+import {
   buildLinkOptions,
   createRemoteClient,
   type RemoteAccount,
@@ -57,6 +69,10 @@ import {
   type RemoteServer,
 } from './connection.js'
 import { createSecureLink, type SecureLink, type StreamEventPayload } from './core/index.js'
+import { installDeepLink } from './deepLink.js'
+
+/** session/prompt 的发送模式：steer 插话、queue 排队（见 input-R1）。 */
+type RemotePromptMode = 'queue' | 'steer'
 import {
   requestBatteryExemption as requestBatteryExemptionApi,
   stopKeepAlive,
@@ -64,6 +80,16 @@ import {
   unsupportedKeepAlive,
   type KeepAliveSnapshot,
 } from './keepAlive.js'
+import {
+  clearWork,
+  NOTIFY_MAX_ITEMS,
+  probeNotify,
+  pushWorkState,
+  resetNotify,
+  type WorkItem,
+  type WorkPush,
+  type WorkState,
+} from './notify.js'
 import {
   clearPendingLogin,
   closeAuthPage,
@@ -90,6 +116,19 @@ import {
   unbindSessionControls,
 } from './sessionControls.js'
 import { loadAccounts, loadServers, removeAccount, upsertAccount } from './storage.js'
+/*
+ * [R9 红点] 待处理交互的记账规则放在 `chat-controls/promptModel.ts`（纯函数、有自测）。
+ * 这里 import 过来只为了**同一份规则**：没有 React / CSS / store 的依赖，
+ * 数据层引用它不会把界面拖进来；反过来 promptModel 也不 import 本文件（无环）。
+ */
+import {
+  pendingInteractionCounts,
+  settlePendingInteraction,
+  shouldExpireApproval,
+  trackPendingInteraction,
+  type PendingInteractionCount,
+  type PendingInteractionSets,
+} from '../../components/remote/chat-controls/promptModel.js'
 import {
   DEFAULT_HISTORY_PAGE_SIZE,
   cancelSession,
@@ -100,6 +139,7 @@ import {
   openFollow,
   pageHistory,
   parseSessionRow,
+  remoteErrorText,
   respondApproval as respondApprovalApi,
   sendPrompt,
   type ApprovalDecision,
@@ -115,6 +155,7 @@ import {
   forwardedSessionEvent,
   hasVisibleMessageText,
   historyEntriesFromRecords,
+  clearSendState,
   markSendState,
   oldestSeqOfItems,
   parseSnapshot,
@@ -129,6 +170,17 @@ import {
   type ForwardedSessionEvent,
   type RemoteTranscriptState,
 } from './adapter.js'
+import {
+  emptyCacheStatus,
+  mergeSessionLists,
+  mergeTimelineItems,
+  readSessionsCache,
+  readTimelineCache,
+  writeSessionsCache,
+  writeTimelineCache,
+  type CachedSessionRow,
+  type RemoteCacheStatus,
+} from './cache.js'
 
 /** 把 adapter 的 `ChatItem` 家族转出去：U2 渲染消息时只需要 import 这一个入口。 */
 export type {
@@ -226,6 +278,80 @@ export interface RemoteAutoConnectState {
   message?: string
 }
 
+/**
+ * [契约之外的附加] **掉线自愈**的进度（R10）。
+ *
+ * 这一条专门回答用户那句「连接失败你就刷新一下就好了呀……自动重新连一下就好了呀」：
+ * 连接断了是**中性事件**，界面显示「正在重连…（第 N 次）」，只有
+ * `need-login` / `blocked` 这两种真的需要人处理的才配红字。
+ *
+ * | status | 含义 | 界面 |
+ * |---|---|---|
+ * | `idle` | 没在恢复 | 走原来的未连接文案 |
+ * | `waiting` | 正在退避，马上要打第 `attempt` 次 | 「正在重连…（第 N/5 次）」中性 |
+ * | `connecting` | 这一轮正在建链 / 刷 token | 同上 |
+ * | `failed` | 5 次都失败（网络类） | 「暂时连不上服务器」+「立即重连」 |
+ * | `need-login` | refresh 也过期了 | 「登录已过期，请重新登录」 |
+ * | `blocked` | 设备撤销 / 身份不符 / 版本不兼容 | 展示具体码与说明 |
+ *
+ * `kind` 是给「区分三种失败态」用的：`offline`（没网）/ `unreachable`（服务端不可达）/
+ * `need-login` / `blocked`。
+ */
+export interface RemoteReconnectState {
+  status: 'idle' | 'waiting' | 'connecting' | 'failed' | 'need-login' | 'blocked'
+  /** 第几次尝试（1-based；`waiting` 时是「马上要打的那一次」） */
+  attempt: number
+  maxAttempts: number
+  /** `waiting` 时的预计重试时刻（诊断 / 将来画倒计时用） */
+  nextRetryAt?: number
+  /** 最后一次失败的机器码（`WS_4009` / `TOKEN_EXPIRED` / `DEVICE_REVOKED` …） */
+  code?: string
+  /** 失败种类（UI 区分「离线 / 不可达 / 要重新登录」） */
+  kind?: FailureKind
+}
+
+/* ── [R14 多 Host 切换] ────────────────────────────────────────────────
+ * 背景：`connection.listHosts()` 早就把账号下所有 Host 连 presence 一起拉回来了，
+ * `pickHost()` 也早就有「上次那台优先」的优先级 —— 缺的一直是**用户主动换一台**的动作与入口。
+ *
+ * 三条纪律（与 `pickHost` 的注释同源）：
+ *   1. **离线 / 身份不符的 Host 不许切**：前者连不上（白等一轮），后者是公钥 pin 冲突
+ *      （Noise IK 会失败，且不能靠重试绕过）；
+ *   2. **换 Host = 换一份数据**：会话列表、时间线、待处理交互全属于某台 Host。缓存按
+ *      `serverUrl|hostDeviceId` 分桶（`cache.ts`），所以「连上新 Host 后自然读到它那一桶」，
+ *      不需要手工清缓存 —— 但**界面上**那一份必须清掉，否则会点进新 Host 上不存在的会话；
+ *   3. **失败必须回滚**：用户只是点了下拉里的另一台，不能把一段还能用的连接换成一块红字。 */
+
+/** 一台可切换 Host 的 UI 投影（不带 `identityKey` —— 那是连接层的事，界面不该看见） */
+export interface RemoteHostInfo {
+  deviceId: string
+  name: string
+  platform?: string
+  /** 在线且可连（身份不符的按离线算，见 `toHostInfoList`） */
+  online: boolean
+  /** 本机 pin 的公钥与服务器返回的不一致：仍然列出（让用户看见「有台主机身份不对」），但不可切换 */
+  identityMismatch: boolean
+}
+
+/**
+ * 切换 Host 的进度（UI 据此画「正在连接 电脑名…」与一次失败提示）。
+ *
+ * `status === 'failed'` 时**连接已经回滚到原 Host**（`rolledBackTo` 有名字就代表回滚成功）；
+ * 回滚也失败时连接停在 `phase:'error'`，界面上那条「重试」仍然有效。
+ */
+export interface HostSwitchState {
+  status: 'idle' | 'switching' | 'failed'
+  /** 目标 Host（`idle` 时没有） */
+  targetId?: string
+  targetName?: string
+  /** `failed` 的原因码（`HOST_OFFLINE` / `HOST_UNKNOWN` / `HOST_IDENTITY_MISMATCH` / `HOST_SWITCH_FAILED` / …） */
+  code?: string
+  /** `failed` 的可读原因（中文，直接可展示） */
+  message?: string
+  /** 回滚成功时连回去的那台 Host 名（提示文案里的「已回到 x」） */
+  rolledBackTo?: string
+}
+
 export interface RemoteState {
   /**
    * `waiting-auth` 是 K2 新增的：用户在系统浏览器里授权，本机**没有连接**，只是在轮询
@@ -241,6 +367,35 @@ export interface RemoteState {
   items: ChatItem[]
   streaming: boolean
   pendingApprovals: { eventId: string; title: string; detail?: string }[]
+  /**
+   * [R9 红点] 别的会话收到的**待处理交互**（审批 / 提问各几条），activity 会话不计。
+   *
+   * 派生规则（见文件末尾「七、待处理交互」）：
+   *   - 来源：Host 级 `$events` 的 `approval/request` / `user-questions/request` waterfall，
+   *     **按 eventId 去重**（重投不翻倍）；
+   *   - 清零：`{type:'cancel', eventId}`、`api-session/status running=false`、
+   *     `api-session/removed`、**进入该会话**（`openSession`）、本机应答完；
+   *   - 活动会话永远不计（用户就在里面，卡片就在眼前）。
+   *
+   * 列表用它画「圆点 + 数字」，见 `RemoteSessionList`。
+   */
+  pendingInteractions: Record<string, PendingInteractionCount>
+  /**
+   * [R8 缓存] 列表 / 内容的**加载态与来源**（只读投影：UI 只读，别自己拼条件）。
+   *
+   * 语义与判定见 `cache.ts` 的 `sessionListViewState()` / `timelineViewState()` /
+   * `timelineHintState()`；两条硬纪律：
+   *   1. 缓存先铺（`…FromCache`）—— 打开远程页不必等 `session/list`；
+   *   2. **首次拉取没结束之前不许显示「没有内容」**（`timelineSettled` 才是事实）。
+   */
+  cacheStatus: RemoteCacheStatus
+  /**
+   * 远程页打开时把上一次的会话列表先铺上（幂等）。
+   *
+   * 不阻塞首屏、不发请求：只读 `localStorage` 里按 `serverUrl+hostDeviceId` 分桶的那份缓存。
+   * 没有缓存、已经拿到实时列表、或还没连过任何 Host 时什么都不做。
+   */
+  hydrateCachedSessions(): void
   connect(serverUrl: string, email: string, password: string): Promise<void>
   /**
    * **临时断开**：拆连接、停保活、复位界面，但**保留** `dsp.remote.last-session.v1`
@@ -256,6 +411,8 @@ export interface RemoteState {
   openSession(id: string): Promise<void>
   loadOlder(): Promise<void>
   send(text: string): Promise<void>
+  /** 运行中发消息：mode:'steer' 插话、'queue' 排队（默认沿用 send() 的 queue）。 */
+  sendWithMode(text: string, mode: RemotePromptMode): Promise<void>
   cancel(): Promise<void>
   respondApproval(eventId: string, decision: 'allow_once' | 'deny'): Promise<void>
 
@@ -329,6 +486,40 @@ export interface RemoteState {
   autoConnectNow(): Promise<void>
   /** 用户点「重试」：无视「本进程已试过」，再按 last-session 连一次（`disconnect()` 之后也用它重连） */
   retryAutoConnect(): Promise<void>
+
+  /* ── [掉线自愈] 契约之外的附加（R10） ───────────────────────────────────
+   * 后台太久会把连接踢掉（服务端 75 s 收不到心跳就断），这是**连接**的事，
+   * 不是凭据的事：回前台 / 用户点一下都应该立刻自己连回来，不能让人重新登录。 */
+
+  /** 掉线自愈的进度（`status === 'idle'` 表示没在恢复） */
+  reconnect: RemoteReconnectState
+  /**
+   * 立刻走一轮恢复（**不等定时器**）：先按需 refresh，再重连；失败指数退避重试最多 5 次。
+   *
+   * 调用点：回前台（`visibilitychange` / `focus`）、用户点「立即重连」、
+   * 以及连接意外关闭时的自动触发。幂等单飞；正在手动登录 / 已连上时什么都不做。
+   */
+  reconnectNow(): Promise<void>
+
+  /* ── [R14 多 Host 切换] 契约之外的附加 ─────────────────────────────── */
+
+  /** 账号下所有 Host（含在线状态）。`establishSession` 列 Host 时顺手记下，切换/刷新后更新 */
+  hosts: RemoteHostInfo[]
+  /** 当前连着的 Host（`null` = 还没连上） */
+  hostId: string | null
+  /** 切换进度（见 `HostSwitchState`：`switching` 画 loading，`failed` 弹一次原因） */
+  hostSwitch: HostSwitchState
+  /**
+   * 换一台 Host：拆当前连接 → 用**同一个账号**连新 Host → 重载会话列表（缓存按桶自动生效）。
+   *
+   * 幂等 + 单飞；离线 / 身份不符 / 未知的 Host 直接拒绝（**不动**现有连接）；
+   * 连接失败**回滚到原 Host**，结果与原因写进 `hostSwitch`。
+   */
+  switchHost(hostDeviceId: string): Promise<void>
+  /** 重新探一遍 Host 在线状态（下拉里的「刷新」用；失败静默，手上那份列表仍然可用） */
+  refreshHosts(): Promise<void>
+  /** 关掉切换失败的提示（toast 弹过之后调，避免重复弹） */
+  dismissHostSwitch(): void
 }
 
 /**
@@ -453,6 +644,8 @@ const INITIAL_STATE = {
   items: [] as ChatItem[],
   streaming: false,
   pendingApprovals: [] as { eventId: string; title: string; detail?: string }[],
+  pendingInteractions: {} as Record<string, PendingInteractionCount>,
+  cacheStatus: emptyCacheStatus(),
   oauthProviders: [] as RemoteOAuthProviderSummary[],
   qr: null as RemoteProviderLoginState | null,
   pendingLogin: null as RemotePendingLogin | null,
@@ -460,6 +653,15 @@ const INITIAL_STATE = {
   // 注意：`lastSession` 不在 INITIAL_STATE 里 —— 它属于**盘上的持久化状态**，不是界面状态。
   // `disconnect()`（临时断开）复位界面时必须把它读回来（见那里的注释）。
   autoConnect: { state: 'idle' } as RemoteAutoConnectState,
+  reconnect: {
+    status: 'idle',
+    attempt: 0,
+    maxAttempts: MAX_RECONNECT_ATTEMPTS,
+  } as RemoteReconnectState,
+  // [R14 多 Host] 断开 / 退出登录时一起复位（切 Host 不走 INITIAL_STATE，见 switchHostFlow）
+  hosts: [] as RemoteHostInfo[],
+  hostId: null as string | null,
+  hostSwitch: { status: 'idle' } as HostSwitchState,
 }
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -810,6 +1012,93 @@ const applyForwardedSessionEvent = (event: ForwardedSessionEvent): void => {
   // `error` 由会话流自己的 turn/end 表达，这里也不抢展示。
 }
 
+/* ── R8：cache-first 接线（缓存/合并的规则全在 `cache.ts`，这里只做读写时机） ── */
+
+/** 内容落盘的合并窗口：follow 每帧都写会把主线程写花，攒 800ms 一拍足够。 */
+const TIMELINE_PERSIST_DELAY_MS = 800
+
+/** 攒着还没落盘的内容定时器（切会话 / 断开时先 flush，别丢最后几帧）。 */
+let timelinePersistTimer: ReturnType<typeof setTimeout> | null = null
+
+const patchCacheStatus = (patch: Partial<RemoteCacheStatus>): void => {
+  useRemoteStore.setState({ cacheStatus: { ...useRemoteStore.getState().cacheStatus, ...patch } })
+}
+
+/** 只改「当前这个会话」的加载态：晚到的旧会话事件不许污染新会话。 */
+const patchTimelineStatus = (sessionId: string, patch: Partial<RemoteCacheStatus>): void => {
+  if (useRemoteStore.getState().activeSessionId !== sessionId) return
+  patchCacheStatus(patch)
+}
+
+/**
+ * 缓存分桶的键：**优先当前连接**（真权威），没连上时退回 `last-session`（缓存直出就靠它）。
+ *
+ * 两个来源都是 `serverUrl + hostDeviceId`，所以「先渲染缓存」与「连上之后合并」用的是同一个桶。
+ */
+const cacheBucketNow = (): { serverUrl: string; hostDeviceId: string } | null => {
+  if (active !== null) return { serverUrl: active.server.url, hostDeviceId: active.host.deviceId }
+  const last = useRemoteStore.getState().lastSession ?? readLastSession()
+  return last === null ? null : { serverUrl: last.serverUrl, hostDeviceId: last.hostDeviceId }
+}
+
+/**
+ * 服务端列表到手：**与本地缓存合并**（服务端为准、本地 pinned 保留、幽灵行打标）→ 落盘 → 进 state。
+ *
+ * 列表来源从此变成「实时」，`sessionsFromCache` / `sessionsStale` 清掉、`sessionsSynced` 置 true
+ * —— 这也正是「空态可信」的开关（`sessionListViewState()` 靠它判 skeleton / empty）。
+ */
+const applyRemoteSessionRows = (rows: RemoteSessionRow[]): void => {
+  const now = Date.now()
+  const bucket = cacheBucketNow()
+  const remote: CachedSessionRow[] = projectSessions(rows)
+  const cached = bucket === null ? [] : (readSessionsCache({ ...bucket, now })?.sessions ?? [])
+  const merged = mergeSessionLists({ cached, remote, now })
+  useRemoteStore.setState({
+    sessions: merged.sessions,
+    cacheStatus: {
+      ...useRemoteStore.getState().cacheStatus,
+      sessionsFromCache: false,
+      sessionsStale: false,
+      sessionsSyncing: false,
+      sessionsSynced: true,
+      ghostSessionIds: merged.ghostSessionIds,
+    },
+  })
+  if (bucket !== null) writeSessionsCache({ ...bucket, sessions: merged.sessions, now })
+}
+
+const persistTimelineNow = (session: ActiveSession, sessionId: string): void => {
+  if (session.transcript.items.length === 0) return
+  writeTimelineCache({
+    serverUrl: session.server.url,
+    hostDeviceId: session.host.deviceId,
+    sessionId,
+    items: session.transcript.items,
+    now: Date.now(),
+  })
+}
+
+const scheduleTimelinePersist = (session: ActiveSession, sessionId: string): void => {
+  if (timelinePersistTimer !== null) clearTimeout(timelinePersistTimer)
+  timelinePersistTimer = setTimeout(() => {
+    timelinePersistTimer = null
+    // 切走 / 断开之后这一拍就不写了（缓存归当前会话，别人不该被上一次的内容污染）
+    if (active !== session || session.sessionId !== sessionId) return
+    persistTimelineNow(session, sessionId)
+  }, TIMELINE_PERSIST_DELAY_MS)
+}
+
+/** 立刻把还攒着的内容写盘（切会话 / 断开 / 退后台时调）。 */
+const flushTimelinePersist = (): void => {
+  if (timelinePersistTimer !== null) {
+    clearTimeout(timelinePersistTimer)
+    timelinePersistTimer = null
+  }
+  const session = active
+  const sessionId = session?.sessionId ?? null
+  if (session !== null && sessionId !== null) persistTimelineNow(session, sessionId)
+}
+
 /* ── 连建 ─────────────────────────────────────────────────────────────── */
 
 type PickedHost = RemoteHost & { identityKey: string }
@@ -841,6 +1130,135 @@ const pickHost = (hosts: RemoteHost[], preferredHostId?: string): PickedHost => 
   return { ...picked, identityKey: picked.identityKey }
 }
 
+/* ── [R14 多 Host] 目标校验 / 切换编排（都在 `pickHost` 旁边：同一件事的另一半） ── */
+
+/**
+ * `connection.listHosts()` 的结果 → UI 投影。
+ *
+ * `online` 把 `identityMismatch` 也算成不可连：那台机器**列出来**是为了让用户知道
+ * 「有一台主机身份不对」（pin 冲突要人工处理），但绝不允许点进去 —— Noise IK 会直接失败。
+ */
+export const toHostInfoList = (hosts: readonly RemoteHost[]): RemoteHostInfo[] =>
+  hosts.map((host) => ({
+    deviceId: host.deviceId,
+    name: host.name,
+    ...(host.platform === undefined ? {} : { platform: host.platform }),
+    online: host.online === true && host.identityMismatch !== true,
+    identityMismatch: host.identityMismatch === true,
+  }))
+
+/**
+ * 切换前的**纯**校验：找不到 / 身份不符 / 离线都抛 `RemoteApiError`（带可读中文）。
+ *
+ * 抽成纯函数是为了让这三条「不该碰连接」的拒绝路径可以直接自测：最容易被实现成
+ * 「先把连接拆了再说」，那样用户点一台离线主机会把一条好好的连接弄断。
+ */
+export const resolveHostSwitchTarget = (
+  hosts: readonly RemoteHostInfo[],
+  targetId: string,
+): RemoteHostInfo => {
+  const target = hosts.find((host) => host.deviceId === targetId)
+  if (target === undefined) {
+    throw new RemoteApiError('HOST_UNKNOWN', '账号下已经找不到这台主机了，刷新主机列表再试')
+  }
+  if (target.identityMismatch) {
+    throw new RemoteApiError('HOST_IDENTITY_MISMATCH', '这台主机的公钥与本机记录的不一致，已拒绝连接')
+  }
+  if (!target.online) {
+    throw new RemoteApiError('HOST_OFFLINE', '这台主机现在不在线：先在电脑上把远程访问打开')
+  }
+  return target
+}
+
+/** 列表里某台 Host 的展示名（找不到就用 id 前 8 位，永不返回空串） */
+export const hostNameOf = (hosts: readonly RemoteHostInfo[], deviceId: string): string => {
+  const host = hosts.find((item) => item.deviceId === deviceId)
+  if (host !== undefined && host.name.trim().length > 0) return host.name.trim()
+  return deviceId.slice(0, 8)
+}
+
+/** 切换流程需要的全部副作用（生产 = 真 store + 真连接；自测注入桩，见 deeplink-host.selftest） */
+export interface HostSwitchRuntime {
+  /** 当前已知的 Host 列表 */
+  hosts: () => readonly RemoteHostInfo[]
+  /** 当前连着的 Host（`null` = 没有连接） */
+  currentHostId: () => string | null
+  /** 当前 Host 的名字（回滚提示用） */
+  currentHostName: () => string | null
+  /** 拆掉现有连接（生产 = 写盘 + `shutdown()` + 清掉界面上那一份数据） */
+  disconnect: () => Promise<void>
+  /** 连到指定 Host（生产 = `establishSession({preferredHostId})`；**失败必须抛**） */
+  connect: (hostDeviceId: string) => Promise<void>
+  /** 把进度/结果写回界面状态 */
+  report: (state: HostSwitchState) => void
+}
+
+/**
+ * 切 Host 的完整流程：校验 → 拆 → 连 → **失败回滚**。
+ *
+ * @return true = 真的切过去了（或本来就在这台）
+ *
+ * 为什么回滚写在这里而不是交给界面：界面能做的只有「弹提示」，而「把原来那台连回来」
+ * 需要一个还能用的 `client / server / account` —— 那是连接层的私有资产，只有这一层拿得到。
+ */
+export const performHostSwitch = async (
+  runtime: HostSwitchRuntime,
+  targetId: string,
+): Promise<boolean> => {
+  const previousId = runtime.currentHostId()
+  const previousName = runtime.currentHostName()
+  let target: RemoteHostInfo
+  try {
+    // 1. 静态校验：这一步**一行连接操作都不做**（离线 / 身份不符直接拒绝）
+    target = resolveHostSwitchTarget(runtime.hosts(), targetId)
+  } catch (error) {
+    const info = describeRemoteError(error)
+    runtime.report({
+      status: 'failed',
+      targetId,
+      targetName: hostNameOf(runtime.hosts(), targetId),
+      code: info.code,
+      message: error instanceof RemoteApiError ? error.message : info.text,
+    })
+    return false
+  }
+  if (previousId === target.deviceId) {
+    // 2. 已经在这台：当成「刷新一下」。**不拆连接** —— 拆了用户正在进行的对话就白断了
+    runtime.report({ status: 'idle' })
+    return true
+  }
+  runtime.report({ status: 'switching', targetId: target.deviceId, targetName: target.name })
+  await runtime.disconnect()
+  try {
+    // 3. 连新 Host（成功时 establishSession 会把 `dsp.remote.last-session.v1` 改写成新那台）
+    await runtime.connect(target.deviceId)
+    runtime.report({ status: 'idle' })
+    return true
+  } catch (error) {
+    // 4. 回滚：把原来那台连回来。连不回来也不算「更糟」——
+    //    phase 已经是 error，界面那条「重试连接」照样有效。
+    const info = describeRemoteError(error)
+    let rolledBackTo: string | undefined
+    if (previousId !== null) {
+      try {
+        await runtime.connect(previousId)
+        rolledBackTo = previousName === null ? hostNameOf(runtime.hosts(), previousId) : previousName
+      } catch {
+        rolledBackTo = undefined
+      }
+    }
+    runtime.report({
+      status: 'failed',
+      targetId: target.deviceId,
+      targetName: target.name,
+      code: info.code,
+      message: error instanceof RemoteApiError ? error.message : info.text,
+      ...(rolledBackTo === undefined || rolledBackTo.length === 0 ? {} : { rolledBackTo }),
+    })
+    return false
+  }
+}
+
 /**
  * 打开 `$events` 并等到 `ready`。
  *
@@ -860,6 +1278,10 @@ const openEventsStream = async (session: ActiveSession): Promise<void> => {
       }
       const forwarded = forwardedSessionEvent(value)
       if (forwarded !== undefined) applyForwardedSessionEvent(forwarded)
+      // [R6 通知] 记录 `api-session/status` 与其他会话的审批请求（只读，不改下面的分发）
+      noteRemoteNotifyItem(value)
+      // [R9 红点] 别的会话的待处理审批 / 提问（按 eventId 去重；活动会话不计）
+      notePendingInteractionEvent(value)
       // 会话内控制（W2）：`user-questions/request` 要在 `attachWait` 里抢窗口，
       // 所以和「落时间线」分开投喂 —— 时间线归 adapter，应答状态归 sessionControls。
       ingestEventsItem(value, session.sessionId)
@@ -1021,8 +1443,13 @@ const rememberLastSession = (input: RememberLastSessionInput): void => {
 
 /** 连接收尾（临时断开与退出登录共用）：停连接、停保活、清「登录中」的会话、复位本地游标 */
 const teardownConnection = (): void => {
+  // R8：断线**保留**缓存（下次打开还要用它直出），但要把攒着的内容先写完
+  flushTimelinePersist()
   void shutdown()
   setPaging(false, false)
+  // [R10] 用户主动断开 = 放弃这次连接：正在跑的退避自愈必须立刻停手，
+  // 否则它会「过几秒又自己连回来」，让「断开」这个动作看起来没生效。
+  cancelReconnect()
   // 登录会话也跟着作废：浏览器授权页还开着的话顺手关掉（不 await：断开不该被原生桥拖住）
   if (useRemoteStore.getState().qr?.mode === 'browser') void closeAuthPage()
   abortResume()
@@ -1030,6 +1457,8 @@ const teardownConnection = (): void => {
   clearPendingLogin()
   // 保活服务必须停（它守护的连接已经没了）
   stopKeepAliveFlow()
+  // [R9 红点] 记账跟着连接作废（界面状态由 INITIAL_STATE 复位）
+  resetPendingInteractions()
   loginServerUrl = null
   loginTokenClaimed = false
 }
@@ -1056,7 +1485,13 @@ const establishSession = async (
 ): Promise<void> => {
   try {
     // 3. 列 Host（内部已经补好 presence 与 identityKey pin）
-    const host = pickHost(await client.listHosts(server, device), options.preferredHostId)
+    const listedHosts = await client.listHosts(server, device)
+    /*
+     * [R14 多 Host] 顺手把整份 Host 列表记进 state：切换下拉要显示「账号下还有哪几台、谁在线」，
+     * 而这份数据本来就已经拉回来了（不多打一次网络 —— `listHosts` 内部还并发探活）。
+     */
+    useRemoteStore.setState({ hosts: toHostInfoList(listedHosts) })
+    const host = pickHost(listedHosts, options.preferredHostId)
 
     useRemoteStore.setState({ phase: 'connecting' })
 
@@ -1073,16 +1508,25 @@ const establishSession = async (
       onStreamEvent: (streamId, payload) => {
         if (sessionRef !== null) routeStream(sessionRef, streamId, payload)
       },
-      onState: (state) => {
+      onState: (state, detail) => {
         if (state !== 'closed') return
         const current = active
         if (current === null || current.link !== link || current.closing) return
         // 建链成功后才算「意外断开」；建链期间的失败由 client.connect 自己抛。
         current.closing = true
         active = null
-        // 不会自动重连了：把原生保活停掉，别留一个「守护着死连接」的前台服务
-        stopKeepAliveFlow()
-        failConnection(new RemoteApiError('TRANSPORT_CLOSED', '与远端主机的安全通道已断开'))
+        // 这条连接上的东西全作废（消费者收到的 `closed` 也在这里发出去）；保活服务必须停，
+        // 别留一个「守护着死连接」的前台服务。
+        void shutdown()
+        /*
+         * **R10 的核心改动**：意外断开**不再**直接判成「连接失败」红字，而是交给自愈流程分诊。
+         *
+         * 这里原来是一句 `failConnection(TRANSPORT_CLOSED)` —— 于是「App 在后台待久了被服务端
+         * 踢掉」在用户眼里变成「凭据失效 / 连接失败」，而重启 App 恰好重建了整条链路，看起来
+         * 就像「莫名其妙自己好了」。`detail` 里带着真实的失败码与 WS close code
+         *（`（code=4002）` 这种），分诊靠它区分「网络断了」和「token 过期」。
+         */
+        handleLinkClosed(detail)
       },
     })
 
@@ -1116,6 +1560,8 @@ const establishSession = async (
       capabilities: [...connected.capabilities],
       transport: toTransport(connected.transport),
       error: null,
+      // [R14 多 Host] 真的握上手才算「当前这台」：下拉里的对勾与「正在连接 x」都读它
+      hostId: host.deviceId,
     })
     // 1-5 都过了就是「连上了」：立刻记下来（`$events` / 首屏列表再抖，下次启动也能恢复 ——
     // 那两步是被动拉数据，失败不该剥夺用户的「记住这台 Host」）
@@ -1145,8 +1591,9 @@ const establishSession = async (
       eventClientId: () => active?.eventClientId ?? null,
     })
     void openControlStream(session)
-    // 7. 首屏列表
-    useRemoteStore.setState({ sessions: projectSessions(await listSessions(link)) })
+    // 7. 首屏列表（R8：与本地缓存合并 —— 服务端为准、本地 pinned 保留；合并完顺手落盘）
+    patchCacheStatus({ sessionsSyncing: true })
+    applyRemoteSessionRows(await listSessions(link))
   } catch (error) {
     // 已经 ready 之后才失败的（`$events` / 首屏）：保活服务不该继续守护一条死连接
     stopKeepAliveFlow()
@@ -1254,6 +1701,8 @@ const startProviderLoginFlow = async (
     }
     // 旧会话先收尾：同一时间只允许一个登录会话（旧 qrId 服务器侧会自己过期）
     abortResume()
+    // [R10] 用户要重新登录了：正在跑的退避自愈必须让路（否则两条建链会互相覆盖 `active`）
+    cancelReconnect()
     if (useRemoteStore.getState().qr?.mode === 'browser') await closeAuthPage()
 
     const session = await startProviderLoginApi(url, provider, mode)
@@ -1483,22 +1932,580 @@ const resumeLoginFlow = (): Promise<void> => {
 }
 
 /**
- * 回到前台（`visibilitychange → visible`）时的一次性补齐。
+ * 回到前台（`visibilitychange → visible` / `focus`）时的一次性补齐。
  *
- * 为什么三件事都要做：
+ * 为什么四件事都要做：
  *   ① 用户可能刚从系统浏览器授权回来 → `resumeLogin()` 续上被杀进程前的那次登录；
  *   ② 后台的 `setTimeout` 会被系统节流，2s 轮询定时器可能整段停摆 → 立刻补一拍
  *      （恢复流程在跑时它自己会拍，这里会被单飞让路，不会多打）；
- *   ③ 系统可能在后台把保活服务杀掉 → 探一次，`shouldRun && !running` 就补一次 start。
+ *   ③ 系统可能在后台把保活服务杀掉 → 探一次，`shouldRun && !running` 就补一次 start；
+ *   ④ **R10**：后台待久了连接已经被服务端踢掉（75 s 心跳超时 / 4002），
+ *      `phase !== 'ready'` 且盘上有 last-session → **立刻**走一轮自愈。
+ *      为什么不靠定时器：后台的 `setTimeout` 被冻结，回前台时才一起醒来；等它不如直接连。
  *
- * 三件事都是幂等 + 静默：这条路径会被反复触发，不能因为「本来就没事」而弹提示。
+ * 四件事都是幂等 + 静默：这条路径会被反复触发，不能因为「本来就没事」而弹提示。
  */
 const foregroundFlow = async (): Promise<void> => {
   await Promise.all([
     resumeLoginFlow().catch(() => undefined),
     pollProviderLoginFlow().catch(() => undefined),
     refreshKeepAliveFlow(),
+    // 不等：自愈可能要退避重试几十秒，回前台的其它补齐不该被它拖住
+    startReconnect({ reason: 'foreground', immediate: true }).catch(() => undefined),
   ])
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 掉线自愈（R10）：**「连接断了」和「凭据失效」彻底分开**
+ *
+ * 用户原话：「放后台很久重新打开就会显示什么凭据失效啥的，但是重启一下就好了」
+ *          「连接失败你就刷新一下就好了呀……自动重新连一下就好了呀」。
+ *
+ * 设计（判定全在 `reconnect.ts` 的纯函数里，这里只负责按 step 去做）：
+ *
+ * ```
+ * link 意外关闭 / 回前台时 phase≠ready / 用户点「立即重连」
+ *    │
+ *    ▼ classifyFailure(detail / error)
+ *   ┌───────────────┬────────────────────┬──────────────────┬──────────────────┐
+ *   │ offline       │ unreachable        │ token-expired    │ need-login/blocked│
+ *   │ 没网          │ 超时/1006/4001/4009│ 401/4002/TOKEN_  │ 撤销/身份/会员/版本│
+ *   ▼               ▼                    ▼                  ▼
+ *  退避重连        退避重连           先 refresh 再重连     停止（红字 + 明确文案）
+ *  1/2/4/8/16 s    1/2/4/8/16 s       每次恢复只刷一次      **不动** last-session / 账号
+ *   │               │                    │
+ *   └───────┬───────┴────────────────────┘
+ *           ▼
+ *     establishSession() ──成功──► restoreActiveSession()（顺手把上次开着的会话重开）
+ *           │
+ *        失败 → 回到分诊（最多 5 次）；5 次用完 = 「暂时连不上」+「立即重连」（中性，不多说一句凭据）
+ * ```
+ *
+ * **纪律**：这条路径**永不**调用 `clearLastSession()` / `removeAccount()` / `clearRemoteStorage()`
+ * —— 清凭据只允许发生在用户点「退出登录」时。这是用户那句「重启一下就好了」的根因：
+ * 以前异步失败会顺手清掉 last-session，重启后连「上次连的是哪台」都没有了。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** 恢复流程的模块级进度（不进 zustand：不是渲染数据） */
+let recoveryState: RecoveryState = { ...INITIAL_RECOVERY_STATE }
+/** 代际：`disconnect()` / 手动登录 / 重新发起恢复时自增，旧循环看到代数变了就收工 */
+let reconnectGeneration = 0
+/** 当前正在跑的重连循环（单飞） */
+let reconnectInFlight: Promise<void> | null = null
+/** 退避定时器（同一时刻只有一个循环，所以一个句柄就够） */
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+/**
+ * 正在等退避的那个循环的「唤醒开关」。
+ *
+ * 为什么需要：`disconnect()` 会把定时器清掉，如果只 `clearTimeout`，那个 Promise
+ * **永远不会 resolve** —— 等待中的循环会变成一个永远挂着的任务（泄漏，而且调试时看起来
+ * 「有一次重连莫名其妙没跑」）。所以取消时要显式把它唤醒，让循环自己看到代数变了然后收工。
+ */
+let reconnectWake: (() => void) | null = null
+
+const RECONNECT_NEED_LOGIN_MESSAGE = '上次的登录凭据已经过期，请重新登录'
+const RECONNECT_OFFLINE_MESSAGE = '网络已断开；连上网络后会自动重连（凭据仍然有效）'
+const RECONNECT_UNREACHABLE_MESSAGE = '连接中断了，暂时连不上服务器（凭据仍然有效）'
+const RECONNECT_STARTUP_MESSAGE = '上次连接没成功，点「立即重连」再试一次（凭据仍然有效）'
+
+const setReconnect = (patch: Partial<RemoteReconnectState>): void => {
+  const previous = useRemoteStore.getState().reconnect
+  const next: RemoteReconnectState = { ...previous, ...patch }
+  if (
+    next.status === previous.status &&
+    next.attempt === previous.attempt &&
+    next.code === previous.code &&
+    next.kind === previous.kind &&
+    next.nextRetryAt === previous.nextRetryAt
+  ) {
+    return
+  }
+  useRemoteStore.setState({ reconnect: next })
+}
+
+/** 停掉正在跑的恢复（幂等）：抬高代际 + 唤醒等待中的循环 + 复位进度 */
+const cancelReconnect = (): void => {
+  reconnectGeneration += 1
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  const wake = reconnectWake
+  reconnectWake = null
+  wake?.()
+  // 旧循环会在下一次代际检查时自己退出；这里立刻放开单飞，新的恢复不用等它醒
+  reconnectInFlight = null
+  recoveryState = { ...INITIAL_RECOVERY_STATE }
+}
+
+/** 等退避；返回 `false` 表示「这一代已经作废了」（期间用户断开 / 重新发起过） */
+const sleepOrAbort = (delayMs: number, generation: number): Promise<boolean> => {
+  if (delayMs <= 0) return Promise.resolve(generation === reconnectGeneration)
+  return new Promise<boolean>((resolve) => {
+    reconnectWake = () => resolve(false)
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      reconnectWake = null
+      resolve(generation === reconnectGeneration)
+    }, delayMs)
+  })
+}
+
+/** 从 `state.error`（`{code,message}`）折出分诊用的形状 */
+const failureFromErrorState = (error: { code: string; message: string } | null): FailureInput => ({
+  code: error?.code ?? 'CONNECTION_FAILED',
+  message: error?.message,
+})
+
+interface RecoveryRoundResult {
+  ok: boolean
+  failure: FailureInput | null
+  /** 这一轮真的打了 `POST /auth/refresh`（刷新只允许一次，调用方据此记账） */
+  refreshed: boolean
+}
+
+/**
+ * 一次恢复尝试（**一轮**：可选先 refresh → `establishSession`）。
+ *
+ * 为什么把「refresh」也放进来：刷新后必须用**新**的 pair 建链（refresh token 会轮换，
+ * 拿旧 token 去握手只会再撞一次 401 —— 那正是「第一次连不上、再点一次就好了」的来源）。
+ *
+ * 不删任何凭据：读盘失败 / 记录缺失只返回一条 need-login 级别的失败，让用户自己去设置页。
+ */
+/**
+ * 一轮恢复的**串行闸门**。
+ *
+ * 为什么需要：启动恢复（挂载 effect）、回前台自愈、用户点「立即重连」可能同时到，
+ * 而 `establishSession()` 是不可重入的（它会把模块级 `active` 覆盖掉、泄漏前一条连接）。
+ * 这里让所有轮次排队执行：**串行**而不是「后到者复用前一人的结果」—— 复用一个**别的代际**
+ * 的轮次会让新循环白白消耗一次尝试（还会带上一轮的失败码）。
+ */
+let recoveryGate: Promise<void> = Promise.resolve()
+
+const runRecoveryRound = (options: { refreshFirst: boolean }): Promise<RecoveryRoundResult> => {
+  const task: Promise<RecoveryRoundResult> = recoveryGate.then(() => runRecoveryRoundOnce(options))
+  recoveryGate = task.then(
+    () => undefined,
+    () => undefined,
+  )
+  return task
+}
+
+const runRecoveryRoundOnce = async (options: { refreshFirst: boolean }): Promise<RecoveryRoundResult> => {
+  const last = readLastSession()
+  if (last === null) {
+    // 没记住「连哪台」：什么都没得恢复（不是错误，静默）
+    return { ok: false, failure: { code: 'NO_SESSION' }, refreshed: false }
+  }
+  const plan = planAutoConnect(last, loadAccounts(), Date.now())
+  useRemoteStore.setState({ lastSession: last })
+  if (plan.kind === 'none') {
+    // 账号记录不在了 / 还没注册设备。**不删 last-session**（只有退出登录才删）：
+    // 用户很可能只是「换了账号」，登录之后还能连回同一台 Host。
+    return {
+      ok: false,
+      failure: { code: 'NO_CREDENTIAL', message: '本机没有可用的登录凭据，请重新登录' },
+      refreshed: false,
+    }
+  }
+  if (plan.kind === 'expired') {
+    // refresh token 明确过期：再刷也没用，但**不删任何东西**，只报「要重新登录」
+    return { ok: false, failure: { code: 'REFRESH_TOKEN_EXPIRED', message: RECONNECT_NEED_LOGIN_MESSAGE }, refreshed: false }
+  }
+
+  const server: RemoteServer = { url: plan.session.serverUrl }
+  const client = createRemoteClient()
+  let account = plan.account
+  const wantRefresh = options.refreshFirst || plan.refresh
+  if (wantRefresh) {
+    if (account.refreshToken.length === 0) {
+      return {
+        ok: false,
+        failure: { code: 'NO_CREDENTIAL', message: '本地没有可用于刷新的 refreshToken，请重新登录' },
+        refreshed: false,
+      }
+    }
+    try {
+      // refresh token 会轮换：拿到新 pair 必须**原子替换**本地那一条（storage 是唯一真源）
+      const pair = await refreshTokenApi(server, account.deviceId, account.refreshToken)
+      account = upsertAccount({ ...account, ...pair })
+    } catch (error) {
+      /*
+       * 刷新这一步自己失败了（401 / 过期 / 网络）。
+       *
+       * **必须**换成 `REFRESH_FAILED`，不能把原始的 `AUTH_INVALID` / 401 往上抛：
+       * 那条 401 的分诊结果是「先刷新」，会变成「刷新失败 → 再去刷新」的死循环。
+       * 刷新都失败了才是真的「登录过期」，这里一次性定性（`reconnect.ts` 的 need-login）。
+       */
+      const info = describeRemoteError(error)
+      return {
+        ok: false,
+        failure: {
+          code: 'REFRESH_FAILED',
+          status: isRemoteApiError(error) ? (error.status ?? null) : null,
+          message: info.text,
+        },
+        refreshed: true,
+      }
+    }
+  }
+  // `establishSession` 自己接住所有建链错误（不抛），失败信息在 state 里
+  await establishSession(client, server, account, { preferredHostId: plan.session.hostDeviceId })
+  if (useRemoteStore.getState().phase === 'ready') return { ok: true, failure: null, refreshed: wantRefresh }
+  return { ok: false, failure: failureFromErrorState(useRemoteStore.getState().error), refreshed: wantRefresh }
+}
+
+/**
+ * 连回来之后把**上次开着的会话**重新打开。
+ *
+ * 为什么必须做：新连接是全新的 `ActiveSession`（`sessionId: null`、没有 follow 流），
+ * 而 `state.activeSessionId` 还停在旧值 —— 用户会看到「会话还开着但发不出消息 / 时间线不更新」。
+ */
+const restoreActiveSession = async (): Promise<void> => {
+  const state = useRemoteStore.getState()
+  const id = state.activeSessionId
+  if (id === null) return
+  if (active === null) return
+  if (!state.sessions.some(item => item.id === id)) return
+  await openSessionFlow(id)
+}
+
+/**
+ * 恢复停下时的**呈现**：这是「凭据失效 vs 连接断了」的分界在界面上的落点。
+ *
+ * | tone | 界面 |
+ * |---|---|
+ * | `neutral`（网络类 / 用完了 5 次） | 相位回 `idle`、**不写 `state.error`**、只给一行中性说明 +「立即重连」 |
+ * | `error` + `needLogin` | 「登录已过期，请重新登录」（`autoConnect.code = SESSION_EXPIRED`） |
+ * | `error` + blocked | 保留具体码与中文说明（设备撤销 / 身份不符 / 版本不兼容） |
+ * | `silent` | 什么都不动（用户主动取消） |
+ */
+const presentRecoveryStop = (stop: {
+  code: string
+  failureKind: FailureKind
+  needLogin: boolean
+  tone: 'neutral' | 'error'
+  silent: boolean
+  /** 覆盖默认文案（启动失败与中途掉线说法不同） */
+  message?: string
+}): void => {
+  if (stop.silent) {
+    setReconnect({ status: 'idle', attempt: 0, code: undefined, kind: undefined, nextRetryAt: undefined })
+    return
+  }
+
+  if (stop.tone === 'error') {
+    const message = stop.needLogin
+      ? stop.message ?? RECONNECT_NEED_LOGIN_MESSAGE
+      : stop.message ?? remoteErrorText(stop.code)
+    setReconnect({
+      status: stop.needLogin ? 'need-login' : 'blocked',
+      attempt: recoveryState.attempt,
+      code: stop.code,
+      kind: stop.failureKind,
+      nextRetryAt: undefined,
+    })
+    useRemoteStore.setState({
+      phase: 'error',
+      error: { code: stop.code, message },
+      transport: null,
+      streaming: false,
+      // 登录过期沿用旧的 `SESSION_EXPIRED` 码：远程页/设置页的「请重新登录」分支不必改
+      autoConnect: stop.needLogin
+        ? { state: 'failed', code: 'SESSION_EXPIRED', message }
+        : { state: 'failed', code: stop.code, message },
+    })
+    return
+  }
+
+  // 中性：连不上而已，**凭据一个字都不能提**
+  const message =
+    stop.message ??
+    (stop.failureKind === 'offline' ? RECONNECT_OFFLINE_MESSAGE : RECONNECT_UNREACHABLE_MESSAGE)
+  setReconnect({
+    status: 'failed',
+    attempt: recoveryState.attempt,
+    code: stop.code,
+    kind: stop.failureKind,
+    nextRetryAt: undefined,
+  })
+  useRemoteStore.setState({
+    phase: 'idle',
+    error: null,
+    transport: null,
+    streaming: false,
+    autoConnect: { state: 'failed', code: stop.code, message },
+  })
+}
+
+/** 分诊 → 下一轮；`step.action === 'stop'` 就落定 */
+const runReconnectLoop = async (
+  generation: number,
+  initialFailure: FailureInput | null,
+  immediate: boolean,
+): Promise<void> => {
+  let failure = initialFailure
+  let step: RecoveryStep = planRecoveryStep(recoveryState, failure, { immediate })
+
+  for (;;) {
+    if (generation !== reconnectGeneration) return
+
+    if (step.action === 'stop') {
+      presentRecoveryStop({
+        code: step.code,
+        failureKind: step.failureKind,
+        needLogin: step.needLogin,
+        tone: step.tone,
+        silent: step.silent,
+      })
+      return
+    }
+
+    // 用户已经自己连上了 / 正在手动建链：这一轮没有意义，静默收工
+    if (connecting || active !== null || useRemoteStore.getState().phase === 'ready') {
+      if (active !== null || useRemoteStore.getState().phase === 'ready') {
+        setReconnect({ status: 'idle', attempt: 0, code: undefined, kind: undefined, nextRetryAt: undefined })
+      }
+      return
+    }
+
+    if (step.delayMs > 0) {
+      // 退避期间就把相位摆成 connecting：界面显示「正在重连…」而不是闪一下「未连接」
+      const hint = failure === null ? null : classifyFailure(failure)
+      setReconnect({
+        status: 'waiting',
+        attempt: step.attempt,
+        code: hint?.code,
+        kind: hint?.kind,
+        nextRetryAt: Date.now() + step.delayMs,
+      })
+      useRemoteStore.setState({ phase: 'connecting', error: null, autoConnect: { state: 'connecting' } })
+      const alive = await sleepOrAbort(step.delayMs, generation)
+      if (!alive) return
+    } else {
+      const hint = failure === null ? null : classifyFailure(failure)
+      setReconnect({
+        status: 'connecting',
+        attempt: step.attempt,
+        code: hint?.code,
+        kind: hint?.kind,
+        nextRetryAt: undefined,
+      })
+      useRemoteStore.setState({ phase: 'connecting', error: null, autoConnect: { state: 'connecting' } })
+    }
+
+    const result = await runRecoveryRound({ refreshFirst: step.refresh })
+    if (generation !== reconnectGeneration) return
+
+    if (result.ok) {
+      setReconnect({ status: 'idle', attempt: 0, code: undefined, kind: undefined, nextRetryAt: undefined })
+      await restoreActiveSession()
+      return
+    }
+
+    // 记账：refresh 用过一次就不许再用（哪怕这一轮的刷新是 `planAutoConnect` 决定要刷的）
+    const advanced = advanceRecoveryState(recoveryState, step)
+    recoveryState = { attempt: advanced.attempt, refreshUsed: advanced.refreshUsed || result.refreshed }
+    failure = result.failure
+    step = planRecoveryStep(recoveryState, failure)
+  }
+}
+
+interface StartReconnectOptions {
+  /** 触发原因（诊断用；不进状态） */
+  reason: string
+  /** 首轮不等退避（回前台 / 用户点击 / 刚掉线） */
+  immediate?: boolean
+  /** 触发这次恢复的那条失败（不回前台时由 link close 传入） */
+  failure?: FailureInput | null
+  /** 已经有一轮在跑时是否打断重开（用户点「立即重连」） */
+  restart?: boolean
+}
+
+/**
+ * 启动一轮恢复（单飞）。这个函数**永远不抛**，也永远不阻塞调用方。
+ *
+ * 什么时候什么都不做：非原生壳（没有 `/__ds_proxy`）、盘上没有 last-session、
+ * 正在手动登录（`connecting`）或正在等授权（`waiting-auth`）。
+ */
+const startReconnect = (options: StartReconnectOptions): Promise<void> => {
+  if (!isNativeShell()) return Promise.resolve()
+  if (connecting) return Promise.resolve()
+  const state = useRemoteStore.getState()
+  if (state.phase === 'ready') return Promise.resolve()
+  if (state.phase === 'authing' || state.phase === 'waiting-auth') return Promise.resolve()
+  /*
+   * 这两种结论是**人**才能解决的（登录过期 / 设备撤销 / 身份不符）：
+   * 回前台的自动重连不该一直去撞它们（只会反复失败 + 反复闪文案），
+   * 但用户主动点「立即重连」/ 设置页的「重新连接」可以强来（`restart: true`）。
+   */
+  if (options.restart !== true && (state.reconnect.status === 'need-login' || state.reconnect.status === 'blocked')) {
+    return Promise.resolve()
+  }
+  if (readLastSession() === null) return Promise.resolve()
+  // 启动恢复正在飞：让它先落地（它自己会写 autoConnect 状态），别两条建链抢 `active`
+  if (autoConnectInFlight !== null) return autoConnectInFlight.then(() => undefined)
+  if (options.restart !== true && reconnectInFlight !== null) return reconnectInFlight
+
+  cancelReconnect()
+  const generation = reconnectGeneration
+  const task: Promise<void> = runReconnectLoop(generation, options.failure ?? null, options.immediate === true)
+    .catch(() => undefined)
+    .finally(() => {
+      if (reconnectInFlight === task) reconnectInFlight = null
+    })
+  reconnectInFlight = task
+  return task
+}
+
+/**
+ * 连接**意外**关闭的分诊入口（`SecureLink.onState('closed', detail)`）。
+ *
+ * `detail` 形如 `TRANSPORT_CLOSED: 原生桥关闭：heartbeat timeout（code=4009）` ——
+ * 真实的失败码和 WS close code 都藏在这句话里（`core/` 不在本次可改范围，只能解析字符串）。
+ */
+const handleLinkClosed = (detail?: string): void => {
+  const parsed = parseLinkCloseDetail(detail)
+  const failure: FailureInput = {
+    code: parsed.code ?? 'TRANSPORT_CLOSED',
+    closeCode: parsed.closeCode ?? null,
+    message: parsed.message ?? null,
+  }
+  const verdict = classifyFailure(failure)
+
+  // 没东西可恢复（没连过 / 只是浏览器预览）：保持旧行为，如实报错
+  if (readLastSession() === null || !isNativeShell()) {
+    failConnection(new RemoteApiError(verdict.code, parsed.message ?? remoteErrorText(verdict.code)))
+    return
+  }
+  // 已经有一轮自愈在跑：这一轮的结果交给那个循环去分诊（别在这里再起一条）
+  if (reconnectInFlight !== null) return
+  if (!verdict.auto) {
+    // 真需要人处理（设备撤销 / 身份不符 / 版本不兼容）：立刻落定成明确文案
+    presentRecoveryStop({
+      code: verdict.code,
+      failureKind: verdict.kind,
+      needLogin: verdict.needLogin,
+      tone: verdict.tone,
+      silent: verdict.silent,
+    })
+    return
+  }
+  /*
+   * 掉线自愈：**不**用 `immediate`，按协议的退避来（1 s / 2 s / 4 s / 8 s / 16 s）。
+   *
+   * 为什么不立刻打第一枪：服务端重启 / 心跳超时要几秒才恢复，瞬间重试只会白撞一次，
+   * 而且会给 Host 侧制造「刚断就连」的噪音。用户回前台或点「立即重连」时才是真的「现在就试」，
+   * 那条路径传 `immediate: true`（第一次不等退避）。
+   */
+  void startReconnect({ reason: 'link-closed', failure })
+}
+
+/** 前台自愈监听是否已经装过（模块级副作用只装一次） */
+let foregroundSelfHealInstalled = false
+
+/**
+ * 装上「回前台 / 重新获得焦点就自愈」的监听（幂等）。
+ *
+ * 为什么不能只靠 UI：远程页与设置面板各有一份 `visibilitychange` 监听，但**两个都没挂载**时
+ * （比如用户停在别的页签、或 WebView 被系统回收后重建）就没人负责重连了。
+ * 这里装在 store 模块上，随模块加载生效；`startReconnect()` 是单飞 + 幂等，
+ * 与组件那份重复触发不会多打一次网络。
+ *
+ * 另外还监听 `focus`：Android WebView 从后台回来时，`visibilitychange` 有时不触发，
+ * `focus` 更可靠 —— 两条都挂上，重复触发由单飞吸收。
+ */
+export const installForegroundSelfHeal = (): void => {
+  if (foregroundSelfHealInstalled) return
+  foregroundSelfHealInstalled = true
+  const kick = (): void => {
+    void startReconnect({ reason: 'foreground', immediate: true }).catch(() => undefined)
+  }
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'visible') return
+      kick()
+    })
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('focus', kick)
+  }
+}
+
+/* ── 重启后自动恢复（K4）：启动时**只试一次**，失败交给「立即重连」 ─────── */
+
+/**
+ * 启动时的一次恢复尝试（**单拍**，不进退避循环）。
+ *
+ * 为什么启动不做 5 次退避：首屏要快，且用户就在屏幕前——失败给一条
+ * 「上次连接没成功，点立即重连」比静默重试 30 秒更诚实。真正的掉线自愈
+ *（后台回来 / 链路中途断）才走 `startReconnect()` 的退避循环。
+ *
+ * 与旧实现的区别（都在 `R10`）：
+ *   - **不再删 last-session**（凭据记录缺失 / expired 都只报「要重新登录」）；
+ *   - 失败后用 `reconnect.ts` 分诊：网络类给中性文案，只有 need-login / blocked 才是红字。
+ */
+const runAutoConnect = async (force: boolean): Promise<void> => {
+  if (!force && autoConnectSettled) return
+  const current = useRemoteStore.getState()
+  // 有别的建链在进行（手动登录 / 授权轮询 / 已经连上）：这条恢复流程没有意义
+  if (connecting) return
+  // 掉线自愈已经在跑：让它自己跑完（它比「启动只试一次」更有耐心）
+  if (reconnectInFlight !== null) return
+  if (active !== null || current.phase === 'ready') return
+  if (current.phase === 'authing' || current.phase === 'waiting-auth') return
+  // 普通浏览器没有 `/__ds_proxy`：连也连不上，还会把「上次连接失败」的提示摆出来。
+  // 那边本来就有「只能在 App 内使用」的降级文案，这里直接不做。
+  if (!isNativeShell()) return
+
+  const session = readLastSession()
+  if (session === null) {
+    useRemoteStore.setState({ lastSession: null, autoConnect: { state: 'idle' } })
+    return
+  }
+
+  useRemoteStore.setState({ lastSession: session, autoConnect: { state: 'connecting' } })
+  const plan = planAutoConnect(session, loadAccounts(), Date.now())
+  if (plan.kind === 'none' || plan.kind === 'expired') {
+    recoveryState = { ...INITIAL_RECOVERY_STATE }
+    presentRecoveryStop({
+      code: plan.kind === 'expired' ? 'REFRESH_TOKEN_EXPIRED' : 'NO_CREDENTIAL',
+      failureKind: 'need-login',
+      needLogin: true,
+      tone: 'error',
+      silent: false,
+      message: RECONNECT_NEED_LOGIN_MESSAGE,
+    })
+    return
+  }
+
+  // 从现在起界面上是「正在恢复上次连接」：phase 也进 connecting，远程页不会闪一下「未连接」
+  useRemoteStore.setState({ phase: 'connecting', error: null })
+  const result = await runRecoveryRound({ refreshFirst: plan.refresh })
+  if (result.ok) return
+
+  const verdict = classifyFailure(result.failure ?? { code: 'CONNECTION_FAILED' })
+  recoveryState = { attempt: 1, refreshUsed: plan.refresh }
+  if (verdict.needLogin || verdict.tone === 'error') {
+    presentRecoveryStop({
+      code: verdict.code,
+      failureKind: verdict.kind,
+      needLogin: verdict.needLogin,
+      tone: 'error',
+      silent: false,
+      message: result.failure?.message ?? undefined,
+    })
+    return
+  }
+  // 网络类：中性（「上次连接没成功」），不写 error、不删任何凭据
+  presentRecoveryStop({
+    code: verdict.code,
+    failureKind: verdict.kind,
+    needLogin: false,
+    tone: 'neutral',
+    silent: false,
+    message: verdict.kind === 'offline' ? RECONNECT_OFFLINE_MESSAGE : RECONNECT_STARTUP_MESSAGE,
+  })
 }
 
 /** 领到 token 之后：换设备账号（`loginWithAccountToken` 负责落盘）→ 建链。 */
@@ -1568,140 +2575,12 @@ let connecting = false
 const connectFlow = async (serverUrl: string, email: string, password: string): Promise<void> => {
   if (connecting) return
   connecting = true
+  // [R10] 手动登录优先：把正在跑的掉线自愈停掉，别让它和这次登录抢 `active`
+  cancelReconnect()
   try {
     await connectOnce(serverUrl, email, password)
   } finally {
     connecting = false
-  }
-}
-
-/* ── 重启后自动恢复（K4） ─────────────────────────────────────────────── */
-
-/** 「这条错误 = 凭据不能用了，必须重新登录」的错误码（服务器与本地都可能给） */
-const SESSION_EXPIRED_CODES = new Set([
-  'SESSION_EXPIRED',
-  'AUTH_REQUIRED',
-  'AUTH_INVALID',
-  'TOKEN_EXPIRED',
-  'ACCOUNT_AUTH_REQUIRED',
-  'DEVICE_REVOKED',
-  'DEVICE_OWNERSHIP_REQUIRED',
-])
-
-const isSessionExpiredError = (error: unknown): boolean => {
-  if (!isRemoteApiError(error)) return false
-  if (SESSION_EXPIRED_CODES.has(error.code)) return true
-  // 401 / 403 一律当「凭据不行」：refresh 撞这两码说明 refresh token 也废了
-  return error.status === 401 || error.status === 403
-}
-
-/**
- * 恢复失败：**不写 `state.error`、不留在 `error` 相位**。
- *
- * 用户什么都没点，App 自己没连上不该弹红条 —— 界面只显示一行「上次连接失败，点击重试」，
- * 想登录的人照样去设置页。这是任务书「失败不要弹错」的直接落点。
- */
-const failAutoConnect = (code: string, message: string): void => {
-  useRemoteStore.setState({
-    autoConnect: { state: 'failed', code, message },
-    error: null,
-    phase: 'idle',
-    transport: null,
-    streaming: false,
-  })
-}
-
-/** 凭据过期：清 last-session（留着只会每次启动白试一轮），账号邮箱保留给登录表单预填 */
-const expireLastSession = (message: string): void => {
-  clearLastSession()
-  useRemoteStore.setState({ lastSession: null })
-  failAutoConnect('SESSION_EXPIRED', message)
-}
-
-/**
- * 一次恢复尝试（真实实现，非幂等；外面包 `autoConnectFlow`）。
- *
- * 时序（与 `input-M2-登录持久化与权限设置.md` 的图一致）：
- *
- * ```
- * 读 last-session ──无──► 什么都不做（不写状态、不打网络）
- *    │有
- *    ▼ planAutoConnect(记录, 账号表)
- *   none/no-account      ─► 删记录（凭据没了，续不上）
- *   none/account-incomplete ─► 删记录
- *   expired              ─► 删记录 + failed/SESSION_EXPIRED（「登录已过期，请重新登录」）
- *   connect(refresh:true)  ─► POST /api/v1/auth/refresh → 原子替换账号 token → 建链
- *   connect(refresh:false) ─► 直接建链（401 还有一次刷新兜底，见 withRefreshRetry）
- *    ▼
- *  establishSession(..., {preferredHostId}) ──成功──► 写 last-session + autoConnect=done
- *                                          └─失败──► keep last-session + failed（可重试）
- * ```
- */
-const runAutoConnect = async (force: boolean): Promise<void> => {
-  if (!force && autoConnectSettled) return
-  const current = useRemoteStore.getState()
-  // 有别的建链在进行（手动登录 / 授权轮询 / 已经连上）：这条恢复流程没有意义
-  if (connecting) return
-  if (active !== null || current.phase === 'ready') return
-  if (current.phase === 'authing' || current.phase === 'waiting-auth') return
-  // 普通浏览器没有 `/__ds_proxy`：连也连不上，还会把「上次连接失败」的提示摆出来。
-  // 那边本来就有「只能在 App 内使用」的降级文案，这里直接不做。
-  if (!isNativeShell()) return
-
-  const session = readLastSession()
-  if (session === null) {
-    useRemoteStore.setState({ lastSession: null, autoConnect: { state: 'idle' } })
-    return
-  }
-
-  const plan = planAutoConnect(session, loadAccounts(), Date.now())
-  if (plan.kind === 'none') {
-    // 账号记录已经没了 / 还没注册设备：这条 last-session 续不上，删掉（否则每次启动都白试一轮）。
-    // 内存里也一起清掉 —— 留着一个「点不动的重新连接」比没有更糟。
-    clearLastSession()
-    useRemoteStore.setState({ lastSession: null, autoConnect: { state: 'idle' } })
-    return
-  }
-  if (plan.kind === 'expired') {
-    expireLastSession('上次的登录凭据已经过期，请重新登录')
-    return
-  }
-
-  // 从现在起界面上是「正在恢复上次连接」：phase 也进 connecting，远程页不会闪一下「未连接」
-  useRemoteStore.setState({
-    lastSession: session,
-    autoConnect: { state: 'connecting' },
-    phase: 'connecting',
-    error: null,
-  })
-
-  const server: RemoteServer = { url: plan.session.serverUrl }
-  const client = createRemoteClient()
-  try {
-    let account = plan.account
-    if (plan.refresh) {
-      // refresh token 会轮换：拿到新 pair 必须**原子替换**本地那一条（storage 是唯一真源）
-      const pair = await refreshTokenApi(server, account.deviceId, account.refreshToken)
-      account = upsertAccount({ ...account, ...pair })
-    }
-    await establishSession(client, server, account, { preferredHostId: plan.session.hostDeviceId })
-    const after = useRemoteStore.getState()
-    if (after.phase === 'ready') return
-    // `establishSession` 自己已经 `failConnection` 过：把那份错误翻译成「恢复失败」的两种语气
-    const failure = after.error
-    if (failure !== null && SESSION_EXPIRED_CODES.has(failure.code)) {
-      expireLastSession(failure.message)
-      return
-    }
-    failAutoConnect(failure?.code ?? 'CONNECT_FAILED', failure?.message ?? '上次连接失败')
-  } catch (error) {
-    // 走到这里只可能是 refresh 抛的（establishSession 内部自己接住了所有建链错误）
-    if (isSessionExpiredError(error)) {
-      expireLastSession('上次的登录凭据已经过期，请重新登录')
-      return
-    }
-    const info = describeRemoteError(error)
-    failAutoConnect(info.code, info.text)
   }
 }
 
@@ -1724,14 +2603,127 @@ const autoConnectFlow = (force = false): Promise<void> => {
 
 const retryAutoConnectFlow = (): Promise<void> => {
   autoConnectSettled = false
+  // [R10] 顺带把「上一次恢复留下的结论」清掉：界面上不该还挂着上一轮的 failed
+  setReconnect({ status: 'idle', attempt: 0, code: undefined, kind: undefined, nextRetryAt: undefined })
   return autoConnectFlow(true)
+}
+
+/**
+ * 「立即重连」（R10）：**不等定时器**，直接走一轮完整的自愈循环（退避 1/2/4/8/16 s，最多 5 次）。
+ *
+ * 与 `retryAutoConnect()` 的区别：
+ *   - `retryAutoConnect()` 是**启动恢复**那条路（单拍、失败只落一行「上次连接没成功」）；
+ *   - `reconnectNow()` 是**掉线自愈**那条路（会先 refresh、会退避重试、成功还会把上次的会话重开）。
+ *
+ * 两个入口都幂等，并且都在「已经连上 / 正在手动登录」时什么都不做。
+ */
+const reconnectNowFlow = (): Promise<void> => {
+  autoConnectSettled = false
+  return startReconnect({ reason: 'manual', immediate: true, restart: true })
+}
+
+/* ── [R14 多 Host] 切换 / 刷新 ──────────────────────────────────────────── */
+
+/** 单飞：切换过程要拆连接，两次并发切换会把 `active` 撕成两半 */
+let switchingHost = false
+
+/**
+ * 换一台 Host：拆当前连接 → 用**同一个账号**连新 Host → 重载会话列表。
+ *
+ * 为什么能复用 `establishSession`：它本来就是「拿到设备账号之后的全部动作」（列 Host →
+ * 建安全通道 → 握手 → `$events` → 首屏列表 → 记 last-session），换 Host 只是把
+ * `preferredHostId` 指过去 —— 于是「连上之后必须做的那几件事」不会因为切换而漏掉一件。
+ */
+const switchHostFlow = async (targetId: string): Promise<void> => {
+  if (switchingHost) return
+  const session = active
+  if (session === null) {
+    useRemoteStore.setState({
+      hostSwitch: {
+        status: 'failed',
+        targetId,
+        code: 'NOT_CONNECTED',
+        message: '还没连上电脑，没法切换主机',
+      },
+    })
+    return
+  }
+  switchingHost = true
+  // 拆连接之后 `active` 会被清空，所以先把这条连接的三件套拍成快照：
+  // 用**同一个账号**连新 Host 靠的就是它们（token 仍然只在 `storage.ts`，这里不复制凭据）
+  const { client, server, account } = session
+  try {
+    await performHostSwitch(
+      {
+        hosts: () => useRemoteStore.getState().hosts,
+        currentHostId: () => active?.host.deviceId ?? null,
+        currentHostName: () => active?.host.name ?? null,
+        disconnect: async () => {
+          // 缓存按 serverUrl|hostDeviceId 分桶：先把攒着的时间线写盘，再拆
+          flushTimelinePersist()
+          await shutdown()
+          setPaging(false, false)
+          /*
+           * 换 Host = 换一份数据：会话列表 / 时间线 / 待处理交互都属于某台 Host，
+           * 留在界面上只会让用户点进新 Host 上不存在的会话。
+           * 缓存文件本身**不删**（切回去还要用），这里只清「当前这一屏」。
+           */
+          useRemoteStore.setState({
+            // 旧连接已经拆了：界面不能再声称「就绪」（否则这几秒里点会话只会拿到 NOT_CONNECTED）
+            phase: 'connecting',
+            sessions: [],
+            activeSessionId: null,
+            items: [],
+            streaming: false,
+            pendingApprovals: [],
+            pendingInteractions: {},
+            cacheStatus: emptyCacheStatus(),
+            error: null,
+          })
+        },
+        connect: async (hostDeviceId: string) => {
+          await establishSession(client, server, account, { preferredHostId: hostDeviceId })
+          /*
+           * `establishSession` 内部把失败折成 `state.error`（不抛），所以这里必须自己复核：
+           * 连上的不是目标那台 = 这次切换失败（目标掉线时 `pickHost` 会回落到别的在线机，
+           * 那种「悄悄换了台机器」正是本功能最不该有的行为）。
+           */
+          const switched = active
+          if (switched === null || switched.host.deviceId !== hostDeviceId) {
+            throw new RemoteApiError('HOST_SWITCH_FAILED', '没能连上这台主机')
+          }
+        },
+        report: (state: HostSwitchState) => {
+          useRemoteStore.setState({ hostSwitch: state })
+        },
+      },
+      targetId,
+    )
+  } finally {
+    switchingHost = false
+  }
+}
+
+/** 重新探一遍 Host 在线状态（下拉里的刷新）。失败静默：手上那份列表仍然可用 */
+const refreshHostsFlow = async (): Promise<void> => {
+  const session = active
+  if (session === null) return
+  try {
+    const rows = await session.client.listHosts(session.server, session.account)
+    useRemoteStore.setState({ hosts: toHostInfoList(rows) })
+  } catch {
+    // 连通性抖动 / 服务器拒绝：保持原样（离线主机本来就灰着），不弹错
+  }
 }
 
 const refreshSessionsFlow = async (): Promise<void> => {
   try {
     const session = requireSession()
-    useRemoteStore.setState({ sessions: projectSessions(await listSessions(session.link)) })
+    // R8：先把「正在同步」立起来（列表可能已经是缓存直出的一屏），合并完由 applyRemoteSessionRows 落定
+    patchCacheStatus({ sessionsSyncing: true })
+    applyRemoteSessionRows(await listSessions(session.link))
   } catch (error) {
+    patchCacheStatus({ sessionsSyncing: false })
     fail(error)
   }
 }
@@ -1744,19 +2736,47 @@ const openSessionFlow = async (id: string): Promise<void> => {
     fail(error)
     return
   }
+  // 切走之前先把手上的内容写盘（攒着的最后几帧别丢）
+  flushTimelinePersist()
   await closeStreamQuietly(session, session.follow)
   session.follow = null
   session.sessionId = id
-  session.transcript = createTranscriptState()
+  /*
+   * R8：**先铺缓存**。有缓存就立刻直出一屏（顶部挂「正在同步…」），
+   * 没缓存才进骨架 —— 两种情况都**不**显示「这个会话还没有消息」。
+   * `cursor` 给 -1：缓存不持有 follow 游标，真正的游标由快照的 `cursor` 决定。
+   */
+  const cachedTimeline = readTimelineCache({
+    serverUrl: session.server.url,
+    hostDeviceId: session.host.deviceId,
+    sessionId: id,
+    now: Date.now(),
+  })
+  session.transcript =
+    cachedTimeline === null ? createTranscriptState() : { items: cachedTimeline.items, cursor: -1, transient: 0 }
   session.hasMore = false
   // 会话内控制（W2）跟着切会话：投影 / 提问 / 队列都是「当前会话」的
   selectControlSession(id)
+  /*
+   * [R9 红点] **进入会话即清零**：列表上那条红点说的是「有东西等你点」，
+   * 人都进来了，卡片就在时间线里，红点没有意义。
+   * 注意这不等于「装作处理完」：真没应答的话卡片仍然在时间线里可点；
+   * 而且 `pendingInteractionCounts` 本来就不计活动会话，所以不会立刻又亮回来。
+   */
+  clearPendingInteractions({ sessionId: id })
   useRemoteStore.setState({
     activeSessionId: id,
-    items: [],
+    items: cachedTimeline?.items ?? [],
     streaming: false,
     pendingApprovals: [],
     error: null,
+    cacheStatus: {
+      ...useRemoteStore.getState().cacheStatus,
+      timelineFromCache: cachedTimeline !== null,
+      timelineLoading: cachedTimeline === null,
+      timelineSettled: false,
+      timelineFailed: false,
+    },
   })
   setPaging(false, false)
 
@@ -1771,11 +2791,17 @@ const openSessionFlow = async (id: string): Promise<void> => {
           ready.reject(new RemoteApiError('INVALID_MESSAGE', '远端没有先给 session/follow 快照（协议要求首帧必须是 snapshot）'))
           return
         }
-        session.transcript = reduceSnapshot(snapshot, id)
+        // R8：快照是权威窗口，但**不丢**本地已经画出来的东西 —— 同 id 服务端覆盖、
+        // 乐观行按 requestRpcId 对齐、更早的历史页留在头部（`cache.mergeTimelineItems`）。
+        const local = session.transcript.items
+        const fresh = reduceSnapshot(snapshot, id)
+        session.transcript = { ...fresh, items: mergeTimelineItems(local, fresh.items) }
         session.hasMore = snapshot.hasMore
         applied = true
         syncItems(session)
         setPaging(snapshot.hasMore, false)
+        patchTimelineStatus(id, { timelineFromCache: false, timelineLoading: false, timelineSettled: true })
+        scheduleTimelinePersist(session, id)
         ready.resolve()
         return
       }
@@ -1783,12 +2809,15 @@ const openSessionFlow = async (id: string): Promise<void> => {
       const running = runningForFollowItem(value)
       if (running !== undefined) useRemoteStore.setState({ streaming: running })
       syncItems(session)
+      scheduleTimelinePersist(session, id)
     },
     onClosed: (reason, failure) => {
       closed = true
       session.follow = null
       useRemoteStore.setState({ streaming: false })
       if (!applied) {
+        // 首次拉取到此为止（失败也算「结束了」）：别再挂着骨架，也别谎报「没有消息」
+        patchTimelineStatus(id, { timelineLoading: false, timelineSettled: true, timelineFailed: true })
         ready.reject(new RemoteApiError(failure?.code ?? 'STREAM_CLOSED', '会话流在快照之前就关闭了'))
         return
       }
@@ -1813,6 +2842,7 @@ const openSessionFlow = async (id: string): Promise<void> => {
   } catch (error) {
     await closeStreamQuietly(session, session.follow)
     session.follow = null
+    patchTimelineStatus(id, { timelineLoading: false, timelineSettled: true, timelineFailed: true })
     fail(error)
   }
 }
@@ -1847,6 +2877,8 @@ const loadOlderFlow = async (): Promise<void> => {
     if (older.length > 0) {
       session.transcript = { ...session.transcript, items: prependHistory(older, session.transcript.items) }
       syncItems(session)
+      // R8：翻页追加到头部（`prependHistory` 自己去重），顺手把更大的窗口写进缓存
+      scheduleTimelinePersist(session, id)
     }
   } catch (error) {
     fail(error)
@@ -1855,7 +2887,11 @@ const loadOlderFlow = async (): Promise<void> => {
   }
 }
 
-const sendFlow = async (text: string, attachments: readonly RemotePromptAttachment[] = []): Promise<void> => {
+const sendFlow = async (
+  text: string,
+  attachments: readonly RemotePromptAttachment[] = [],
+  mode?: RemotePromptMode,
+): Promise<void> => {
   let session: ActiveSession
   try {
     session = requireSession()
@@ -1884,7 +2920,17 @@ const sendFlow = async (text: string, attachments: readonly RemotePromptAttachme
   syncItems(session)
 
   try {
-    await sendPrompt(session.link, id, text, attachments, { requestId })
+    await sendPrompt(session.link, id, text, attachments, {
+      requestId,
+      ...(mode === undefined ? {} : { mode }),
+    })
+    // Host 已受理：清掉「发送中」挂起标记。steer/插话不一定回显这条消息，
+    // 不清的话它会永远停在发送中（真机反馈的 bug）。
+    session.transcript = {
+      ...session.transcript,
+      items: clearSendState(session.transcript.items, requestId),
+    }
+    syncItems(session)
   } catch (error) {
     // 失败**不删行**：把原因留在行上（契约要求「可读错误」给到 UI），同时写进 state.error。
     const info = describeRemoteError(error)
@@ -1940,16 +2986,26 @@ const respondApprovalFlow = async (eventId: string, decision: ApprovalDecision):
       ),
     }
     syncItems(session)
+    // [R9 红点] 本机应答完 = 这条不再「等你点」了
+    clearPendingInteractions({ eventId })
   } catch (error) {
     fail(error)
     const code = typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : ''
     // 句柄已失效：把卡片标成 unavailable（继续显示 pending 只会让人反复点）。
     if (code === 'PERMISSION_NOT_PENDING' || code === 'AGENT_BUSY') {
-      session.transcript = {
-        ...session.transcript,
-        items: resolveApprovalItem(session.transcript.items, eventId, 'unavailable'),
+      /*
+       * 只在**还没结论**的时候降级。双击/重连后的第二次提交会拿到
+       * `PERMISSION_NOT_PENDING`，但那一条其实已经 allowed-once 了 ——
+       * 再把它改成「已失效」会把一次成功的允许显示成失败（真实发生过）。
+       */
+      if (shouldExpireApproval(session.transcript.items, eventId)) {
+        session.transcript = {
+          ...session.transcript,
+          items: resolveApprovalItem(session.transcript.items, eventId, 'unavailable'),
+        }
+        syncItems(session)
       }
-      syncItems(session)
+      clearPendingInteractions({ eventId })
     }
   }
 }
@@ -1995,8 +3051,48 @@ export const useRemoteStore = create<RemoteState>(() => ({
     await retryAutoConnectFlow()
   },
 
+  reconnectNow: async (): Promise<void> => {
+    await reconnectNowFlow()
+  },
+
   refreshSessions: async (): Promise<void> => {
     await refreshSessionsFlow()
+  },
+
+  switchHost: async (hostDeviceId: string): Promise<void> => {
+    await switchHostFlow(hostDeviceId)
+  },
+
+  refreshHosts: async (): Promise<void> => {
+    await refreshHostsFlow()
+  },
+
+  dismissHostSwitch: (): void => {
+    if (useRemoteStore.getState().hostSwitch.status === 'idle') return
+    useRemoteStore.setState({ hostSwitch: { status: 'idle' } })
+  },
+
+  hydrateCachedSessions: (): void => {
+    const state = useRemoteStore.getState()
+    // 已经有实时列表 / 已经合并过服务端数据：缓存没有意义了，别拿旧的盖新的
+    if (state.sessions.length > 0 || state.cacheStatus.sessionsSynced) return
+    const bucket = cacheBucketNow()
+    if (bucket === null) return
+    const cached = readSessionsCache({ ...bucket, now: Date.now() })
+    if (cached === null) return
+    // 读盘期间可能已经有列表了（自动恢复很快）：再查一次
+    const latest = useRemoteStore.getState()
+    if (latest.sessions.length > 0 || latest.cacheStatus.sessionsSynced) return
+    useRemoteStore.setState({
+      sessions: cached.sessions,
+      cacheStatus: {
+        ...latest.cacheStatus,
+        sessionsFromCache: true,
+        sessionsStale: cached.stale,
+        // 上一次跑就标过「已不存在」的行，这一屏也照样标着（下次合并时才真的清掉）
+        ghostSessionIds: cached.sessions.filter(row => row.missingAt !== undefined).map(row => row.id),
+      },
+    })
   },
 
   openSession: async (id: string): Promise<void> => {
@@ -2009,6 +3105,10 @@ export const useRemoteStore = create<RemoteState>(() => ({
 
   send: async (text: string): Promise<void> => {
     await sendFlow(text)
+  },
+
+  sendWithMode: async (text: string, mode: RemotePromptMode): Promise<void> => {
+    await sendFlow(text, [], mode)
   },
 
   cancel: async (): Promise<void> => {
@@ -2079,14 +3179,752 @@ export const describeRemoteLink = (): string | null => {
   return `${session.server.url}#${session.host.deviceId.slice(0, 8)} transport=${session.link.transport} state=${session.link.state}`
 }
 
-/** 诊断用：自动恢复的状态 + 盘上那条 last-session 的安全摘要（**不含 token**）。 */
+/** 诊断用：自动恢复的状态 + 掉线自愈的进度 + 盘上那条 last-session（**不含 token**）。 */
 export const describeRemoteRecovery = (): string => {
-  const { autoConnect } = useRemoteStore.getState()
+  const { autoConnect, reconnect } = useRemoteStore.getState()
   const tail = autoConnect.code === undefined ? '' : `|${autoConnect.code}`
-  return `${autoConnect.state}${tail}|${describeLastSession(readLastSession())}`
+  const healing =
+    reconnect.status === 'idle'
+      ? ''
+      : `|${reconnect.status}:${reconnect.attempt}/${reconnect.maxAttempts}${reconnect.code === undefined ? '' : `:${reconnect.code}`}`
+  return `${autoConnect.state}${tail}${healing}|${describeLastSession(readLastSession())}`
 }
 
 /** 上次连接的记录与自动恢复状态：UI 想直接 import 类型时走这里，不用碰 `autoConnect.ts`。 */
 export type { LastSession } from './autoConnect.js'
 export { readLastSession } from './autoConnect.js'
 
+/* ────────────────────────────────────────────────────────────────────────
+ * 六、通知中心（R6）：把「哪些会话在跑 / 在调什么工具」推给原生通知
+ *
+ * 原生契约见 `notify.ts` 头部（`/__ds_notify/{work,clear,state.json}`，实现是
+ * `android/…/RemoteNotifyHandler.java`）。这里只做**状态翻译**与生命周期管理：
+ *
+ * | 证据 | state | tool | detail |
+ * |---|---|---|---|
+ * | 活动会话 `pendingApprovals` 非空 / 别的会话收到 `approval/request` | `approval` | 工具名 | 等待你确认 <工具名> |
+ * | `streaming` 或时间线里有 `tool.state==='running'` | `running` | 最近工具名 + 短文件提示 | 正在调用 <工具名> |
+ * | 这一轮刚结束（看过 running→停）且 `turnEnd.reason==='failed'` | `error` | — | 这一轮失败了 |
+ * | 同上、不是 failed（completed / stopped） | `done` | — | 这一轮已完成（30s 后自动清） |
+ *
+ * 多会话口径（lead 拍板的方案 B）：
+ *   - `items` = 当前活动会话 + 其他 `running` / 待审批会话，**上限 24 条**（原生 `MAX_ITEMS`）；
+ *   - 排序：`approval` 最前，其余按最近活动时间倒序；
+ *   - 原生把这些 running 条目合并成**一条**汇总通知（最多 3 行 + 「等 N 个任务」），
+ *     所以通知栏永远不会被 20 个会话撑爆；
+ *   - 全部结束 → 清整组；单个结束而还有别的在跑 → 只更新 items，不清组。
+ *
+ * 纪律：这一节只**读**既有状态，不改任何既有分支 —— 唯一一处插入是
+ * `openEventsStream()` 的 `onValue` 里一行 `noteRemoteNotifyItem(value)`（只写本节私有记账）。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** `done` 通知挂多久后自动清掉（任务书：30s）。到期还必须从后续快照里摘掉，否则原生会按同 id 画回来 */
+export const NOTIFY_DONE_TTL_MS = 30_000
+/** 状态合并窗口：把一轮 setState 攒成一拍（`notify.ts` 自己还有 250ms 合并窗口） */
+const NOTIFY_SYNC_COALESCE_MS = 120
+/** 探测失败（原生端点没打通）后的冷却：别每次状态变化都打一次 GET */
+const NOTIFY_PROBE_RETRY_MS = 5_000
+/** 会话没有标题时的兜底（原生对空标题也会给「会话」） */
+const NOTIFY_UNTITLED = '(未命名会话)'
+/** 工具名后面那个「短文件提示」的上限（原生 tool 字段总共 40 字符，得给工具名留位置） */
+const NOTIFY_TOOL_HINT_MAX = 20
+
+/* ── 6.1 其他会话的信号（`$events` 的 status / approval waterfall） ───────── */
+
+interface NotifyApprovalSignal {
+  eventId: string
+  tool: string
+  ts: number
+}
+
+interface NotifySessionSignal {
+  running: boolean
+  approval: NotifyApprovalSignal | null
+}
+
+/**
+ * 会话 id → 「它现在在跑 / 在等审批」。
+ *
+ * **只服务通知**，不进 `RemoteSessionSummary`（契约不动）：`api-session/status` 只有
+ * 一个 running 布尔值，`api-session/activity` 只有时间戳 —— 别的会话调了什么工具，
+ * Host 根本没转发，所以别的会话的通知行只显示「标题 · 进行中」。
+ */
+const notifySignals = new Map<string, NotifySessionSignal>()
+
+const notifySignalOf = (sessionId: string): NotifySessionSignal => {
+  const existing = notifySignals.get(sessionId)
+  if (existing !== undefined) return existing
+  const created: NotifySessionSignal = { running: false, approval: null }
+  notifySignals.set(sessionId, created)
+  return created
+}
+
+const notifyRecordOf = (value: unknown): Record<string, unknown> | null =>
+  typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+
+/**
+ * `$events` 的每一条 item 都过这里（只读）：
+ *   - `api-session/status`     → 别的会话「在跑 / 停了」（停了 = 这一轮结束，弹一条 done）；
+ *   - `api-session/removed`    → 删掉记账 + 清这个会话的通知；
+ *   - `approval/request`       → 任意会话的待审批（活动会话另有 `pendingApprovals`，以时间线为准）；
+ *   - `{type:'cancel'}`        → 审批被撤回，摘掉。
+ *
+ * 异常一律吞掉：通知逻辑不许打断 `$events` 的分发。
+ */
+export const noteRemoteNotifyItem = (value: unknown): void => {
+  try {
+    const forwarded = forwardedSessionEvent(value)
+    if (forwarded !== undefined) {
+      applyNotifySignal(forwarded)
+      scheduleRemoteNotifySync()
+      return
+    }
+    if (applyNotifyApproval(value)) scheduleRemoteNotifySync()
+  } catch {
+    // 静默：通知只是锦上添花
+  }
+}
+
+const applyNotifySignal = (event: ForwardedSessionEvent): void => {
+  if (event.kind === 'status') {
+    const signal = notifySignalOf(event.sessionId)
+    const wasRunning = signal.running
+    signal.running = event.running
+    if (!event.running) signal.approval = null
+    if (wasRunning && !event.running && event.sessionId !== useRemoteStore.getState().activeSessionId) {
+      // 别的会话跑完了：只知道「结束了」不知道成没成 —— 按 done 弹一条（30s 后自动清）
+      armNotifyFinished({
+        sessionId: event.sessionId,
+        title: notifyTitleOf(useRemoteStore.getState().sessions, event.sessionId),
+        state: 'done',
+        detail: '这一轮已完成',
+        ts: Date.now(),
+      })
+    }
+    return
+  }
+  if (event.kind === 'removed') {
+    notifySignals.delete(event.sessionId)
+    dropNotifyFinished(event.sessionId)
+    clearNotifySession(event.sessionId)
+  }
+}
+
+const applyNotifyApproval = (value: unknown): boolean => {
+  const record = notifyRecordOf(value)
+  if (record === null || typeof record.type !== 'string') return false
+  if (record.type === 'cancel' && typeof record.eventId === 'string') {
+    let changed = false
+    for (const signal of notifySignals.values()) {
+      if (signal.approval !== null && signal.approval.eventId === record.eventId) {
+        signal.approval = null
+        changed = true
+      }
+    }
+    return changed
+  }
+  if (record.type !== 'waterfall' || record.event !== 'approval/request') return false
+  const eventId = typeof record.eventId === 'string' ? record.eventId : ''
+  const agentId = typeof record.agentId === 'string' ? record.agentId : ''
+  if (eventId.length === 0 || agentId.length === 0) return false
+  const request = notifyRecordOf(record.request)
+  const tool = request !== null && typeof request.toolName === 'string' ? request.toolName.trim() : ''
+  // 活动会话的审批以时间线为准（`buildNotifySnapshot` 会用 `pendingApprovals` 覆盖它）；
+  // 这条记下来是为了「切走以后」仍然留在快照里（原生按对账撤通知，漏掉就会被误撤）
+  notifySignalOf(agentId).approval = { eventId, tool, ts: Date.now() }
+  return true
+}
+
+/* ── 6.2 时间线 → 一条通知条目（纯函数；自测直接覆盖这张映射表） ─────────── */
+
+export interface NotifyActiveInput {
+  sessionId: string
+  title: string
+  items: readonly ChatItem[]
+  streaming: boolean
+  pendingApprovals: readonly { eventId: string; title: string; detail?: string }[]
+  /** 上一次给这个会话推过的状态：`done` / `error` 只在真的「跑过一轮」之后才发 */
+  previous?: WorkState | null
+}
+
+/** 从后往前找最后一条满足条件的行（时间线是追加的，最近的在尾巴上） */
+const notifyLatestItem = (items: readonly ChatItem[], match: (item: ChatItem) => boolean): ChatItem | undefined => {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]
+    if (item !== undefined && match(item)) return item
+  }
+  return undefined
+}
+
+/**
+ * 工具条目的展示名 + 一个**安全的**短提示（只认文件名，不认命令行）。
+ *
+ * `summary` 是 Host 给的调用描述（`view.description` / `view.cwd` / `data.summary`），可能是
+ * 命令行全文、绝对路径或一句人话。这里只接受**路径样式**的值并取其文件名，其余一律丢掉：
+ * 通知栏（尤其锁屏）不适合放命令原文，长度也扛不住。
+ */
+const notifyToolLabel = (item: ChatItem): string => {
+  if (item.kind !== 'tool') return ''
+  const name = item.toolName.trim()
+  const summary = item.summary?.trim() ?? ''
+  const firstLine = summary.split(/[\r\n]/u)[0]?.trim() ?? ''
+  const pathLike = firstLine.length > 0 && (/[/\\]/u.test(firstLine) || /^[\w.-]+\.\w{1,8}$/u.test(firstLine))
+  const base = pathLike ? (firstLine.split(/[/\\]/u).filter(part => part.length > 0).at(-1) ?? '') : ''
+  const hint = base.length > NOTIFY_TOOL_HINT_MAX ? base.slice(0, NOTIFY_TOOL_HINT_MAX) : base
+  if (name.length === 0) return hint
+  return hint.length === 0 ? name : `${name} ${hint}`
+}
+
+export const deriveNotifyItem = (input: NotifyActiveInput): WorkItem | null => {
+  const { sessionId, title } = input
+  const approval = input.pendingApprovals[0]
+  if (approval !== undefined) {
+    const row = notifyLatestItem(input.items, item => item.kind === 'approval' && item.approvalId === approval.eventId)
+    const toolName = row !== undefined && row.kind === 'approval' ? row.toolName.trim() : approval.title.trim()
+    const tool = toolName.length > 0 ? toolName : ''
+    return {
+      sessionId,
+      title,
+      state: 'approval',
+      ...(tool.length === 0 ? {} : { tool }),
+      detail: tool.length === 0 ? '有一个操作需要你确认' : `等待你确认 ${tool}`,
+      ts: row?.createdAt ?? input.items[0]?.createdAt ?? Date.now(),
+    }
+  }
+  const runningTool = notifyLatestItem(input.items, item => item.kind === 'tool' && item.state === 'running')
+  const lastTool = notifyLatestItem(input.items, item => item.kind === 'tool')
+  if (input.streaming || runningTool !== undefined) {
+    const toolItem = runningTool ?? lastTool
+    const tool = toolItem === undefined ? '' : notifyToolLabel(toolItem)
+    return {
+      sessionId,
+      title,
+      state: 'running',
+      ...(tool.length === 0 ? {} : { tool }),
+      detail: tool.length === 0 ? '正在回复…' : `正在调用 ${tool}`,
+      ts: (toolItem ?? notifyLatestItem(input.items, () => true))?.createdAt ?? Date.now(),
+    }
+  }
+  const ended = notifyLatestItem(input.items, item => item.turnEnd !== undefined)
+  if (ended === undefined || ended.turnEnd === undefined) return null
+  // 只有真的看过 running 才发结束：否则「打开一个有历史的会话」会平白弹一条完成通知
+  if (input.previous !== 'running' && input.previous !== 'approval') return null
+  const failed = ended.turnEnd.reason === 'failed'
+  return {
+    sessionId,
+    title,
+    state: failed ? 'error' : 'done',
+    detail: failed ? '这一轮失败了' : '这一轮已完成',
+    ts: ended.turnEnd.time,
+  }
+}
+
+/* ── 6.3 快照拼装（纯函数；排序 / 上限 / activeSessionId 都在这里） ───────── */
+
+export interface NotifyOtherSession {
+  sessionId: string
+  title: string
+  running: boolean
+  /** 待审批的工具名（只有别的会话走这里；活动会话用时间线） */
+  approvalTool?: string
+  approvalTs?: number
+  /** 最近活动时间（排序用） */
+  updatedAt: number
+}
+
+export interface NotifySnapshotInput {
+  activeSessionId: string | null
+  /** 活动会话当前的状态条目；`null` = 没在跑也没待审批 */
+  active: WorkItem | null
+  activeUpdatedAt: number
+  others: readonly NotifyOtherSession[]
+  /** 还挂在通知栏上的结束事件（done / error），生命周期由 6.5 维护 */
+  finished: readonly WorkItem[]
+}
+
+/**
+ * 拼一份原生认的快照。
+ *
+ * 排序 = 审批最前（按时间倒序）+ 其余按最近活动时间倒序；`activeSessionId` 决定点汇总通知
+ * 落到哪个会话。超过 `NOTIFY_MAX_ITEMS` 截断（原生自己也只认 24 条）。
+ */
+export const assembleNotifySnapshot = (input: NotifySnapshotInput): WorkPush | null => {
+  const approvals: { item: WorkItem; at: number }[] = []
+  const rest: { item: WorkItem; at: number }[] = []
+  if (input.active !== null) {
+    if (input.active.state === 'approval') approvals.push({ item: input.active, at: input.active.ts })
+    else rest.push({ item: input.active, at: input.activeUpdatedAt })
+  }
+  for (const other of input.others) {
+    if (other.approvalTool !== undefined && other.approvalTool.length > 0) {
+      const tool = other.approvalTool
+      approvals.push({
+        item: {
+          sessionId: other.sessionId,
+          title: other.title,
+          state: 'approval',
+          tool,
+          detail: `等待你确认 ${tool}`,
+          ts: other.approvalTs ?? other.updatedAt,
+        },
+        at: other.approvalTs ?? other.updatedAt,
+      })
+      continue
+    }
+    if (!other.running) continue
+    rest.push({
+      item: { sessionId: other.sessionId, title: other.title, state: 'running', detail: '正在回复…', ts: other.updatedAt },
+      at: other.updatedAt,
+    })
+  }
+  for (const item of input.finished) rest.push({ item, at: item.ts })
+  approvals.sort((a, b) => b.at - a.at)
+  rest.sort((a, b) => b.at - a.at)
+  const items = [...approvals.map(entry => entry.item), ...rest.map(entry => entry.item)].slice(0, NOTIFY_MAX_ITEMS)
+  if (items.length === 0) return null
+  return { items, ...(input.activeSessionId === null ? {} : { activeSessionId: input.activeSessionId }) }
+}
+
+/* ── 6.4 小工具 ─────────────────────────────────────────────────────────── */
+
+const notifyTitleOf = (sessions: readonly RemoteSessionSummary[], sessionId: string): string => {
+  const title = sessions.find(item => item.id === sessionId)?.title.trim() ?? ''
+  return title.length === 0 ? NOTIFY_UNTITLED : title
+}
+
+const notifyUpdatedAtOf = (sessions: readonly RemoteSessionSummary[], sessionId: string): number =>
+  sessions.find(item => item.id === sessionId)?.updatedAt ?? 0
+
+/* ── 6.5 结束事件（done / error）的生命周期 ─────────────────────────────── */
+
+interface NotifyFinishedEntry {
+  item: WorkItem
+  timer: ReturnType<typeof setTimeout> | null
+}
+
+/**
+ * 已经弹过、还挂在通知栏上的结束事件（sessionId → 条目）。
+ *
+ * 为什么要自己记账：原生按固定 id 画事件通知，**快照里再次出现同一条**会把它画回来。
+ * 所以「30s 后清掉」必须同时做两件事：`clearWork(sessionId)` + 把它从后续快照里摘掉。
+ */
+const notifyFinished = new Map<string, NotifyFinishedEntry>()
+
+/** 最近一次组好的快照：判断「还有没有进行中 / 待审批」，决定清单条还是清整组 */
+let notifySnapshot: WorkPush | null = null
+
+/** 清掉这个会话的通知（原生按固定 id 算，不依赖通知栏里现在有没有） */
+const clearNotifySession = (sessionId: string): void => {
+  // 这一轮还没推出去过任何东西：不用白打一次原生端点
+  if (!notifyPosted || notifySupport === 'no') return
+  void clearWork(sessionId)
+}
+
+const armNotifyFinished = (item: WorkItem): void => {
+  const existing = notifyFinished.get(item.sessionId)
+  if (existing !== undefined) {
+    if (existing.item.state === item.state && existing.item.ts === item.ts) return
+    if (existing.timer !== null) clearTimeout(existing.timer)
+    notifyFinished.delete(item.sessionId)
+  }
+  const timer = item.state === 'done' ? setTimeout(() => { expireFinishedNotify(item.sessionId) }, NOTIFY_DONE_TTL_MS) : null
+  notifyFinished.set(item.sessionId, { item, timer })
+}
+
+/** 摘掉结束条目；有的话顺手清掉原生那条（切走会话 / 重新开跑 / 会话被删时用） */
+const dropNotifyFinished = (sessionId: string): void => {
+  const existing = notifyFinished.get(sessionId)
+  if (existing === undefined) return
+  if (existing.timer !== null) clearTimeout(existing.timer)
+  notifyFinished.delete(sessionId)
+  clearNotifySession(sessionId)
+}
+
+/**
+ * 结束通知的收尾（30s 定时器与自测都走这里）：从快照里摘掉 + 清掉原生那条。
+ *
+ * 如果别的会话还在跑/待审批，只清这个会话；全没了就清整组（任务书：全部结束后 clearWork()）。
+ */
+export const expireFinishedNotify = (sessionId: string): void => {
+  const existing = notifyFinished.get(sessionId)
+  if (existing === undefined) return
+  if (existing.timer !== null) clearTimeout(existing.timer)
+  notifyFinished.delete(sessionId)
+  const running = notifySnapshot !== null && notifySnapshot.items.some(item => item.state === 'running' || item.state === 'approval')
+  if (running || notifyFinished.size > 0) clearNotifySession(sessionId)
+  else void clearWork()
+  scheduleRemoteNotifySync()
+}
+
+/* ── 6.6 与 store 的桥：ready 才推、断开就清 ────────────────────────────── */
+
+let notifyInstalled = false
+/** 上一次给活动会话推过的状态（`done` / `error` 的「跑过一轮才算」靠它） */
+let notifyPrevious: { sessionId: string; state: WorkState } | null = null
+/** 原生能力：`no` 之后整块禁用（旧 APK 不会在运行中变新） */
+let notifySupport: 'unknown' | 'yes' | 'no' = 'unknown'
+let notifySupportProbe: Promise<boolean> | null = null
+let notifySupportRetryAt = 0
+let notifySyncTimer: ReturnType<typeof setTimeout> | null = null
+/** 这一轮连接里是否真的推出去过东西（决定断开时要不要发 `/clear`） */
+let notifyPosted = false
+
+/**
+ * 探一次原生能力（带冷却）。`unreachable`（这次没打通）不粘住，过 5s 还能再试；
+ * 404 / HTML（旧 APK）粘住 `no`，之后一个请求都不发。
+ */
+const ensureNotifySupport = async (): Promise<boolean> => {
+  if (notifySupport === 'yes') return true
+  if (notifySupport === 'no') return false
+  if (notifySupportProbe !== null) return notifySupportProbe
+  if (Date.now() < notifySupportRetryAt) return false
+  const probe = (async (): Promise<boolean> => {
+    try {
+      const capability = await probeNotify()
+      if (capability.supported) {
+        notifySupport = 'yes'
+        return true
+      }
+      if (capability.reason === 'unreachable') {
+        notifySupportRetryAt = Date.now() + NOTIFY_PROBE_RETRY_MS
+        return false
+      }
+      notifySupport = 'no'
+      return false
+    } catch {
+      notifySupportRetryAt = Date.now() + NOTIFY_PROBE_RETRY_MS
+      return false
+    } finally {
+      notifySupportProbe = null
+    }
+  })()
+  notifySupportProbe = probe
+  return probe
+}
+
+export const scheduleRemoteNotifySync = (): void => {
+  if (notifySyncTimer !== null) return
+  notifySyncTimer = setTimeout(() => {
+    notifySyncTimer = null
+    void syncRemoteNotify()
+  }, NOTIFY_SYNC_COALESCE_MS)
+}
+
+const buildNotifySnapshot = (state: RemoteState, active: WorkItem | null): WorkPush | null => {
+  const activeSessionId = state.activeSessionId
+  /*
+   * 活动会话的审批状态同步到信号表（而不是直接丢掉）：
+   *   - 时间线里审批还在 → 信号也留着，**切走以后**这条待审批仍然在快照里（原生按「上次在、
+   *     这次不在」对账，漏掉就会被当成已处理而撤掉通知）；
+   *   - 时间线里没了（已处理 / 被撤回）→ 信号清掉，原生下一次对账自动撤通知。
+   */
+  if (activeSessionId !== null) {
+    const signal = notifySignalOf(activeSessionId)
+    if (active !== null && active.state === 'approval') {
+      const approval = state.pendingApprovals[0]
+      signal.approval = approval === undefined
+        ? signal.approval
+        : { eventId: approval.eventId, tool: active.tool ?? approval.title, ts: active.ts }
+    } else {
+      signal.approval = null
+    }
+  }
+  const others: NotifyOtherSession[] = []
+  for (const [sessionId, signal] of notifySignals) {
+    if (sessionId === activeSessionId) continue
+    if (!signal.running && signal.approval === null) continue
+    others.push({
+      sessionId,
+      title: notifyTitleOf(state.sessions, sessionId),
+      running: signal.running,
+      ...(signal.approval === null ? {} : { approvalTool: signal.approval.tool, approvalTs: signal.approval.ts }),
+      updatedAt: notifyUpdatedAtOf(state.sessions, sessionId),
+    })
+  }
+  const finished: WorkItem[] = []
+  for (const entry of notifyFinished.values()) finished.push(entry.item)
+  const activeItem = active !== null && (active.state === 'running' || active.state === 'approval') ? active : null
+  return assembleNotifySnapshot({
+    activeSessionId,
+    active: activeItem,
+    activeUpdatedAt: activeSessionId === null ? 0 : notifyUpdatedAtOf(state.sessions, activeSessionId),
+    others,
+    finished,
+  })
+}
+
+/**
+ * 组一帧并推给原生（**单飞**由 `scheduleRemoteNotifySync` 的 120ms 合并窗口 + `notify.ts`
+ * 自己的 250ms 合并窗口共同保证）。任何异常都吞掉 —— 通知失败不许影响连接与聊天。
+ */
+export const syncRemoteNotify = async (): Promise<void> => {
+  try {
+    const state = useRemoteStore.getState()
+    if (state.phase !== 'ready') return
+    // 旧 APK 已经确认不支持：连状态翻译都不用做（也保证不产生任何请求）
+    if (notifySupport === 'no') return
+    const sessionId = state.activeSessionId
+    const derived = sessionId === null ? null : deriveNotifyItem({
+      sessionId,
+      title: notifyTitleOf(state.sessions, sessionId),
+      items: state.items,
+      streaming: state.streaming,
+      pendingApprovals: state.pendingApprovals,
+      previous: notifyPrevious !== null && notifyPrevious.sessionId === sessionId ? notifyPrevious.state : null,
+    })
+    if (derived === null) {
+      notifyPrevious = null
+    } else {
+      if (derived.state === 'done' || derived.state === 'error') {
+        armNotifyFinished(derived)
+      } else if (notifyFinished.has(derived.sessionId)) {
+        // 又开始跑了：上一条「已完成 / 失败」必须撤掉，否则会和新汇总同时挂在通知栏
+        dropNotifyFinished(derived.sessionId)
+      }
+      notifyPrevious = { sessionId: derived.sessionId, state: derived.state }
+    }
+    const snapshot = buildNotifySnapshot(state, derived)
+    notifySnapshot = snapshot
+    // 没有任何要展示的东西（没连上会话 / 这一轮还没开始）：**连探测都不做**，
+    // 保证「没东西可通知」的环境（普通浏览器、还没开跑、别人的自测）一个请求都不打。
+    if (snapshot === null) return
+    // 注意：**不**看 `granted`（原生语义是「运行时权限 && 总闸 && 三条渠道都可见」，
+    // 用户可能只是关了一条渠道）。关了渠道原生会静默丢弃，我们照常推、失败静默。
+    if (!(await ensureNotifySupport())) return
+    const latest = useRemoteStore.getState()
+    if (latest.phase !== 'ready' || latest.activeSessionId !== state.activeSessionId) return
+    await pushWorkState(snapshot)
+    notifyPosted = true
+  } catch {
+    // 静默：通知是锦上添花
+  }
+}
+
+/** 断开 / 退出登录：丢掉记账、清整组通知（先 `reset` 掉还没发的帧，免得晚到的帧又弹回来） */
+export const stopRemoteNotify = async (): Promise<void> => {
+  notifyPrevious = null
+  notifySnapshot = null
+  notifySignals.clear()
+  for (const entry of notifyFinished.values()) {
+    if (entry.timer !== null) clearTimeout(entry.timer)
+  }
+  notifyFinished.clear()
+  if (notifySyncTimer !== null) {
+    clearTimeout(notifySyncTimer)
+    notifySyncTimer = null
+  }
+  resetNotify()
+  // 这一轮**从没推出去过**任何东西（普通浏览器 / 还没开跑就断开）：不用发 `/clear`
+  if (!notifyPosted) return
+  notifyPosted = false
+  if (notifySupport === 'no') return
+  await clearWork()
+}
+
+const handleNotifyPhase = (phase: RemoteState['phase'], previousPhase: RemoteState['phase']): void => {
+  if (phase === previousPhase) return
+  if (phase === 'ready') {
+    // 新连接：上一轮的状态与结束条目全部作废（通知在 stopRemoteNotify 里已经清过）
+    notifyPrevious = null
+    notifySnapshot = null
+    scheduleRemoteNotifySync()
+    return
+  }
+  if (previousPhase === 'ready') void stopRemoteNotify()
+}
+
+const handleNotifyActiveSession = (sessionId: string | null, previousId: string | null): void => {
+  if (sessionId === previousId) return
+  notifyPrevious = null
+  // 切走的会话：**结束**通知不该跟过来（还在跑的会在快照里以「其他会话」出现；
+  // 待审批的也不清 —— 那是要说给用户听的事）
+  if (previousId !== null) dropNotifyFinished(previousId)
+  if (sessionId !== null) scheduleRemoteNotifySync()
+}
+
+const onNotifyVisibility = (): void => {
+  if (typeof document === 'undefined' || document.visibilityState !== 'visible') return
+  // 回前台**不清**通知（用户很可能就是点通知回来的）：只把当前状态补推一拍，
+  // 内容没变会被 `notify.ts` 的逐字段浅比较挡掉，不会重复弹。
+  scheduleRemoteNotifySync()
+}
+
+/**
+ * 装上桥（幂等）。挂载点在 store 模块本身：`phase → ready` 才开始推，离开 ready 清整组。
+ *
+ * 订阅里只做「调度」不做网络：真正的请求在 `syncRemoteNotify` 里，失败静默。
+ */
+export const installRemoteNotify = (): void => {
+  if (notifyInstalled) return
+  notifyInstalled = true
+  useRemoteStore.subscribe((state, previous) => {
+    try {
+      if (state.phase !== previous.phase) handleNotifyPhase(state.phase, previous.phase)
+      if (state.activeSessionId !== previous.activeSessionId) {
+        handleNotifyActiveSession(state.activeSessionId, previous.activeSessionId)
+      }
+      if (state.sessions !== previous.sessions) scheduleRemoteNotifySync()
+      if (
+        state.items !== previous.items ||
+        state.streaming !== previous.streaming ||
+        state.pendingApprovals !== previous.pendingApprovals ||
+        state.keepAlive !== previous.keepAlive
+      ) {
+        scheduleRemoteNotifySync()
+      }
+    } catch {
+      // 订阅回调里抛错会把 zustand 的 setState 弄崩：全部吞掉
+    }
+  })
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onNotifyVisibility)
+  }
+}
+
+installRemoteNotify()
+
+/*
+ * [R14] 点通知直达会话：装在 store 模块上，和上面两条同一个位置 ——
+ * `App → RemoteChatView → store` 保证它在**首屏就会执行**，所以用户哪怕当前在「本机」模式，
+ * 点通知也能被接住（deepLink 内部会 `enterRemoteMode()` 切过去）。
+ *
+ * `deepLink.ts` 不反向 import 本文件（那会成环）：它要的「现状 + 动作」全在这里注入，
+ * 于是自测可以拿假 facade 直接打它的去重 / 等连接 / 会话不存在三条路径。
+ */
+installDeepLink({
+  store: {
+    snapshot: () => useRemoteStore.getState(),
+    openSession: (sessionId: string) => useRemoteStore.getState().openSession(sessionId),
+    refreshSessions: () => useRemoteStore.getState().refreshSessions(),
+  },
+})
+
+/*
+ * [R10] 回前台就自愈：装在 store 模块上（不是某个页面），所以**任何页面**回到前台都生效。
+ * 幂等单飞，与远程页/设置面板自己的 `visibilitychange` 监听重复触发不会多打一次网络。
+ */
+installForegroundSelfHeal()
+
+
+/* ────────────────────────────────────────────────────────────────────────
+ * 七、R8 缓存：退到后台时把内容写完
+ *
+ * 为什么单独一小块：`scheduleTimelinePersist()` 攒 800ms 才落盘，而移动端
+ * 「锁屏 / 切走 / 被系统回收」可能就发生在这 800ms 里 —— 用户下次打开看到的
+ * 就是少最后一两句的缓存。`visibilitychange → hidden` 是最早、最稳的抢救点
+ * （比 `pagehide` 兼容性好，也覆盖切到别的 App）。
+ *
+ * 只做**写**，不读不删：缓存的生命周期全在 `cache.ts` 与上面几个流程里。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+const installTimelineCacheFlush = (): void => {
+  /* istanbul ignore next -- 无 DOM 环境（自测 / SSR）直接不装 */
+  if (typeof document === 'undefined') return
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushTimelinePersist()
+  })
+}
+
+installTimelineCacheFlush()
+/* ────────────────────────────────────────────────────────────────────────
+ * 八、R9：待处理交互的记账（会话列表红点）
+ *
+ * 用户在 A 会话看 B 会话的审批 / 提问时，列表里 B 那行要有个红点（圆点 + 数字）。
+ * 数据只有一处来源：Host 级 `$events`（`approval/request`、`user-questions/request`
+ * 都带 `eventId` + `agentId`，重连会重投 —— 所以**按 eventId 去重**）。
+ *
+ * 规矩：
+ *   - 活动会话**不计**（人就在里面，卡片在时间线上看得见）；
+ *   - 进入会话即清零（`openSession`）—— 不然红点会一直挂着等你去点一个已经看过的卡片；
+ *   - `cancel` / `status=false` / `removed` 三种结束信号都销账；
+ *   - 记账规则本身是纯函数（`chat-controls/promptModel.ts`），这里只负责喂与折算。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** 会话 id → 还有哪几条没处理的 eventId（审批一份、提问一份）。 */
+let pendingSets: PendingInteractionSets = {}
+
+const samePendingCounts = (
+  left: Record<string, PendingInteractionCount>,
+  right: Record<string, PendingInteractionCount>,
+): boolean => {
+  const keys = Object.keys(left)
+  if (keys.length !== Object.keys(right).length) return false
+  return keys.every((key) => {
+    const a = left[key]
+    const b = right[key]
+    return a !== undefined && b !== undefined && a.approval === b.approval && a.question === b.question
+  })
+}
+
+/** 记账 → UI 计数（活动会话不计）。引用没变就不 setState，省掉列表的无谓重渲染。 */
+const syncPendingInteractions = (): void => {
+  const state = useRemoteStore.getState()
+  const next = pendingInteractionCounts(pendingSets, state.activeSessionId)
+  if (samePendingCounts(state.pendingInteractions, next)) return
+  useRemoteStore.setState({ pendingInteractions: next })
+}
+
+/**
+ * 销账。四种入口共用：
+ *   `{eventId}`（Host cancel / 本机应答完）、`{sessionId}`（进入会话 / 会话消失 / 这一轮结束）。
+ */
+const clearPendingInteractions = (match: { eventId?: string; sessionId?: string }): void => {
+  const next = settlePendingInteraction(pendingSets, match)
+  if (next === pendingSets) return
+  pendingSets = next
+  syncPendingInteractions()
+}
+
+/** 断开 / 退出登录：记账整块复位（界面状态由 `INITIAL_STATE` 复位）。 */
+const resetPendingInteractions = (): void => {
+  pendingSets = {}
+  if (Object.keys(useRemoteStore.getState().pendingInteractions).length > 0) {
+    useRemoteStore.setState({ pendingInteractions: {} })
+  }
+}
+
+/**
+ * `$events` 的每条 item 都过这里（与 `noteRemoteNotifyItem` 并列，互不依赖）。
+ *
+ * 认两种形状：
+ *   - waterfall `approval/request` / `user-questions/request` → 记一条（`eventId` 去重）；
+ *   - `{type:'cancel', eventId}` / `api-session/status running=false` / `api-session/removed` → 销账。
+ *
+ * 异常一律吞掉：红点是锦上添花，不能打断 `$events` 的分发。
+ *
+ * 导出只为自测（与 `noteRemoteNotifyItem` 同一惯例）：界面不调它。
+ */
+export const notePendingInteractionEvent = (value: unknown): void => {
+  try {
+    const active = useRemoteStore.getState().activeSessionId
+    const forwarded = forwardedSessionEvent(value)
+    if (forwarded !== undefined) {
+      if (forwarded.kind === 'removed' || (forwarded.kind === 'status' && !forwarded.running)) {
+        clearPendingInteractions({ sessionId: forwarded.sessionId })
+      }
+      return
+    }
+    const record = notifyRecordOf(value)
+    if (record === null || typeof record.type !== 'string') return
+    if (record.type === 'cancel') {
+      if (typeof record.eventId === 'string') clearPendingInteractions({ eventId: record.eventId })
+      return
+    }
+    if (record.type !== 'waterfall') return
+    if (typeof record.eventId !== 'string' || typeof record.agentId !== 'string') return
+    // 活动会话不计：卡片就在时间线里，红点只会碍眼
+    if (record.agentId === active) return
+    const kind = record.event === 'approval/request'
+      ? 'approval'
+      : record.event === 'user-questions/request'
+        ? 'question'
+        : undefined
+    if (kind === undefined) return
+    const next = trackPendingInteraction(pendingSets, { sessionId: record.agentId, kind, eventId: record.eventId })
+    if (next === pendingSets) return
+    pendingSets = next
+    syncPendingInteractions()
+  } catch {
+    // 静默：红点只是界面提示
+  }
+}

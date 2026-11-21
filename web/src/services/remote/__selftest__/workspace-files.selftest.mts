@@ -50,6 +50,7 @@ import {
   decodeText,
   extensionOf,
   isMissingEndpoint,
+  shouldFallbackToWorkspaceUpload,
   parseWorkspaceListing,
   parseWorkspaceByteChunk,
   parseWorkspaceTextPage,
@@ -541,7 +542,7 @@ check('D4：文件名消毒（去目录 / 控制字符 / 前导点）', async ()
   assertEqual(sanitizeUploadName('x'.repeat(400)).length, 200, '长度封顶')
 })
 
-check('D5：Host 缺 upload 端点 → isMissingEndpoint（界面据此收掉「+」）', async () => {
+check('D5：Host 缺 upload 端点 → 可判定的错误（R15：降级判据，不再据此收「+」）', async () => {
   const fake = fakeTarget({ 'fileUploads/upload': { ok: false, code: 'METHOD_NOT_FOUND' } })
   let caught: unknown
   try {
@@ -549,8 +550,17 @@ check('D5：Host 缺 upload 端点 → isMissingEndpoint（界面据此收掉「
   } catch (error) {
     caught = error
   }
-  assertTrue(isMissingEndpoint(caught), 'METHOD_NOT_FOUND 认成「缺端点」')
+  assertTrue(isMissingEndpoint(caught), 'METHOD_NOT_FOUND 仍认成「缺端点」（读取类端点用）')
+  assertTrue(shouldFallbackToWorkspaceUpload(caught), '但**上传**要把它当「换通道」的信号')
+  // 0.5.22 实测就是这一个码：不在 allowlist → METHOD_NOT_ALLOWED
+  assertTrue(
+    shouldFallbackToWorkspaceUpload(Object.assign(new Error('x'), { code: 'METHOD_NOT_ALLOWED' })),
+    'METHOD_NOT_ALLOWED 也要降级',
+  )
+  assertTrue(shouldFallbackToWorkspaceUpload(Object.assign(new Error('x'), { code: '405' })), '405 也要降级')
   assertFalse(isMissingEndpoint(Object.assign(new Error('x'), { code: 'UPLOAD_LIMIT' })), 'UPLOAD_LIMIT 不是缺端点')
+  assertFalse(shouldFallbackToWorkspaceUpload(Object.assign(new Error('x'), { code: 'UPLOAD_LIMIT' })), '配额错不降级')
+  assertFalse(shouldFallbackToWorkspaceUpload(Object.assign(new Error('x'), { code: 'RPC_TIMEOUT' })), '超时不降级')
 })
 
 /* ══════════════════════════════════════════════════════════════════════

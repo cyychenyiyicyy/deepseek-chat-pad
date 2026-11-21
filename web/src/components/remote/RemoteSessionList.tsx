@@ -2,14 +2,24 @@ import clsx from 'clsx'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslate } from '../../i18n/index.js'
+import { sessionListViewState } from '../../services/remote/cache.js'
 import { useNewSessionStore } from '../../services/remote/newSessionStore.js'
 import type { RemoteSearchHit } from '../../services/remote/sessionsApi.js'
 import { useRemoteStore } from '../../services/remote/store.js'
 import { useAnchoredPosition, useDismiss } from '../base/anchored.js'
 import { IconButton } from '../base/IconButton.js'
-import { IconCloseOutline16, IconEllipsisOutline16, IconPinOutline16, IconRefreshOutline16, IconSearchOutline16 } from '../base/icons.js'
+import {
+  IconCloseOutline16,
+  IconEllipsisOutline16,
+  IconNewChatOutline20,
+  IconPinOutline16,
+  IconRefreshOutline16,
+  IconSearchOutline16,
+} from '../base/icons.js'
 import { Modal } from '../base/Modal.js'
 import { formatDate } from '../../utils/format.js'
+// [R9] 红点数字（纯函数；规则与 store 的记账同一份）
+import { pendingBadgeText, pendingTotal } from './chat-controls/promptModel.js'
 import styles from './RemoteSessionList.module.css'
 
 /**
@@ -77,6 +87,8 @@ interface RowView {
   updatedAt: number
   pinned: boolean
   archived: boolean
+  /** [R8 缓存] 服务端列表里已经没有它了（还留着这一屏，下一轮刷新清理） */
+  ghost: boolean
 }
 
 export const RemoteSessionList = ({
@@ -91,9 +103,13 @@ export const RemoteSessionList = ({
   const sessions = useRemoteStore((state) => state.sessions)
   const activeSessionId = useRemoteStore((state) => state.activeSessionId)
   const phase = useRemoteStore((state) => state.phase)
+  /** [R8 缓存] 列表来源与同步态：缓存直出靠它标注「正在同步 / 缓存 / 已不存在」 */
+  const cacheStatus = useRemoteStore((state) => state.cacheStatus)
   const capabilities = useNewSessionStore((state) => state.capabilities)
   const archivedIds = useNewSessionStore((state) => state.archivedSessionIds)
   const pinnedIds = useNewSessionStore((state) => state.pinnedSessionIds)
+  /** [R9] 别的会话里等着的审批 / 提问（活动会话不计，见 store 末尾「八」） */
+  const pendingInteractions = useRemoteStore((state) => state.pendingInteractions)
   const menuSessionId = useNewSessionStore((state) => state.menuSessionId)
   const busySessionId = useNewSessionStore((state) => state.busySessionId)
   const actionError = useNewSessionStore((state) => state.actionError)
@@ -124,6 +140,15 @@ export const RemoteSessionList = ({
     fireAndForget(() => useNewSessionStore.getState().ensureWorkspaceFlags())
   }, [ready])
 
+  /*
+   * [R8 缓存] 打开远程页 → **先渲染缓存**（不发请求、只读一次 localStorage）。
+   * 之后 `session/list` 回来时由数据层合并（服务端为准、本地 pinned 保留），
+   * 所以这里不需要等连接、也不需要自己发起刷新。幂等：已有实时列表时它什么都不做。
+   */
+  useEffect(() => {
+    useRemoteStore.getState().hydrateCachedSessions()
+  }, [])
+
   /** 菜单锚点（长按/右键/⋯ 落在哪一行） */
   const [menuAnchor, setMenuAnchor] = useState<HTMLElement | null>(null)
   const menuOpen = menuSessionId !== null
@@ -144,6 +169,8 @@ export const RemoteSessionList = ({
 
   const archivedSet = new Set(archivedIds)
   const pinnedSet = new Set(pinnedIds)
+  /* [R8] 服务端这次没给、但缓存里还有的会话：标「已不存在」而不是立刻消失（避免网络抖动闪一下） */
+  const ghostSet = new Set(cacheStatus.ghostSessionIds)
   const searching = search.query.trim().length > 0
 
   const sorted: RowView[] = sessions
@@ -154,6 +181,7 @@ export const RemoteSessionList = ({
       updatedAt: toMillis(session.updatedAt) ?? 0,
       pinned: pinnedSet.has(session.id) || session.pinned === true,
       archived: archivedSet.has(session.id),
+      ghost: ghostSet.has(session.id),
     }))
     .sort((a, b) => {
       // 归档的沉到最后；置顶的浮到最前；其余按更新时间倒序
@@ -173,15 +201,55 @@ export const RemoteSessionList = ({
         updatedAt: toMillis(known?.updatedAt) ?? 0,
         pinned: pinnedSet.has(hit.sessionId) || known?.pinned === true,
         archived: archivedSet.has(hit.sessionId),
+        ghost: false,
       }
     })
     : []
 
   const rows = searching ? hitRows : sorted
+  /**
+   * [R8 缓存] 列表相位（纯函数判定，见 `cache.ts`）：
+   *   有行 → 内容（缓存直出也算内容，顶部小标说明来源）
+   *   没行 + 没连上 → 原来那句「未连接」
+   *   没行 + 正在拉 / 还没拉过 → **骨架**，绝不写「远端还没有会话」
+   */
+  const listPhase = sessionListViewState({
+    rowCount: rows.length,
+    ready,
+    synced: cacheStatus.sessionsSynced,
+    syncing: cacheStatus.sessionsSyncing,
+  })
+  /**
+   * 缓存直出时那句小标到底该说什么：
+   *   连接还在（authing/connecting/ready）→「正在同步…」；
+   *   连接已经没了（idle/error）→ 只剩缓存，就老实说「缓存」。
+   */
+  const syncingNow =
+    cacheStatus.sessionsSyncing || phase === 'authing' || phase === 'connecting' || phase === 'ready'
   const menuRow = menuSessionId === null ? undefined : rows.find((row) => row.id === menuSessionId)
 
   return (
     <div className={clsx(styles.wrap, className)}>
+      {/*
+        「新建对话」入口（R4）：用户真机反馈「新建对话没有按钮」——
+        之前它只挂在时间线空态里，一旦有会话就再也找不到。这里是**会话列表顶部**，
+        与搜索框同一列、视觉权重更高，任何时刻都在。
+        能力门禁：Host 没有 `session/create`（`capabilities.create === false`）时不渲染。
+      */}
+      {ready && capabilities.create ? (
+        <button
+          type="button"
+          className={styles.newChat}
+          aria-label={t('composerNewChat')}
+          onClick={() => useNewSessionStore.getState().openPanel()}
+        >
+          <span className={styles.newChatIcon} aria-hidden>
+            <IconNewChatOutline20 />
+          </span>
+          <span className={styles.newChatText}>{t('composerNewChat')}</span>
+        </button>
+      ) : null}
+
       {ready ? (
         <div className={styles.searchRow}>
           <span className={styles.searchIcon} aria-hidden>
@@ -219,14 +287,29 @@ export const RemoteSessionList = ({
 
       {search.local && searching ? <div className={styles.listHint}>{t('newSessionSearchLocal')}</div> : null}
       {actionError !== null ? <div className={styles.listError}>{actionError}</div> : null}
+      {/*
+        [R8 缓存] 「正在同步」小标 / 「缓存」说明（与内容区那条细提示同款规矩）：
+          - 连接还活着（connecting/ready/authing）→「正在同步…」= 真的在拉；
+          - 连接已经没了（idle/error）→ 只标「缓存」：别谎称正在同步；
+          - 超 TTL 的缓存照样显示，但后面跟一个「缓存」，说明它可能不是最新的。
+      */}
+      {!searching && cacheStatus.sessionsFromCache ? (
+        <div className={styles.listHint} role="status">
+          {syncingNow ? t('cacheSyncing') : t('cacheStaleTag')}
+          {syncingNow && cacheStatus.sessionsStale ? ` · ${t('cacheStaleTag')}` : ''}
+        </div>
+      ) : null}
 
       <div className={styles.list}>
         {rows.length === 0 ? (
-          <div className={styles.empty}>
-            {searching
-              ? t(search.searching ? 'newSessionSearching' : 'newSessionSearchEmpty')
-              : t(phase === 'ready' ? 'remoteSessionEmpty' : 'remotePhaseIdle')}
-          </div>
+          searching ? (
+            <div className={styles.empty}>{t(search.searching ? 'newSessionSearching' : 'newSessionSearchEmpty')}</div>
+          ) : listPhase === 'skeleton' ? (
+            // 缓存为空 + 正在拉：骨架，**不要**「远端还没有会话」（那是歧义）
+            <ListSkeleton label={t('cacheListSkeleton')} />
+          ) : (
+            <div className={styles.empty}>{t(phase === 'ready' ? 'remoteSessionEmpty' : 'remotePhaseIdle')}</div>
+          )
         ) : (
           rows.map((row) => {
             const active = row.id === activeSessionId
@@ -234,7 +317,7 @@ export const RemoteSessionList = ({
             return (
               <div
                 key={row.id}
-                className={clsx(styles.row, row.archived && styles.rowArchived)}
+                className={clsx(styles.row, (row.archived || row.ghost) && styles.rowArchived)}
                 onContextMenu={(event) => {
                   if (!canManage) return
                   event.preventDefault()
@@ -270,12 +353,26 @@ export const RemoteSessionList = ({
                     </span>
                     <span className={styles.itemMeta}>
                       {row.archived ? <span className={styles.archivedTag}>{t('newSessionArchivedTag')}</span> : null}
+                      {row.ghost ? (
+                        <span className={styles.archivedTag}>{t('cacheSessionMissingTag')}</span>
+                      ) : null}
                       {busy ? (
                         <span className={styles.itemBusy} aria-hidden>
                           <IconRefreshOutline16 />
                         </span>
                       ) : null}
                       {row.time ? <span className={styles.itemTime}>{row.time}</span> : null}
+                      {/* [R9] 红点：别的会话有审批 / 提问等你处理（数字 >9 显示 9+） */}
+                      {pendingTotal(pendingInteractions[row.id]) > 0 ? (
+                        <span
+                          className={styles.pendingDot}
+                          aria-label={t('promptuxPendingBadge', {
+                            count: pendingTotal(pendingInteractions[row.id]),
+                          })}
+                        >
+                          {pendingBadgeText(pendingTotal(pendingInteractions[row.id]))}
+                        </span>
+                      ) : null}
                     </span>
                   </span>
                 </button>
@@ -323,6 +420,21 @@ export const RemoteSessionList = ({
     </div>
   )
 }
+
+/**
+ * [R8 缓存] 列表骨架：缓存为空、又还没拿到 `session/list` 时用它。
+ *
+ * 为什么不用「远端还没有会话」：那句话是在**断言事实**，而此刻我们只是还没拿到列表 ——
+ * 用户会以为会话丢了。灰条只表达「在等」，不表达结论。
+ */
+const ListSkeleton = ({ label }: { label: string }) => (
+  <div className={styles.skeleton} role="status" aria-busy="true" aria-label={label}>
+    <div className={styles.skeletonRow} data-width="88" />
+    <div className={styles.skeletonRow} data-width="72" />
+    <div className={styles.skeletonRow} data-width="92" />
+    <div className={styles.skeletonRow} data-width="64" />
+  </div>
+)
 
 /** 菜单的一行（不是 `base/Menu`：那个只能点触发器打开，而这里要支持长按/右键） */
 const MenuRow = ({ label, onSelect }: { label: string; onSelect: () => void }) => (

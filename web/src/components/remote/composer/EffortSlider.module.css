@@ -1,0 +1,153 @@
+/*
+ * 思考强度滑条：几何按 Codex 桌面版实测（269×26 轨道、30px 旋钮、4px 刻度点），
+ * 与本机聊天的 `components/models/ModelCapsule.module.css` 同一套尺寸，
+ * 只把绝对定位的 top 改成文档流里的位置（这里嵌在 popover 里，不自己算坐标）。
+ */
+
+.rail {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  height: 26px;
+  border-radius: 16px;
+  background-color: var(--track);
+  cursor: pointer;
+  touch-action: none;
+  transition: background-color 0.25s ease;
+
+  /* 抓取带：旋钮比轨道高 4px，那 4px 也要能按到，否则最右端按不中拖不动 */
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -6px -3px;
+    border-radius: 20px;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--dsw-alias-button-primary-fill);
+    outline-offset: 2px;
+  }
+}
+
+.railDragging {
+  cursor: grabbing;
+}
+
+/* 填充宽 = (100% − 30px) × pos + 15px，正好停在旋钮圆心 */
+.fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc((100% - 30px) * var(--pos) + 15px);
+  border-radius: 13px 0 0 13px;
+  background-color: var(--fill);
+  pointer-events: none;
+  overflow: hidden;
+  transition:
+    width 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    background 0.25s ease;
+}
+
+.railPeak .fill {
+  animation: peak-flow 6s linear infinite;
+}
+
+@keyframes peak-flow {
+  from {
+    background-position: 0 0;
+  }
+
+  to {
+    background-position: 300% 0;
+  }
+}
+
+/* 刻度点：4px，位于 top:11px，横向跟着档位位置走 */
+.dot {
+  position: absolute;
+  top: 11px;
+  left: calc((100% - 30px) * var(--tick) + 15px);
+  width: 4px;
+  height: 4px;
+  margin-left: -2px;
+  border-radius: 50%;
+  background-color: #b6b6b8;
+  pointer-events: none;
+  transition: background-color 0.2s ease;
+}
+
+/* 已越过的刻度落在填充上，用旋钮同色的半透明白才看得见 */
+.dotPassed {
+  background-color: rgba(255, 255, 255, 0.55);
+}
+
+.railPeak .dot {
+  opacity: 0;
+}
+
+/* 旋钮：30px 正圆，比轨道高 4px，向上溢出 2px */
+.knob {
+  position: absolute;
+  top: -2px;
+  left: calc((100% - 30px) * var(--pos));
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background-color: #f8f8f8;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.16),
+    0 0 0 1px rgba(0, 0, 0, 0.04);
+  pointer-events: none;
+  transition:
+    left 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    transform 0.14s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+/* 拖动中：跟手但不吸附（left 无过渡），只保留按压形变 */
+.railDragging .knob {
+  transform: scale(1.16);
+  transition: transform 0.14s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.railDragging .fill {
+  transition: background 0.25s ease;
+}
+
+body[data-ds-dark-theme] .knob {
+  background-color: #f9fafb;
+}
+
+body[data-ds-dark-theme] .dot {
+  background-color: #5c5d61;
+}
+
+/* 两端档位名：左低右高，贴在滑条下面一行 */
+.ends {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 2px;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+
+  & > span {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fill,
+  .knob,
+  .dot {
+    transition: none;
+  }
+
+  .railPeak .fill {
+    animation: none;
+  }
+}

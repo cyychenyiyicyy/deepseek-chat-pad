@@ -380,7 +380,7 @@ check('autoConnect：没有 last-session 时一个请求都不打', async () => 
   }
 })
 
-check('autoConnect：账号凭据已经不在了 → 静止（删记录，不留点不动的「重新连接」）', async () => {
+check('autoConnect：账号凭据已经不在了 → 只报「要重新登录」，不删 last-session（R10 改）', async () => {
   resetStorage()
   resetStore()
   // 只有 last-session，没有账号（用户清了数据 / 换了账号）
@@ -390,9 +390,12 @@ check('autoConnect：账号凭据已经不在了 → 静止（删记录，不留
   try {
     await useRemoteStore.getState().retryAutoConnect()
     assertEqual(stub.calls, 0, '账号都没了就不该打网络')
-    assertEqual(readLastSession(), null, 'last-session 被删掉')
-    assertEqual(useRemoteStore.getState().lastSession, null, '内存里也清掉')
-    assertEqual(useRemoteStore.getState().autoConnect.state, 'idle', '不报错、不进 failed')
+    // R10：铁律是「异步失败不删凭据」。以前这里会 clearLastSession()，
+    // 结果是用户重新登录之后连「上次连的是哪台 Host」都没了（真机反馈的「莫名其妙」）。
+    assertEqual(readLastSession() === null, false, 'last-session 必须留着（登录后还能连回同一台）')
+    assertEqual(useRemoteStore.getState().autoConnect.state, 'failed', '要告诉用户得重新登录')
+    assertEqual(useRemoteStore.getState().autoConnect.code, 'SESSION_EXPIRED', '失败码')
+    assertEqual(useRemoteStore.getState().reconnect.status, 'need-login', '自愈状态')
   } finally {
     stub.restore()
     leaveShell()
@@ -424,7 +427,7 @@ check('autoConnect：连不上时只落 failed，不写 error、不清 last-sess
   }
 })
 
-check('autoConnect：refresh token 过期 → SESSION_EXPIRED，清 last-session、留邮箱', async () => {
+check('autoConnect：refresh token 过期 → SESSION_EXPIRED，但 last-session / 邮箱都留着（R10 改）', async () => {
   resetStorage()
   resetStore()
   seedAccount({ refreshTokenExpiresAt: NOW - 1, accessTokenExpiresAt: NOW - 1 })
@@ -436,7 +439,10 @@ check('autoConnect：refresh token 过期 → SESSION_EXPIRED，清 last-session
     const state = useRemoteStore.getState()
     assertEqual(state.autoConnect.state, 'failed', 'failed')
     assertEqual(state.autoConnect.code, 'SESSION_EXPIRED', '失败码')
-    assertEqual(readLastSession(), null, 'last-session 被清掉')
+    // R10：凭据确实不能用了，但**删记录**不是我们的活 —— 只有用户点「退出登录」才清。
+    // 留着才有「重新登录之后连回上次那台 Host」的可能。
+    assertEqual(readLastSession() === null, false, 'last-session 留着')
+    assertEqual(state.reconnect.status, 'need-login', '自愈状态：需要人处理')
     assertEqual(stub.calls, 0, '凭据已经过期，不该再打网络')
     const accounts = loadAccounts()
     assertEqual(accounts.length, 1, '账号还在（只是要重新登录）')

@@ -17,6 +17,7 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.util.Log;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -72,6 +73,22 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p><b>权限数据的读法</b>：全部走「能读到就报真值，读不到就报 false」的保守策略，
  * 每一处都单独 try/catch —— 一个厂商 ROM 把某个 API 魔改了，也只该让那一格显示「未开启」，
  * 不能让整份快照 500。
+ *
+ * <p><b>通知这一格为什么不许「假成功」</b>（R3 修的就是这个）：真机反馈「通知权限根本没有请求，
+ * 却显示已经设置成功了，我这边根本没有通知」。判定现在收成一条链，出口只有一个
+ * {@link #isNotificationVisible(Context)}：
+ * <pre>
+ * API 33+：checkSelfPermission(POST_NOTIFICATIONS)==GRANTED     ← 33 以下恒 true（系统里没这个权限）
+ *      && areNotificationsEnabled()                             ← 26+ 的用户级总开关
+ *      && 三条相关渠道都不是 null / IMPORTANCE_NONE              ← 8.0+ 的渠道级开关
+ * </pre>
+ * 于是 Android 9（API 28）上「从没被问过」不再等于「已授予」，渠道被单关也不再显示「已开启」；
+ * 而「还能不能再弹一次」由 {@code canRequest} 单独回答（看 rationale + 落盘的「问过没问过」）。
+ * 自动申请权限的真正发起处挪到了 {@code MainActivity.onResume}（那里才有窗口焦点，
+ * 系统才肯弹框），本类只在页面点按钮时补一次。
+ *
+ * <p><b>通知中心不在这里</b>：{@code /__ds_notify/*}（进行中汇总 / 完成 / 待审批）在
+ * {@link RemoteNotifyHandler} 里，本类只负责把「用户到底能不能看到通知」如实报给页面。
  */
 final class KeepAliveHandler {
 
@@ -360,7 +377,18 @@ final class KeepAliveHandler {
         return ignored.optBoolean("launched", false);
     }
 
-    /** Android 13+ 的通知权限：没授予就借当前 Activity 要一次。 */
+    /**
+     * 起前台服务时顺手要一次通知权限（Android 13+）。
+     *
+     * <p>闸门有三道，缺一不可：
+     * <ol>
+     *   <li>已经能看到通知 → 不问</li>
+     *   <li>本安装已经问过（落盘标志，跨进程有效）→ 不问。每个进程问一次等于"每开一次 App 弹一次"，
+     *       两次之后系统就永久静音了</li>
+     *   <li>当前没有 resumed 的 Activity → 不问（系统不允许后台弹权限框，交给
+     *       {@code MainActivity.onResume} 补）</li>
+     * </ol>
+     */
     private void ensureNotificationPermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             // 12 及以下没有这个运行时权限
@@ -370,13 +398,16 @@ final class KeepAliveHandler {
         if (app == null) {
             return;
         }
-        if (RemoteKeepAliveService.isNotificationAllowed(app)) {
+        if (isNotificationVisible(app)) {
+            return;
+        }
+        if (hasAskedNotificationPermission(app)) {
+            // 已经问过了（哪怕上次被拒）：不再打扰，页面会通过 canRequest/granted 如实显示状态
             return;
         }
         Activity activity = resumedActivity();
         if (activity == null) {
             // 应用不在前台：系统不允许后台弹权限框。留给 MainActivity 下次 onResume 申请
-            // （那边有一次性标志，不会反复骚扰用户）
             Log.i(TAG, "当前没有前台的 Activity，通知权限交给 onResume 补申请");
             return;
         }
@@ -393,6 +424,8 @@ final class KeepAliveHandler {
                     target.requestPermissions(
                             new String[] {Manifest.permission.POST_NOTIFICATIONS},
                             REQUEST_CODE_NOTIFICATIONS);
+                    // 只有真的把请求发出去了才记「问过」——记早了就等于永久放弃申请
+                    markNotificationPermissionAsked(app);
                     Log.i(TAG, "已申请通知权限");
                 } catch (RuntimeException failed) {
                     Log.w(TAG, "申请通知权限失败", failed);
@@ -404,8 +437,10 @@ final class KeepAliveHandler {
     /**
      * 页面点「申请通知权限」时用：借当前 Activity 直接弹系统权限框（比跳到设置页少一步）。
      *
-     * <p>与 {@link #ensureNotificationPermission()} 的区别：那个是自动的（进程内只弹一次），
-     * 这个是用户显式点击，所以不看「问过没问过」的闸门 —— 用户再点一次就是想再要一次。
+     * <p>与 {@link #ensureNotificationPermission()} 的区别：那个是自动的（装一次只弹一次），
+     * 这个是用户显式点击，所以不看「问过没问过」—— 用户在页面上再点一次就是想再要一次。
+     * 但仍然要先过 {@link #canRequestCore} 那道闸：系统已经「拒绝且不再询问」时再调
+     * requestPermissions 只会<b>立刻回调 denied、一个框都不弹</b>，那时候回 true 就是撒谎。
      *
      * @return true = 权限框真的发出去了（不等于用户点了允许，真实结果要从状态接口重读）
      */
@@ -414,8 +449,8 @@ final class KeepAliveHandler {
             // 12 及以下没有这个运行时权限：只能去系统设置里开/关
             return false;
         }
-        Context app = application;
-        if (app == null || hasPostNotificationsPermission(app)) {
+        final Context app = application;
+        if (app == null || isNotificationPermissionGranted(app)) {
             // 已经授予了就没必要再弹
             return false;
         }
@@ -424,10 +459,9 @@ final class KeepAliveHandler {
             // 应用不在前台：系统会直接拒绝这次弹框
             return false;
         }
-        if (!canRequestNotifications(app, false)) {
-            // 已经永久拒绝（系统不会再弹，会立刻回调 denied）：不许谎报「已经申请了」，
-            // 让调用方落回设置页那条路
-            Log.i(TAG, "通知权限已无法再弹框（永久拒绝），改走系统设置页");
+        if (!canRequestNotifications(app, isNotificationVisible(app))) {
+            // 永久拒绝 / 渠道被关：不许谎报「已经申请了」，让调用方落回设置页那条路
+            Log.i(TAG, "通知权限弹不出来（永久拒绝或渠道被关），改走系统设置页");
             return false;
         }
         notificationAsked.set(true);
@@ -439,6 +473,7 @@ final class KeepAliveHandler {
                         activity.requestPermissions(
                                 new String[] {Manifest.permission.POST_NOTIFICATIONS},
                                 REQUEST_CODE_NOTIFICATIONS);
+                        markNotificationPermissionAsked(activity);
                         Log.i(TAG, "已按页面要求弹通知权限框");
                     } catch (RuntimeException failed) {
                         Log.w(TAG, "弹通知权限框失败", failed);
@@ -780,24 +815,56 @@ final class KeepAliveHandler {
         // 与 /state 同名的旧字段：页面只调一个接口就能既渲染权限格子，又渲染保活三态
         json.put("running", RemoteKeepAliveService.isRunning());
         json.put("shouldRun", app != null && RemoteKeepAliveService.shouldRun(app));
-        json.put("notificationsGranted", notificationsGranted(app));
+        json.put("notificationsGranted", isNotificationVisible(app));
         json.put("batteryExempt", app != null && RemoteKeepAliveService.isBatteryExempt(app));
         return json;
     }
 
     private JSONObject notificationsJson(Context app) throws JSONException {
+        boolean permissionGranted = isNotificationPermissionGranted(app);
+        boolean appEnabled = areNotificationsEnabled(app);
+        boolean channelBlocked = isNotificationChannelBlocked(app);
+        boolean visible = app != null && permissionGranted && appEnabled && !channelBlocked;
         JSONObject json = new JSONObject();
-        boolean granted = notificationsGranted(app);
-        json.put("granted", granted);
+        // granted = 「用户真的能看到通知」，三层都满足才为真。老版本只看 app 级开关，
+        // 于是 API 26~32（含 Android 9）与「渠道被关」这两种情况都会假报成功 —— 见方法注释
+        json.put("granted", visible);
         // canRequest：还能靠一次弹窗解决吗
         // （true 时页面应调 POST /open {"target":"notifications","mode":"request"}）
-        json.put("canRequest", app != null && canRequestNotifications(app, granted));
-        // channelBlocked：应用总开关开着，但「后台保活」这条渠道被单独关掉了。
+        json.put("canRequest", canRequestNotifications(app, visible));
+        // channelBlocked：任意一条相关渠道被单独关掉 / 不存在。
         // 这种「权限是授予的、却看不到通知」的状态只有渠道能反映出来，页面提示语要单独写一句
-        json.put("channelBlocked", app != null && notificationChannelBlocked(app));
+        json.put("channelBlocked", channelBlocked);
         // declared：清单里有没有 POST_NOTIFICATIONS（本工程恒为 true，留着是为了和下面两格对齐）
         json.put("declared", true);
+        // ---- 以下三个是拆开给人看的中间量（页面按 granted 判即可，排障时才有用）
+        // permissionGranted：API 33+ 的运行时权限是否授予（33 以下恒 true：没有这个权限）
+        json.put("permissionGranted", permissionGranted);
+        // appLevelEnabled：系统设置里「允许通知」总开关（26+ 的 areNotificationsEnabled）
+        json.put("appLevelEnabled", appEnabled);
+        // asked：本安装是否已经问过运行时权限（跨进程持久化，见 hasAskedNotificationPermission）
+        json.put("asked", hasAskedNotificationPermission(app));
+        // channels：三条相关渠道的现状（id / 名字 / importance / blocked），供诊断面板直接列出
+        json.put("channels", channelsJson(app));
         return json;
+    }
+
+    /**
+     * 三条相关渠道的现状。
+     *
+     * <p>为什么三条都列：{@code ds_keepalive} 是保活常驻通知、{@code chatpad.work} 是进行中汇总、
+     * {@code chatpad.alert} 是完成/待审批 —— 任何一条被用户关成「关闭」，对应的那类通知就没了。
+     * 页面只判 {@code channelBlocked} 也够，列出来是为了让「哪条被关了」一眼可见。
+     */
+    private static JSONArray channelsJson(Context app) {
+        JSONArray array = new JSONArray();
+        if (app == null) {
+            return array;
+        }
+        array.put(RemoteNotifyHandler.channelJson(app, RemoteKeepAliveService.CHANNEL_ID));
+        array.put(RemoteNotifyHandler.channelJson(app, RemoteNotifyHandler.CHANNEL_WORK));
+        array.put(RemoteNotifyHandler.channelJson(app, RemoteNotifyHandler.CHANNEL_ALERT));
+        return array;
     }
 
     private JSONObject foregroundServiceJson(Context app) throws JSONException {
@@ -866,56 +933,83 @@ final class KeepAliveHandler {
     // ---------------------------------------------------------------- 状态读取
 
     /**
-     * 通知到底能不能显示：用户级总开关（26+）与 13+ 的运行时权限，两个都满足才算数。
+     * 通知到底能不能显示 = <b>三层都满足</b>。
      *
-     * <p>比「只看 POST_NOTIFICATIONS」更准：API 28~32 没有运行时权限，用户可以在系统设置里
-     * 一键关掉全部通知，那种情况下权限查询仍然回 granted，只有 areNotificationsEnabled 能看出来。
+     * <p><b>真机反馈</b>：「通知权限根本没有请求，却显示已经设置成功了，我这边根本没有通知」。
+     * 老实现只看一个 {@code areNotificationsEnabled()}（而且是用反射调的、失败还退回
+     * 「13+ 看权限、13 以下恒 true」），下面三种情况全都会假报成功：
+     * <ol>
+     *   <li><b>API 26~32（含 Android 9）</b>：系统没有 POST_NOTIFICATIONS 这个运行时权限，
+     *       app 级开关默认就是「开」。用户从没被问过一次，页面上却稳稳写着「已授予」。</li>
+     *   <li><b>渠道被单独关成「关闭」</b>：app 级开关还开着、权限查询也照样回 granted，
+     *       但那条通知就是不显示。这是 Android 8+ 最常见的「看着开了其实没开」。</li>
+     *   <li><b>API 33+ 用户拒过 POST_NOTIFICATIONS</b>：必须报 granted=false，并区分
+     *       「还能再弹一次」（canRequest=true）与「只能去系统设置」（canRequest=false）。</li>
+     * </ol>
+     *
+     * <p>所以判定收成一条链，{@link #isNotificationVisible(Context)} 是唯一出口：
+     * <pre>
+     * API 33+：checkSelfPermission(POST_NOTIFICATIONS) == GRANTED    ← 没有就是 false，不用再看别的
+     *      &amp;&amp; NotificationManager.areNotificationsEnabled()          ← 26+ 才有；用户级总开关
+     *      &amp;&amp; 三条相关渠道都不是 null / IMPORTANCE_NONE                 ← 渠道级（8.0+）
+     * </pre>
+     * 26~32 上第一项恒 true（系统里根本没有这个权限），所以退化成「总开关 + 渠道」两层 ——
+     * 这正是 Android 9 的真实规则，而不是「默认就算开通」。
+     *
+     * <p>所有读操作都单独 try/catch：某个厂商 ROM 把某个 API 魔改了，也只该让这一格显示「未开启」，
+     * 不能让整份权限快照 500（与 {@link #handle} 的兜底策略一致）。
      */
-    private static boolean notificationsGranted(Context app) {
+    static boolean isNotificationVisible(Context context) {
+        Context app = appContextOf(context);
         if (app == null) {
             return false;
         }
-        boolean granted;
-        try {
-            granted = areNotificationsEnabled(app);
-        } catch (RuntimeException broken) {
-            granted = false;
-        }
-        if (granted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            granted = hasPostNotificationsPermission(app);
-        }
-        return granted;
+        return isNotificationPermissionGranted(app)
+                && areNotificationsEnabled(app)
+                && !isNotificationChannelBlocked(app);
     }
 
     /**
-     * 用户有没有在系统里关掉本应用的通知。
+     * API 33+ 的 POST_NOTIFICATIONS 是否授予；<b>33 以下恒 true</b>（那种系统里没有这个权限）。
      *
-     * <p>为什么反射：{@code NotificationManagerCompat} 在 androidx.core 里（工程虽然带了它），
-     * 但这里只需要一个 boolean，不想为一行判断多一层依赖；反射失败（ROM 改了方法名）就退回
-     * {@link RemoteKeepAliveService#isNotificationAllowed(Context)}（那个只看 13+ 的运行时权限）。
+     * <p>页面拿到 {@code permissionGranted=false} 时才该去弹权限框；{@code true} 而
+     * {@code granted=false} 说明问题在总开关或渠道上，弹框没有意义。
      */
-    private static boolean areNotificationsEnabled(Context app) {
+    static boolean isNotificationPermissionGranted(Context context) {
+        Context app = appContextOf(context);
+        if (app == null) {
+            return false;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            // 33 以下没有这个运行时权限：用户只能在系统设置里关掉通知（那是 areNotificationsEnabled 的事）
+            return true;
+        }
+        return hasPostNotificationsPermission(app);
+    }
+
+    /** 用户有没有在系统里关掉本应用的通知（26+ 的 areNotificationsEnabled，用户级总开关）。 */
+    static boolean areNotificationsEnabled(Context context) {
+        Context app = appContextOf(context);
+        if (app == null) {
+            return false;
+        }
         try {
             NotificationManager manager =
                     (NotificationManager) app.getSystemService(Context.NOTIFICATION_SERVICE);
             if (manager != null) {
-                Object value = NotificationManager.class
-                        .getMethod("areNotificationsEnabled")
-                        .invoke(manager);
-                if (value instanceof Boolean) {
-                    return ((Boolean) value).booleanValue();
-                }
+                // API 24 起就有；minSdk 28 不需要版本分支，也不需要再反射/引入 androidx 的 Compat
+                return manager.areNotificationsEnabled();
             }
-        } catch (Exception unavailable) {
-            // NoSuchMethod / IllegalAccess / InvocationTarget / SecurityException 全在这里
-            Log.d(TAG, "areNotificationsEnabled 不可用，退回权限判断：" + unavailable);
+        } catch (RuntimeException broken) {
+            // 极个别 ROM 会在这个调用上抛 SecurityException：退回「只看 13+ 的运行时权限」
+            Log.d(TAG, "areNotificationsEnabled 不可用，退回权限判断：" + broken);
         }
         return RemoteKeepAliveService.isNotificationAllowed(app);
     }
 
     private static boolean hasPostNotificationsPermission(Context app) {
         try {
-            // 权限名是编译期字符串常量，API 33 以下查表也不会失败
+            // 权限名是编译期字符串常量，API 33 以下查表也不会失败（只是恒 DENIED）
             return app.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                     == PackageManager.PERMISSION_GRANTED;
         } catch (RuntimeException broken) {
@@ -924,62 +1018,163 @@ final class KeepAliveHandler {
     }
 
     /**
-     * 「后台保活」这条通知渠道是不是被用户单独关掉了。
+     * 三条相关渠道里有没有被用户单独关掉的（或干脆不存在的）。
      *
-     * <p>8+ 每个渠道可以单独设成「关闭」，此时应用总开关还是开的、权限也还在，
-     * 但那条常驻通知就是不显示 —— 用户会以为「保活没生效」。这个状态只有渠道能看出来，
-     * 所以单独报一格。
+     * <p>判定口径（与 {@link RemoteNotifyHandler#channelJson} 一致）：<b>渠道为 null 或
+     * importance == IMPORTANCE_NONE 都算「看不见」</b>。8.0 起把通知发到一个不存在的渠道上
+     * 是<b>静默丢弃</b>（不抛异常），所以「渠道不存在」在这一层等价于「通知发不出去」。
+     *
+     * <p>读之前先 {@link RemoteNotifyHandler#ensureChannels(Context)} 建一遍：刚装好的机器上
+     * 渠道还没建出来是正常的，不能因为「还没建」就报「用户关了」。
      */
-    private static boolean notificationChannelBlocked(Context app) {
+    static boolean isNotificationChannelBlocked(Context context) {
+        Context app = appContextOf(context);
+        if (app == null) {
+            return false;
+        }
+        RemoteNotifyHandler.ensureChannels(app);
+        return isChannelOff(app, RemoteKeepAliveService.CHANNEL_ID)
+                || isChannelOff(app, RemoteNotifyHandler.CHANNEL_WORK)
+                || isChannelOff(app, RemoteNotifyHandler.CHANNEL_ALERT);
+    }
+
+    /**
+     * @return true = 这条渠道不存在、或被关成 IMPORTANCE_NONE
+     */
+    private static boolean isChannelOff(Context app, String channelId) {
         try {
             NotificationManager manager =
                     (NotificationManager) app.getSystemService(Context.NOTIFICATION_SERVICE);
             if (manager == null) {
                 return false;
             }
-            // minSdk 28 > 26：渠道 API 无条件可用；渠道还没建出来时返回 null，按「没被关」处理
-            NotificationChannel channel =
-                    manager.getNotificationChannel(RemoteKeepAliveService.CHANNEL_ID);
-            return channel != null && channel.getImportance() == NotificationManager.IMPORTANCE_NONE;
+            // minSdk 28 > 26：渠道 API 无条件可用
+            NotificationChannel channel = manager.getNotificationChannel(channelId);
+            return channel == null || channel.getImportance() == NotificationManager.IMPORTANCE_NONE;
         } catch (RuntimeException broken) {
-            Log.d(TAG, "读通知渠道状态失败：" + broken);
+            Log.d(TAG, "读通知渠道状态失败：" + channelId, broken);
+            return false;
+        }
+    }
+
+    // ---------------------------------------------------------------- 「问过没有」的持久化
+
+    /**
+     * 「本安装有没有问过通知权限」的落盘位置。
+     *
+     * <p>为什么必须落盘、而且只落一处：弹权限框这件事在真机上是<b>一次性资源</b> —— 用户拒绝两次
+     * 之后系统就永久静音（再调 requestPermissions 会立刻回调 denied，什么框都不弹）。如果只用
+     * 进程内标志，进程一重启就又弹一次，等于主动把自己送进「永久拒绝」。
+     *
+     * <p>所以 MainActivity.onResume（自动申请一次）与 {@link #requestNotificationNow()}（页面按钮）
+     * 共用这一对读写方法，闸门只有一个。
+     */
+    private static final String PREFS_NOTIFY = "dsp.notify.v1";
+    private static final String KEY_NOTIFY_ASKED = "asked";
+    /** 老版本 MainActivity 用的那份（dsp.shell.v1 / notif_requested）：只读兼容，别再写它 */
+    private static final String LEGACY_PREFS_SHELL = "dsp.shell.v1";
+    private static final String LEGACY_KEY_NOTIFY_ASKED = "notif_requested";
+
+    /** 本安装有没有真的弹过一次通知权限框（跨进程、跨重启有效）。 */
+    static boolean hasAskedNotificationPermission(Context context) {
+        Context app = appContextOf(context);
+        if (app == null) {
+            return false;
+        }
+        try {
+            if (app.getSharedPreferences(PREFS_NOTIFY, Context.MODE_PRIVATE)
+                    .getBoolean(KEY_NOTIFY_ASKED, false)) {
+                return true;
+            }
+            // 兼容：老版本的标志位在另一个文件里。不迁过来只是多读一次，绝不重复弹框
+            return app.getSharedPreferences(LEGACY_PREFS_SHELL, Context.MODE_PRIVATE)
+                    .getBoolean(LEGACY_KEY_NOTIFY_ASKED, false);
+        } catch (RuntimeException broken) {
+            // 读不到就按「没问过」处理：真弹一次比永远不弹好（而且这是极罕见的磁盘异常）
+            Log.w(TAG, "读「是否问过通知权限」失败", broken);
             return false;
         }
     }
 
     /**
-     * 页面这一格还能不能靠一次弹窗解决。
+     * 记下「问过了」。
      *
-     * <p>判定（13+）：
-     * <ul>
-     *   <li>已授予 → false（没什么可申请的）</li>
-     *   <li>{@code shouldShowRequestPermissionRationale} 为 true → 用户拒过一次但系统还允许再问（软拒绝）</li>
-     *   <li>本进程还没问过 → true（弹窗能出来）</li>
-     *   <li>问过且 rationale 为 false → 永久拒绝，只能去系统设置（false）</li>
-     * </ul>
-     * 12 及以下没有这个运行时权限（用户只能在系统设置里关），恒 false。
+     * <p>调用点<b>必须在 requestPermissions 真的调用成功之后</b>：先落盘再弹的话，万一这次弹框
+     * 被 ROM 吃掉，本安装就再也不会问了 —— 那正是「根本没有请求，却显示已经设置成功」的另一半。
      */
-    private boolean canRequestNotifications(Context app, boolean granted) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            return false;
-        }
-        if (granted || app == null) {
-            return false;
-        }
-        Activity activity = resumedActivity();
-        if (activity == null) {
-            // 不在前台：系统不会弹权限框，保守回「本进程还没问过」
-            return !notificationAsked.get();
+    static void markNotificationPermissionAsked(Context context) {
+        Context app = appContextOf(context);
+        if (app == null) {
+            return;
         }
         try {
-            if (activity.shouldShowRequestPermissionRationale(
-                    Manifest.permission.POST_NOTIFICATIONS)) {
-                return true;
-            }
+            app.getSharedPreferences(PREFS_NOTIFY, Context.MODE_PRIVATE)
+                    .edit().putBoolean(KEY_NOTIFY_ASKED, true).apply();
+        } catch (RuntimeException broken) {
+            Log.w(TAG, "记录「已申请通知权限」失败", broken);
+        }
+    }
+
+    /**
+     * 页面这一格还能不能靠一次弹窗解决（没有 Activity 的版本，判不了 rationale，按保守口径算）。
+     *
+     * <p>{@code canRequest=true} 的完整条件：API 33+、未授予、渠道没被关、且「用户还没被问过」
+     * 或「问过但系统仍允许再问（rationale=true）」。12 及以下没有这个运行时权限，恒 false。
+     */
+    static boolean canRequestNotifications(Context context) {
+        Context app = appContextOf(context);
+        return canRequestCore(app, isNotificationVisible(app), null);
+    }
+
+    /** 统一口径的判定核心；{@code rationale} 为 null 表示「拿不到 Activity，不知道用户是否软拒绝过」。 */
+    private static boolean canRequestCore(Context app, boolean visible, Boolean rationale) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            // 12 及以下没有这个运行时权限（用户只能在系统设置里关）
+            return false;
+        }
+        if (app == null || visible) {
+            // 已经能看到通知了，没什么可申请的
+            return false;
+        }
+        if (isNotificationChannelBlocked(app)) {
+            // 渠道被关是渠道的事，弹权限框治不了；页面应引导去通知设置页
+            return false;
+        }
+        if (rationale != null && rationale.booleanValue()) {
+            // 拒过一次，但系统还愿意再问一次（软拒绝）
+            return true;
+        }
+        // 从没问过 → 能弹；问过又拿不到 rationale → 系统已经「拒绝且不再询问」，只能去设置
+        return !hasAskedNotificationPermission(app);
+    }
+
+    /**
+     * 手上有 Activity 的版本：能读到 {@code shouldShowRequestPermissionRationale}，
+     * 所以能分清「软拒绝」（还能再问）与「永久拒绝」（只能去设置）。
+     */
+    private boolean canRequestNotifications(Context app, boolean visible) {
+        Boolean rationale = null;
+        Activity activity = resumedActivity();
+        if (activity == null) {
+            // 不在前台：系统不会弹权限框，保守按「本安装还没问过」算
+            return canRequestCore(app, visible, null);
+        }
+        try {
+            rationale = Boolean.valueOf(activity.shouldShowRequestPermissionRationale(
+                    Manifest.permission.POST_NOTIFICATIONS));
         } catch (RuntimeException broken) {
             Log.d(TAG, "读权限 rationale 失败：" + broken);
         }
-        return !notificationAsked.get();
+        return canRequestCore(app, visible, rationale);
+    }
+
+    /** LocalServer 传进来的是 Application context；这里统一兜一层，避免 null / 已销毁的 context。 */
+    private static Context appContextOf(Context context) {
+        if (context == null) {
+            return null;
+        }
+        Context app = context.getApplicationContext();
+        return app != null ? app : context;
     }
 
     /**
@@ -1084,9 +1279,10 @@ final class KeepAliveHandler {
         json.put("running", RemoteKeepAliveService.isRunning());
         // 额外字段：页面据此区分「用户配过保活但服务被系统清了」（true+false = 该自愈）
         json.put("shouldRun", app != null && RemoteKeepAliveService.shouldRun(app));
-        // 语义收紧了：现在也反映「用户在系统里关掉了本应用通知」（26+ 的 areNotificationsEnabled），
-        // 不再只看 13+ 的运行时权限 —— 见 notificationsGranted
-        json.put("notificationsGranted", notificationsGranted(app));
+        // 语义收紧了两次：先是把「用户在系统里关掉了本应用通知」算进来，现在又把
+        // 「13+ 的运行时权限」与「通知渠道被关」也一起判 —— 唯一出口是 isNotificationVisible，
+        // 它等于「用户真的能看到通知」，不再有「默认算开通」的假成功
+        json.put("notificationsGranted", isNotificationVisible(app));
         json.put("batteryExempt", app != null && RemoteKeepAliveService.isBatteryExempt(app));
         json.put("sdkInt", Build.VERSION.SDK_INT);
         return json;

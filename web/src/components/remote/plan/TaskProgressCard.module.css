@@ -1,0 +1,249 @@
+/*
+ * 任务进度卡（R11）。视觉与 `chat-controls/QueueDock.module.css` 同一套材料：
+ * 1px 的 `border-l2` 描边 + 14px 圆角 + `interactive-bg-hover` 的浅底，
+ * 放在输入框上方不抢正文的注意力。
+ *
+ * 三态颜色只说一件事：「蓝=正在做，灰=还没到，浅色实心=做完」。
+ */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  margin: 0 auto 6px;
+  /* 与时间线列同宽：卡片不会比正文更宽，缩进留给外层 */
+  width: calc(var(--message-list-max-width) - 2 * var(--message-list-padding-horizontal));
+  max-width: calc(100% - 40px);
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* 折叠 / 展开都走这一行：整行可点，命中面积按 40px 起（手指 / 触屏都不难） */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 6px 10px 5px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.lead {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.title {
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap;
+}
+
+.count {
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.sep {
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-dimmed);
+  user-select: none;
+}
+
+/* 「正在做：xxx」——唯一的弹性段，长任务名截断而不是把整行撑开 */
+.now {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chevron {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 进度条：3px，只占一条缝；填充宽度的变化是「进度在走」的唯一动画 */
+.track {
+  height: 3px;
+  margin: 0 10px 6px;
+  overflow: hidden;
+  border-radius: 2px;
+  background-color: var(--dsw-alias-border-l2);
+}
+
+.fill {
+  height: 100%;
+  border-radius: 2px;
+  background-color: var(--dsw-alias-brand-primary);
+  transition: width var(--ds-transition-duration, 180ms) var(--ds-ease-in-out, ease-out);
+}
+
+.fillDone {
+  background-color: var(--dsw-alias-label-tertiary);
+}
+
+/* ── 展开态 ─────────────────────────────────────────────────────────── */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  /* 桌面平板最多 40% 屏高，再多就滚动：块本身不能把输入框挤出屏幕 */
+  max-height: min(240px, 32vh);
+  margin: 0;
+  padding: 0 6px 5px;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-color: var(--scroll-color) transparent;
+}
+
+.item {
+  border-radius: 8px;
+}
+
+.item[data-status='in_progress'] {
+  background-color: var(--dsw-alias-button-ghost-active-fill);
+}
+
+.itemButton {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 5px 4px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+/* 三态图标：完成=浅灰实心（读作「成为背景」），进行中=品牌蓝，待办=淡描边 */
+.glyph {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 18px;
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.item[data-status='completed'] .glyph {
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.item[data-status='in_progress'] .glyph {
+  color: var(--dsw-alias-brand-primary);
+}
+
+.item[data-status='pending'] .glyph {
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.spin {
+  animation: task-progress-spin 1.4s linear infinite;
+}
+
+@keyframes task-progress-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 一行两行的差别：折叠时最多两行，点开后整段放开 */
+.itemText {
+  flex: 1;
+  min-width: 0;
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.item[data-status='completed'] .itemText {
+  color: var(--dsw-alias-label-tertiary);
+  text-decoration: line-through;
+  text-decoration-color: var(--dsw-alias-label-dimmed);
+}
+
+.item[data-status='in_progress'] .itemText {
+  font-weight: 500;
+}
+
+.item[data-open='1'] .itemText {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
+/* 点开后补的一行状态：服务端没有独立描述字段，这一行是「这条到底是什么状态」的唯一补充 */
+.itemDetail {
+  margin: 0;
+  padding: 0 4px 6px 26px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: text;
+}
+
+/* 无障碍：系统开了「减少动态效果」就把转圈停掉（进度数字仍在变化） */
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+
+  .fill {
+    transition: none;
+  }
+}

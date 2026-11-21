@@ -31,6 +31,22 @@
   }
 }
 
+/*
+ * 「+」在**两条上传通道都不可用**时的样子（R15）。
+ *
+ * 不隐藏：按钮还在、位置不变，只是变暗 + 虚线边，点一下弹 toast 说原因。
+ * 静默消失会让用户以为界面坏了 —— 这正是老版本被当成「UI bug」的原因。
+ */
+.plusBlocked {
+  color: var(--dsw-alias-label-tertiary);
+  cursor: not-allowed;
+  opacity: 0.55;
+
+  &:hover {
+    background-color: transparent;
+  }
+}
+
 .tray {
   display: flex;
   flex-wrap: wrap;
@@ -61,6 +77,12 @@
   border-color: var(--dsw-alias-state-error-primary);
   /* 失败原因要读得出来：这条允许占满一行、正文换行（成功态仍然是一行紧凑） */
   flex: 1 1 100%;
+}
+
+/* 落在工作区的附件（`workspace.upload.*`）：虚线边 + 引用副标题，和「收据」那类分开看 */
+.chipWorkspace {
+  border-style: dashed;
+  border-color: var(--dsw-alias-brand-text);
 }
 
 .chipFailed .chipName,
