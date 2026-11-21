@@ -7,6 +7,7 @@ import {
   IconDownloadOutline16,
   IconFollowsystemOutline16,
   IconLightOutline16,
+  IconLinkOutline16,
   IconSettingsOutline16,
   IconUploadOutline14,
 } from '../base/icons.js'
@@ -43,6 +44,7 @@ import { closeSettings, useSettingsDialog, type SettingsSection } from './settin
 import type { ImportProgress } from '../../services/chat/history/importArchive.js'
 import { formatFileSize } from '../../utils/format.js'
 import { ModelPanel } from '../models/ModelPanel.js'
+import { RemoteSettingsPanel } from '../remote/RemoteSettingsPanel.js'
 import { UpdatePanel } from './UpdatePanel.js'
 import styles from './Settings.module.css'
 
@@ -62,6 +64,7 @@ const sections: { value: SettingsSection; label: TranslationKey; icon: ReactNode
     icon: <IconSettingsOutline16 />,
   },
   { value: 'models', label: 'settingDialogAsideModelsOptionLabel', icon: <IconBrowseOutline16 /> },
+  { value: 'remote', label: 'settingDialogAsideRemoteOptionLabel', icon: <IconLinkOutline16 /> },
   { value: 'data', label: 'settingDialogAsideDataOptionLabel', icon: <IconDataOutline16 /> },
 ]
 
@@ -117,6 +120,8 @@ const SettingsContent = () => {
             </>
           ) : section === 'models' ? (
             <ModelPanel onOpenSection={(next) => setSection(next)} />
+          ) : section === 'remote' ? (
+            <RemoteSettingsPanel />
           ) : (
             <>
               <StorageSetting />

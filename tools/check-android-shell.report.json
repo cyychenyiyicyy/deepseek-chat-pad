@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-21T02:42:07.859Z",
+  "generatedAt": "2026-11-21T05:00:34.635Z",
   "root": "C:\\Users\\Administrator\\Desktop\\harness workspace\\projects\\deepseek-tablet\\android",
   "summary": {
     "pass": 8,
@@ -10,7 +10,7 @@
     {
       "level": "PASS",
       "name": "java.structure",
-      "detail": "10 个 Java 文件括号/字面量全部配平"
+      "detail": "11 个 Java 文件括号/字面量全部配平"
     },
     {
       "level": "PASS",
