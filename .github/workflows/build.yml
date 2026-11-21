@@ -96,7 +96,20 @@ jobs:
       - name: 编译 debug APK
         working-directory: android
         # versionCode 取 run number：保证每次构建严格递增，能覆盖安装并保留数据
-        run: gradle assembleDebug --no-daemon --stacktrace -PversionCode=${{ github.run_number }}
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --stacktrace -PversionCode=${{ github.run_number }} 2>&1 | tee /tmp/gradle.log
+
+      # 编译失败的原始日志只有 admin 能下载；失败时把关键行抛成注解，手机/网页都能看到原因
+      - name: 汇报编译错误
+        if: failure()
+        run: |
+          test -f /tmp/gradle.log || exit 0
+          grep -E "error:|error;|错误:|^e: |Execution failed|What went wrong" /tmp/gradle.log \
+            | head -n 40 \
+            | tr -d '\r' | sed 's/%/%25/g' \
+            | while IFS= read -r line; do echo "::error::$line"; done
+          tail -n 40 /tmp/gradle.log | tr -d '\r' | while IFS= read -r line; do echo "::notice::$line"; done
 
       - name: 校验签名指纹
         run: |
