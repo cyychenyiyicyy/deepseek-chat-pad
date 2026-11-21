@@ -11,6 +11,7 @@ import { openSettings } from '../settings/settingsDialogState.js'
 import { IconButton } from '../base/IconButton.js'
 import { Button } from '../base/Button.js'
 import { Markdown } from '../markdown/Markdown.js'
+import { stripDsml } from '../../services/api/dsml.js'
 import { SiteThumbnails } from '../search/SiteLogo.js'
 import { toggleSearchPanel, useSearchPanel } from '../search/searchPanelState.js'
 import { CopyButton } from './CopyButton.js'
@@ -68,7 +69,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       {answer ? (
         <Markdown
           className="ds-assistant-message-main-content"
-          content={answer.markdown}
+          content={stripDsml(answer.markdown)}
           loading={streaming}
           cacheKey={message.id}
           disableLink={false}

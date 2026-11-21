@@ -1,6 +1,7 @@
 import { ApiError, streamMessage } from '../api/client.js'
 import { streamOpenAI, type OpenAIMessage, type OpenAITool, type OpenAIToolCall } from '../api/openai.js'
 import { deepseekFetch, extractUrls, formatFetchContext, formatSearchContext } from '../api/tools.js'
+import { parseDsmlCalls } from '../api/dsml.js'
 import { hasSearchCredential, runSearch } from './searchBackend.js'
 import type { SearchResult } from '../api/tools.js'
 import type { CreateMessageRequest, MessageParam, MessageStreamEvent } from '../api/types.js'
@@ -418,8 +419,15 @@ export async function* streamChat(
 
   // 第一轮：带上搜索工具，由模型决定用不用
   const calls: OpenAIToolCall[] = []
+  const contentOut: string[] = []
   try {
-    yield* streamOpenAI({ ...options, messages, tools: [SEARCH_TOOL], toolCallsOut: calls })
+    yield* streamOpenAI({
+      ...options,
+      messages,
+      tools: [SEARCH_TOOL],
+      toolCallsOut: calls,
+      contentOut,
+    })
   } catch (error) {
     if (isUnsupportedTools(error) && calls.length === 0) {
       // 端点不支持工具调用：直接不搜索重发
@@ -429,11 +437,21 @@ export async function* streamChat(
     throw error
   }
 
-  const searchCall = calls.find((call) => call.name === 'deepseek_web_search')
-  // 模型判断不需要搜索，第一轮已经给出完整回答
-  if (!searchCall) return
+  // 有些网关上的 DeepSeek 模型不走标准 tool_calls，而是把 DSML 标记直接写进正文，
+  // 例如 <|DSML| invoke name="deepseek_web_search"><|DSML| parameter name="query">…
+  // 这时 calls 是空的，但正文里其实带了完整的调用意图，要自己解出来并执行。
+  if (calls.length === 0) {
+    const dsmlCalls = parseDsmlCalls(contentOut.join(''))
+    if (dsmlCalls.length > 0) {
+      calls.push(...dsmlCalls)
+    }
+  }
 
-  const query = readQuery(searchCall.arguments) || lastUserText(body).slice(0, 128)
+  const searchCalls = calls.filter((call) => call.name === 'deepseek_web_search')
+  // 模型判断不需要搜索，第一轮已经给出完整回答
+  if (searchCalls.length === 0) return
+
+  const query = readQuery(searchCalls[0].arguments) || lastUserText(body).slice(0, 128)
   // 按设置走 DeepSeek 或 Tavily。搜索失败不该让整轮对话失败：
   // 把原因写进上下文，让模型照常回答并说明没搜到资料。
   let results: Awaited<ReturnType<typeof runSearch>> = []
@@ -458,7 +476,28 @@ export async function* streamChat(
   }
 
   // 让界面照常显示「搜索了哪些来源」
-  yield* searchBlocks([{ id: searchCall.id || `call_${randomHex(6)}`, query, results }])
+  // 一次可能要求搜多个 query：全部跑掉，而不是只跑第一个
+  const executed: { id: string; query: string; results: SearchResult[] }[] = []
+  for (const call of searchCalls) {
+    const each = readQuery(call.arguments) || query
+    if (!call.id) {
+      call.id = `call_${randomHex(6)}`
+    }
+    let found = results
+    if (each !== query) {
+      try {
+        found = await runSearch(each, signal)
+      } catch (error) {
+        if (signal.aborted) {
+          throw error
+        }
+        found = []
+        console.warn('[search] 第二路失败：', error)
+      }
+    }
+    executed.push({ id: call.id, query: each, results: found })
+  }
+  yield* searchBlocks(executed)
 
   messages.push({
     role: 'assistant',
@@ -473,10 +512,12 @@ export async function* streamChat(
     messages.push({
       role: 'tool',
       tool_call_id: call.id,
-      content:
-        call === searchCall
-          ? formatSearchContext(query, results)
-          : '（该工具未在本轮执行）',
+      content: (() => {
+        const hit = executed.find((item) => item.id === call.id)
+        return hit && hit.results.length > 0
+          ? formatSearchContext(hit.query, hit.results)
+          : '（该次搜索没有返回结果）'
+      })(),
     })
   }
 

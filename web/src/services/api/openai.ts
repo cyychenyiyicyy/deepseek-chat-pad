@@ -41,6 +41,8 @@ export type OpenAIStreamOptions = {
   tools?: OpenAITool[]
   /** 收集本轮模型发起的工具调用（不产出给界面） */
   toolCallsOut?: OpenAIToolCall[]
+  /** 本轮正文累加（用于识别模型把工具标记直接写进正文的情况） */
+  contentOut?: string[]
   /** 思考强度：OpenAI 兼容字段 reasoning_effort */
   reasoningEffort?: string
   signal: AbortSignal
@@ -97,6 +99,7 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
     extraHeaders,
     tools,
     toolCallsOut,
+    contentOut,
     reasoningEffort,
     signal,
   } = options
@@ -130,7 +133,12 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
 
   // 老 WebView 没有 fetch 流式响应，改走 XHR 增量通道
   if (!supportsStreamResponse()) {
-    yield* translate(readServerSentEventsXhr(await prepareRequest(url, init), signal), model, toolCallsOut)
+    yield* translate(
+      readServerSentEventsXhr(await prepareRequest(url, init), signal),
+      model,
+      toolCallsOut,
+      contentOut
+    )
     return
   }
 
@@ -149,14 +157,15 @@ export async function* streamOpenAI(options: OpenAIStreamOptions): AsyncGenerato
   if (!response.body) {
     throw new ApiError('protocol', '当前 WebView 不支持流式响应，请更新系统 WebView')
   }
-  yield* translate(readServerSentEvents(response.body, signal), model, toolCallsOut)
+  yield* translate(readServerSentEvents(response.body, signal), model, toolCallsOut, contentOut)
 }
 
 /** 把 OpenAI 的分片翻译成内部事件；两条传输通道共用这一段 */
 async function* translate(
   events: AsyncIterable<ServerSentEvent>,
   model: string,
-  toolCallsOut?: OpenAIToolCall[]
+  toolCallsOut?: OpenAIToolCall[],
+  contentOut?: string[]
 ): AsyncGenerator<MessageStreamEvent> {
   /** 模型可能边想边发多个工具调用，按 index 累积 */
   const pendingTools = new Map<number, OpenAIToolCall>()
@@ -252,6 +261,7 @@ async function* translate(
       }
     }
     if (delta.content) {
+      contentOut?.push(delta.content)
       if (open !== 'text') {
         yield* closeOpen()
         yield* openBlock('text')
