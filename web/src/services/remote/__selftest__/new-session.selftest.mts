@@ -280,6 +280,7 @@ const resetNewSession = (): void => {
       model: true,
       search: true,
       manage: true,
+      workspaceCreate: true,
     },
   })
 }
@@ -626,8 +627,10 @@ check('C13：能力缺失时整块关掉，createAndOpen 一个 create 请求都
 
   const state = useNewSessionStore.getState()
   assertEqual(state.capabilities.create, false, 'create 能力关掉')
-  assertEqual(state.capabilities.workspace, false, '工作区能力关掉（UI 隐藏下拉）')
-  assertEqual(state.workspaces, [], '没有工作区数据')
+  // S2：工作区 UI **不再**跟着一起收起 —— 老 Host 只是退回派生列表（这里连 session/list 都没了，
+  // 所以派生结果为空，但能力位必须还是 true，否则工作区选择器会被整块藏掉）
+  assertEqual(state.capabilities.workspace, true, '工作区能力保持打开（不收起 UI）')
+  assertEqual(state.workspaces, [], '没有工作区数据（派生也没有）')
   assertTrue(state.error !== null, '面板里留一行说明（不是弹窗）')
 
   // UI 里「创建并进入」按钮此时是 disabled 的，点了也不该发请求
@@ -759,7 +762,7 @@ check('C18：probeCapabilities 先等连接对象出现，再一次性把能力�
   // 连接对象还没被任何业务调用记下来（`store.ts` 里 phase=ready 早于第一次业务调用）
   observeRemoteTarget(null)
   useRemoteStore.setState({ phase: 'ready', openSession: async () => undefined, refreshSessions: async () => undefined })
-  useNewSessionStore.setState({ capabilities: { workspace: false, create: false, directory: false, permission: false, agentPreset: false, model: false, search: false, manage: false } })
+  useNewSessionStore.setState({ capabilities: { workspace: false, workspaceCreate: false, create: false, directory: false, permission: false, agentPreset: false, model: false, search: false, manage: false } })
 
   const fake = fakeTarget(FULL_REPLIES)
   // 150ms 后才「出现」连接对象（模拟 $events / session/list 稍后才发出）
@@ -781,7 +784,7 @@ check('C18：probeCapabilities 先等连接对象出现，再一次性把能力�
   useRemoteStore.setState({ phase: 'idle' })
   resetNewSession()
   useNewSessionStore.setState({
-    capabilities: { workspace: false, create: false, directory: false, permission: false, agentPreset: false, model: false, search: false, manage: false },
+    capabilities: { workspace: false, workspaceCreate: false, create: false, directory: false, permission: false, agentPreset: false, model: false, search: false, manage: false },
   })
   const startedAt = Date.now()
   await useNewSessionStore.getState().probeCapabilities()

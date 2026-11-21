@@ -57,10 +57,13 @@
   margin-left: auto;
 }
 
-/* ---------- 次要按钮：生成中的「仍然能发」 ---------- */
+/* ---------- 第二颗钮：运行中「另一个动作」 ---------- */
 
-/* 生成中主位是停止，这个是「照样能发」的入口：描边圆钮，比主按钮小一号 */
-.secondarySend {
+/*
+ * 主位被停止占着时它是「照样能发」；主位是发送时它变成「照样能停」（`secondaryStop`）。
+ * 描边圆钮，比主按钮小一号 —— 位置固定、图标不同，用户靠位置与图标认，不靠颜色。
+ */
+.secondary {
   display: flex;
   flex-shrink: 0;
   align-items: center;
@@ -81,6 +84,12 @@
     border-color: var(--dsw-alias-button-ghost-active-border);
     background-color: var(--dsw-alias-interactive-bg-hover);
   }
+}
+
+/* 停止态的描边钮：比发送那版重一点，跟主按钮的停止同一套色 */
+.secondaryStop {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-border-l3, var(--dsw-alias-border-l2));
 }
 
 /* ---------- 插话 / 排队 切换（只在生成中出现） ---------- */
@@ -187,8 +196,8 @@
     height: 38px;
   }
 
-  /* 次要发送键：比主按钮小一号，别抢主位的重量 */
-  .secondarySend {
+  /* 第二颗钮：比主按钮小一号，别抢主位的重量 */
+  .secondary {
     width: 34px;
     height: 34px;
   }

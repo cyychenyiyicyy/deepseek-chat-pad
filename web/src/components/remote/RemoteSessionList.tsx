@@ -17,7 +17,10 @@ import {
   IconSearchOutline16,
 } from '../base/icons.js'
 import { Modal } from '../base/Modal.js'
+import { closeMobileSider } from '../sider/mobileSiderState.js'
 import { formatDate } from '../../utils/format.js'
+// [S3] 全局运行态：不打开会话也要知道谁在跑（`session/list` + `$events` 汇总而来）
+import { useLiveApprovalCount, useLiveRunningCount, useLiveSessions } from '../../services/remote/liveSessions.js'
 // [R9] 红点数字（纯函数；规则与 store 的记账同一份）
 import { pendingBadgeText, pendingTotal } from './chat-controls/promptModel.js'
 import styles from './RemoteSessionList.module.css'
@@ -228,20 +231,81 @@ export const RemoteSessionList = ({
     cacheStatus.sessionsSyncing || phase === 'authing' || phase === 'connecting' || phase === 'ready'
   const menuRow = menuSessionId === null ? undefined : rows.find((row) => row.id === menuSessionId)
 
+  /*
+   * —— S3 全局运行态 ——
+   *
+   * 列表要回答「谁在跑」，而这个信息**不属于**任何单个会话的时间线：
+   * 它来自 `session/list` 行的 `running` 与 Host 级 `$events`（`liveSessions.ts`）。
+   *
+   * 三块用法：
+   *   ① 标题行右侧的刷新图标（原来的 36px 全宽大按钮，用户反馈「太大」）；
+   *   ② 顶部那句汇总「2 个会话在跑」—— 扫一眼就知道后台有活；
+   *   ③ 每行右侧的状态：运行中（脉冲点 + 工具名）/ 待审批（红点 + 数字）/ 空闲（只有相对时间）。
+   *
+   * 订阅整张表（而不是在 `.map` 里逐行订阅）：`liveSessions` 的归约保证「没变化就返回原对象」，
+   * 所以这张表一天也换不了几次引用；在循环里调 hook 才是不允许的。
+   */
+  const liveById = useLiveSessions((state) => state.byId)
+  const runningCount = useLiveRunningCount()
+  // 待审批：自己就在那个会话里，这行不必再提醒一次（与 R9 红点的口径一致）
+  const approvalCount = useLiveApprovalCount(activeSessionId)
+  const summary =
+    runningCount > 0 && approvalCount > 0
+      ? t('liveSummaryBoth', { running: runningCount, approval: approvalCount })
+      : runningCount > 0
+        ? t('liveSummaryRunning', { count: runningCount })
+        : approvalCount > 0
+          ? t('liveSummaryApproval', { count: approvalCount })
+          : ''
+
   return (
     <div className={clsx(styles.wrap, className)}>
+      {/*
+        —— S3 标题行 ——
+        原来这里是「刷新会话」一整行 36px 的大按钮（用户原话：「这个刷新会话按钮太大了」）。
+        现在它是标题行右侧的一枚 28px 图标钮：位置固定、一眼能找到，又不再占一整行。
+        刷新只做一件事：`refreshSessions()`（Host 的 `session/list` + `$events` 会顺便校正运行态）。
+      */}
+      {ready ? (
+        <div className={styles.listHeader}>
+          <span className={styles.listTitle}>{t('liveListTitle')}</span>
+          <IconButton
+            size="xs"
+            tone="tertiary"
+            className={styles.refreshButton}
+            icon={<IconRefreshOutline16 />}
+            tooltip={t('liveRefresh')}
+            tooltipPlacement="bottom"
+            onClick={() => fireAndForget(() => useRemoteStore.getState().refreshSessions())}
+          />
+        </div>
+      ) : null}
+
+      {/* 顶部汇总：只在真有在跑 / 待审批的会话时出现（「都空闲」没必要说一遍） */}
+      {ready && !searching && summary.length > 0 ? (
+        <div className={styles.summary} role="status">
+          {runningCount > 0 ? <span className={styles.summaryDot} aria-hidden /> : null}
+          {summary}
+        </div>
+      ) : null}
       {/*
         「新建对话」入口（R4）：用户真机反馈「新建对话没有按钮」——
         之前它只挂在时间线空态里，一旦有会话就再也找不到。这里是**会话列表顶部**，
         与搜索框同一列、视觉权重更高，任何时刻都在。
         能力门禁：Host 没有 `session/create`（`capabilities.create === false`）时不渲染。
+
+        [W6] 点它换的是**视图**（`RemoteChatView` 的 `view: 'new-session'`，整页），不是弹面板；
+        手机上左栏是抽屉，所以顺手把抽屉关掉 —— 否则它会在新页面背后慢慢缩回去。
       */}
       {ready && capabilities.create ? (
         <button
           type="button"
           className={styles.newChat}
           aria-label={t('composerNewChat')}
-          onClick={() => useNewSessionStore.getState().openPanel()}
+          onClick={() => {
+            closeMobileSider()
+            useNewSessionStore.getState().openPanel()
+          }}
         >
           <span className={styles.newChatIcon} aria-hidden>
             <IconNewChatOutline20 />
@@ -314,10 +378,28 @@ export const RemoteSessionList = ({
           rows.map((row) => {
             const active = row.id === activeSessionId
             const busy = busySessionId === row.id
+            /*
+             * —— S3 一行的状态 ——
+             *   running：全局运行态说它在跑（工具名只有打开着的会话才有）
+             *   approval：两条独立记账里较大的那个 —— R9 的 `pendingInteractions`（审批+提问）
+             *     与 S3 的 `live.approval`（只算审批）。两条都靠同样的信号销账，
+             *     取大值是为了「任一条漏了事件，红点也不会消失」。
+             */
+            const live = liveById[row.id]
+            const isRunning = live?.running === true
+            const approvalBadge = active
+              ? 0
+              : Math.max(pendingTotal(pendingInteractions[row.id]), live?.approval ?? 0)
+            const tool = isRunning ? live.tool : undefined
             return (
               <div
                 key={row.id}
-                className={clsx(styles.row, (row.archived || row.ghost) && styles.rowArchived)}
+                className={clsx(
+                  styles.row,
+                  (row.archived || row.ghost) && styles.rowArchived,
+                  // 运行中的行整体加一条左侧竖线 + 轻微底色，扫一眼就能挑出来
+                  isRunning && styles.rowRunning,
+                )}
                 onContextMenu={(event) => {
                   if (!canManage) return
                   event.preventDefault()
@@ -343,18 +425,40 @@ export const RemoteSessionList = ({
                   }}
                 >
                   <span className={styles.itemMain}>
-                    <span className={styles.itemTitle}>
-                      {row.pinned ? (
-                        <span className={styles.pinMark} aria-hidden>
-                          <IconPinOutline16 />
+                    <span className={styles.itemTop}>
+                      <span className={styles.itemTitle}>
+                        {row.pinned ? (
+                          <span className={styles.pinMark} aria-hidden>
+                            <IconPinOutline16 />
+                          </span>
+                        ) : null}
+                        {row.title}
+                      </span>
+                      {/* [S3] 右侧状态位：待审批优先（要说给用户听的事），其次「运行中」 */}
+                      {approvalBadge > 0 ? (
+                        <span
+                          className={styles.pendingDot}
+                          aria-label={t('liveApprovalBadge', { count: approvalBadge })}
+                        >
+                          {pendingBadgeText(approvalBadge)}
+                        </span>
+                      ) : isRunning ? (
+                        <span className={styles.statusRunning}>
+                          <span className={styles.pulseDot} aria-hidden />
+                          {t('liveRunning')}
                         </span>
                       ) : null}
-                      {row.title}
                     </span>
                     <span className={styles.itemMeta}>
                       {row.archived ? <span className={styles.archivedTag}>{t('newSessionArchivedTag')}</span> : null}
                       {row.ghost ? (
                         <span className={styles.archivedTag}>{t('cacheSessionMissingTag')}</span>
+                      ) : null}
+                      {/* [S3] 正在调用的工具（最多一行，超出省略）；没有工具名就什么都不显示 */}
+                      {tool !== undefined && tool.length > 0 ? (
+                        <span className={styles.itemTool} title={t('liveRunningTool', { tool })}>
+                          {tool}
+                        </span>
                       ) : null}
                       {busy ? (
                         <span className={styles.itemBusy} aria-hidden>
@@ -362,17 +466,6 @@ export const RemoteSessionList = ({
                         </span>
                       ) : null}
                       {row.time ? <span className={styles.itemTime}>{row.time}</span> : null}
-                      {/* [R9] 红点：别的会话有审批 / 提问等你处理（数字 >9 显示 9+） */}
-                      {pendingTotal(pendingInteractions[row.id]) > 0 ? (
-                        <span
-                          className={styles.pendingDot}
-                          aria-label={t('promptuxPendingBadge', {
-                            count: pendingTotal(pendingInteractions[row.id]),
-                          })}
-                        >
-                          {pendingBadgeText(pendingTotal(pendingInteractions[row.id]))}
-                        </span>
-                      ) : null}
                     </span>
                   </span>
                 </button>

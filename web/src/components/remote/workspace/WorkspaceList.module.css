@@ -1,0 +1,195 @@
+/*
+ * 工作区列表（S2）：新建会话页的工作区抽屉 + 工作区文件抽屉的切换列表共用。
+ *
+ * 一行两段：上面是「名字 + 会话数 + 当前」，下面是「路径（点一下复制）」。
+ * 颜色一律走 theme.css 的 dsw-* 变量，与 `NewSessionPage.module.css` / `WorkspacePane.module.css`
+ * 同一套（深色 / 浅色都不用另写）。
+ */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 10px;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.rowCurrent {
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rowDisabled {
+  opacity: 0.55;
+
+  &:hover {
+    background-color: transparent;
+  }
+}
+
+.icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+/* 名字那一行：整行可点（选中），但视觉上像文本 */
+.titleButton {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+  text-align: left;
+  cursor: pointer;
+
+  &:disabled {
+    cursor: default;
+  }
+}
+
+.title {
+  overflow: hidden;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 会话数：一枚很淡的胶囊（0 个时也是胶囊，但文案是「还没有会话」） */
+.count {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 100px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「当前」：勾 + 两个字，颜色比会话数重一档 */
+.current {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary);
+  user-select: none;
+}
+
+.currentGlyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+}
+
+/* 路径：独立按钮 = 只复制，不选中 */
+.pathButton {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  text-align: left;
+  cursor: pointer;
+  direction: ltr;
+
+  &:hover {
+    color: var(--dsw-alias-label-secondary);
+  }
+}
+
+.pathButtonActive {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.path {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.copyGlyph {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  opacity: 0.75;
+}
+
+/* 「已复制 / 复制失败」：贴在路径后面，不撑高行 */
+.copyHint {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 100px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.hint {
+  padding-top: 1px;
+  font-size: 10px;
+  line-height: 15px;
+  color: var(--dsw-alias-label-caption);
+}
+
+.empty {
+  padding: 10px 8px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}

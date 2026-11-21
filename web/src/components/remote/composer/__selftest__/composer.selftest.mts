@@ -5,7 +5,8 @@
  *   npx tsx src/components/remote/composer/__selftest__/composer.selftest.mts
  *
  * 分三层（每层都尽量跑**真代码**，只有链路是假的）：
- *   A. 纯状态机（`composerState.ts`）：按钮形态、回车意图、提示文案；
+ *   A. 纯状态机（`composerState.ts`）：按钮形态（含 S3 的「在跑时看输入框」与全局运行态校正
+ *      `composerLiveView`）、回车意图、提示文案；
  *   B. 真 store（`sessionControls.ts` + 假 `RemoteCallTarget`）：排队区增删与 steer / remove
  *      的端点与参数、`session/selectModel` 的 `reasoningEffort`、能力降级；
  *   C. 纯几何（`effortLevels.ts`）：档位解析、胶囊折叠、滑条下标 / 比例 / 磁吸。
@@ -22,6 +23,7 @@ import {
   canSubmit,
   composerHint,
   composerIntent,
+  composerLiveView,
   composerView,
   hasDraftContent,
   queuePreviewText,
@@ -165,9 +167,10 @@ check('A1 空闲 + 有草稿：主按钮是发送且可点', async () => {
   const view = composerView(baseSignals({ draft: '你好' }))
   assertEqual(view.primary, 'send', 'primary')
   assertTrue(view.primaryEnabled, '主按钮应可点')
-  assertEqual(view.secondarySendVisible, false, '空闲时不该出现次要发送键')
+  assertEqual(view.secondaryAction, null, '空闲时没有第二颗钮')
   assertEqual(view.modeToggleVisible, false, '空闲时没有插话/排队切换')
   assertEqual(view.busy, false, '空闲时 busy 必须是 false')
+  assertEqual(view.running, false, '空闲时 running 为 false')
 })
 
 check('A2 空闲 + 草稿为空：主按钮仍是发送但禁用', async () => {
@@ -178,43 +181,45 @@ check('A2 空闲 + 草稿为空：主按钮仍是发送但禁用', async () => {
   assertEqual(canSubmit(baseSignals()), false, 'canSubmit 同上')
 })
 
-check('A3 生成中 + 草稿为空：同一位置变停止', async () => {
+check('A3 在跑 + 草稿为空：主位变停止（这就是「它在干活」）', async () => {
   const view = composerView(baseSignals({ streaming: true }))
-  assertEqual(view.primary, 'stop', '生成中主按钮必须是停止')
+  assertEqual(view.primary, 'stop', '运行中且没内容时主按钮必须是停止')
   assertEqual(view.primaryEnabled, true, '停止永远可点（Host 空闲也回 accepted）')
-  assertEqual(view.secondarySendVisible, true, '次要发送键出现（生成中也得能发）')
-  assertEqual(view.secondarySendEnabled, false, '没内容时次要键禁用')
+  assertEqual(view.secondaryAction, 'send', '第二颗钮是发送（有内容才可点）')
+  assertEqual(view.secondaryEnabled, false, '没内容时发送不可点')
+  assertEqual(view.modeToggleVisible, true, '运行中给插话/排队切换')
   assertEqual(view.busy, true, 'busy 为真')
 })
 
-check('A4 生成中 + 有草稿：停止 + 插话（默认 steer）', async () => {
+check('A4 [S3] 在跑 + 有草稿：主位变发送，停止让到第二颗钮', async () => {
   const signals = baseSignals({ streaming: true, draft: '顺便改一下标题' })
   const view = composerView(signals)
-  assertEqual(view.primary, 'stop', '主按钮仍是停止')
-  assertEqual(view.secondarySendVisible, true, '次要发送键出现')
-  assertEqual(view.secondarySendEnabled, true, '次要键可点')
-  assertEqual(view.modeToggleVisible, true, '插话/排队切换出现')
+  assertEqual(view.primary, 'send', '有内容时主按钮是发送（用户要求）')
+  assertTrue(view.primaryEnabled, '主按钮可点')
+  assertEqual(view.secondaryAction, 'stop', '停止在第二颗钮上，永远可点')
+  assertTrue(view.secondaryEnabled, '停止永远可点')
+  assertEqual(view.modeToggleVisible, true, '插话/排队切换保留')
   assertEqual(composerIntent(signals), 'steer', '默认插话（与 dsh-Go 一致）')
 })
 
 check('A4b 切成「排队」：同一个发送键改走 queue', async () => {
   const signals = baseSignals({ streaming: true, draft: '顺便改一下标题', sendMode: 'queue' })
   assertEqual(composerIntent(signals), 'queue', '排队')
-  assertEqual(composerView(signals).secondarySendVisible, true, '键还在，只是语义变了')
+  assertEqual(composerView(signals).primary, 'send', '主位仍是发送，只是 mode 变了')
 })
 
-check('A5 生成中 + 附件还在上传：次要发送键不可点', async () => {
+check('A5 在跑 + 附件还在上传：主位可点但发不出去（灰）', async () => {
   const view = composerView(baseSignals({ streaming: true, draft: 'x', attachmentsBusy: true }))
-  assertEqual(view.secondarySendVisible, true, '键在')
-  assertEqual(view.secondarySendEnabled, false, '收据没到手不给发')
+  assertEqual(view.primary, 'send', '有草稿 → 主位是发送')
+  assertEqual(view.primaryEnabled, false, '收据没到手不给发')
   assertEqual(composerIntent(baseSignals({ streaming: true, draft: 'x', attachmentsBusy: true })), 'none', 'intent')
 })
 
-check('A6 生成中 + 已知斜杠命令：没有次要键与切换，回车什么都不做', async () => {
+check('A6 在跑 + 已知斜杠命令：命令不算「可发内容」，主位仍是停止', async () => {
   const signals = baseSignals({ streaming: true, draft: '/compact', knownCommand: true })
   const view = composerView(signals)
-  assertEqual(view.primary, 'stop', '主按钮还是停止')
-  assertEqual(view.secondarySendVisible, false, '命令不插话也不排队')
+  assertEqual(view.primary, 'stop', '生成中命令发不出去，主位留给停止')
+  assertEqual(view.secondaryAction, null, '命令不插话也不排队')
   assertEqual(view.modeToggleVisible, false, '命令没有 mode 可切')
   assertEqual(composerIntent(signals), 'none', '生成中执行命令会被 Host 拒，干脆不发')
 })
@@ -222,7 +227,8 @@ check('A6 生成中 + 已知斜杠命令：没有次要键与切换，回车什�
 check('A7 队列还有条目（streaming 已回 false）：仍然算工作中', async () => {
   const view = composerView(baseSignals({ streaming: false, queueLength: 2 }))
   assertEqual(view.busy, true, '队列非空 = 还在工作')
-  assertEqual(view.primary, 'send', '主按钮只看 streaming（停止是给「正在生成」留的）')
+  assertEqual(view.running, false, '但这一轮没在跑')
+  assertEqual(view.primary, 'send', '没在跑就是发送（停止是给「正在生成」留的）')
 })
 
 check('A8 未就绪 / 没选会话：谁都发不出去', async () => {
@@ -232,11 +238,27 @@ check('A8 未就绪 / 没选会话：谁都发不出去', async () => {
 })
 
 check('A9 停止 10s 无回执：主按钮还原成发送 + 提示换掉', async () => {
-  const signals = baseSignals({ streaming: true, stopTimedOut: true, draft: '再来一条' })
+  const signals = baseSignals({ streaming: true, stopTimedOut: true })
   const view = composerView(signals)
   assertEqual(view.primary, 'send', '停止被还原（不让用户对着没反应的键）')
-  assertEqual(view.primaryEnabled, true, '还原后可以继续发')
+  assertEqual(view.secondaryAction, 'stop', '还想停的话第二颗钮还在')
   assertEqual(composerHint(signals).key, 'composerHintStopTimeout', '提示必须解释刚才发生了什么')
+})
+
+check('A10 [S3] 全局运行态：streaming 还没跟上也要认出「它在跑」', async () => {
+  // 用户带着一个已经在跑的会话进 App：`turn/start` 早过去了，streaming 是 false
+  const idleLooking = baseSignals({ streaming: false })
+  assertEqual(composerView(idleLooking).primary, 'send', '只看 streaming 时是发送（旧的 bug 现场）')
+  assertEqual(composerLiveView(composerView(idleLooking), true).primary, 'stop', '全局运行态说在跑 → 停止')
+  // 反过来：全局运行态说停了，主位必须回到发送
+  const running = composerView(baseSignals({ streaming: true }))
+  assertEqual(composerLiveView(running, false).primary, 'send', '运行态说停了 → 发送')
+  // 同一个值不造新对象（每帧都会调它）
+  assertTrue(composerLiveView(running, true) === running, '值没变就返回原对象')
+  // 有草稿时同样是发送
+  const typing = composerView(baseSignals({ streaming: false, draft: '我在打字' }))
+  assertEqual(composerLiveView(typing, true).primary, 'send', '有内容就是发送')
+  assertEqual(composerLiveView(typing, true).secondaryAction, 'stop', '停止让到第二颗钮')
 })
 
 /* ─────────────────────────── B. 回车意图 / 提示条 ─────────────────────────── */

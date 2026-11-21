@@ -60,6 +60,8 @@
  * 一、本地类型（上游 packages/app-core/src/types.ts 的 ChatItem 家族子集）
  * ──────────────────────────────────────────────────────────────────────── */
 
+import { isOptimisticEcho } from './routing.js'
+
 /** `ChatItem` 的公共字段（上游 `ChatItemBase`）。 */
 export interface ChatItemBase {
   id: string
@@ -207,8 +209,49 @@ export interface QuestionActivity extends ChatItemBase {
   outcome?: 'answered' | 'cancelled' | 'queued'
 }
 
-/** 会话时间线里可渲染的一行。与上游 `ChatItem` 一致。 */
-export type ChatItem = ChatMessage | ToolActivity | ApprovalActivity | QuestionActivity
+/**
+ * `present` 交付的一份文件 —— 官方 `PresentedFile` 的逐字段镜像
+ * （`@deepseek-ai/dsh-tool-present/src/types.ts:5-10`）。
+ */
+export interface PresentedFile {
+  /** 绝对路径，或相对 Session 工作目录的路径（Host 已按工作目录解析过）。 */
+  path: string
+  /** 模型给的说明（可选）。 */
+  description?: string
+}
+
+/**
+ * 一轮结束时 Agent **用官方 `present` 工具声明的交付文件**（「产物」）。
+ *
+ * 数据来源是 Session 日志里那条 **`deliverables/presented`** 事件
+ * （`@deepseek-ai/dsh-tool-present/src/index.ts:101-109` 落库，
+ * 事件签名见同包 `src/types.ts:12-16`），不是从别的工具参数里猜出来的：
+ *
+ * ```
+ * { type: 'deliverables/presented', seq, time,
+ *   data: { turn: 28, callId: 'call_…', files: [{ path, description }] } }
+ * ```
+ *
+ * 官方 Web 客户端（`@deepseek-ai/dsh-client-ui-deliverables` 的
+ * `turn-deliverables.ts:191-201`）与 dsh-Go（`app/lib/state/artifacts.dart:389`
+ * 的 `presentedByTurn(events)`）读的是同一条事件。
+ */
+export interface ArtifactActivity extends ChatItemBase {
+  kind: 'artifact'
+  /** `present` 的 callId；同一轮调用多次就是多行。 */
+  callId?: string
+  /** 声明交付的文件（保持模型给的顺序，同路径去重）。 */
+  files: PresentedFile[]
+  /**
+   * 这一行是怎么来的：
+   *  - `event`：官方 `deliverables/presented` 事件（权威；`path` 已是 Host 解析值）；
+   *  - `arguments`：`present` 的 `tool/call.arguments`（事件还没送达时的兜底，同 callId 会被事件覆盖）。
+   */
+  source: 'event' | 'arguments'
+}
+
+/** 会话时间线里可渲染的一行。与上游 `ChatItem` 一致，外加官方交付事件。 */
+export type ChatItem = ChatMessage | ToolActivity | ApprovalActivity | QuestionActivity | ArtifactActivity
 
 /** 原生会话事件（上游 `NativeSessionEvent` 的结构镜像；协议 §2.3 Session V3）。 */
 export interface NativeSessionEvent {
@@ -409,8 +452,13 @@ function reduceNativeEvent(
       ? current.filter(item => !(item.kind === 'message' && item.streaming === true && item.id === streamId))
       : current
   }
-  if (event.type === 'tool/call') return applyToolCall(current, data, sessionId, 'running', view)
+  if (event.type === 'tool/call') {
+    // 同一 turn 里 `present` 的调用还要额外落一行产物（参数兜底，见 `applyPresentCall`）。
+    return applyPresentCall(applyToolCall(current, data, sessionId, 'running', view), data, sessionId, event)
+  }
   if (event.type === 'tool/result') return applyToolCall(current, data, sessionId, 'finished', view)
+  // 官方交付事件（`present` 成功 → Host 落库），权威产物来源。
+  if (event.type === 'deliverables/presented') return applyPresentedEvent(current, data, sessionId, event)
   return current
 }
 
@@ -449,9 +497,21 @@ function addUserMessage(current: ChatItem[], data: UnknownRecord, sessionId: str
   const persistedImages = messageImages(data, sessionId)
   if (text.length === 0 && persistedImages.length === 0) return current
   const rpcId = messageRequestRpcId(data)
+  /*
+   * [S4 串台修复] 乐观行对齐用 **(sessionId, requestRpcId) 二元组**，不是只比 rpcId。
+   *
+   * dsh-Go 的对应做法是 `chat_state.dart:1288-1297` `_dropEchoed`：拿回显事件里的
+   * `requestId` 去 `_pending` 里删。而 `_pending` 是某个 `ChatController` 的字段
+   * （`chat_state.dart:462-476`），天生带着 sessionId —— 所以那边「只比 requestId」
+   * 其实等价于「(sessionId, requestId) 都对上」。
+   *
+   * 我们是一个 store、一份活动会话，没有那个天然隔离，必须把 sessionId 显式比一遍：
+   * 否则一旦有历史遗留的「A 的乐观行留在 B 的列表里」，B 收到的回显会把它认领并替换，
+   * 那条行就**真的是 A 的却显示在 B 里**，而 A 那边永远停在「发送中」。
+   */
   const optimisticIndex = rpcId === undefined
     ? -1
-    : current.findIndex(item => item.kind === 'message' && item.requestRpcId === rpcId)
+    : current.findIndex(item => isOptimisticEcho(item, sessionId, rpcId))
   const optimistic = optimisticIndex < 0 ? undefined : current[optimisticIndex]
   const images = persistedImages.length > 0 ? persistedImages
     : optimistic?.kind === 'message' ? optimistic.images ?? [] : []
@@ -671,6 +731,155 @@ function applyToolCall(
         state: next.state,
       }
     : item)
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * 交付文件（产物）：官方 `present` 工具 + `deliverables/presented` 事件
+ *
+ * 这一节**不猜产物**：只认两处官方数据 ——
+ *   1. `deliverables/presented` 事件（权威，Host 落库）；
+ *   2. `present` 工具的 `tool/call.arguments`（同 callId 的兜底，事件到了就替换）。
+ * 写类工具（`write` / `edit` / `str_replace_editor`）在这条链路上**不产生**产物行：
+ * 官方 Web 客户端把它们算进「本次改动的文件」（`workspace/changes` + `changed-files` 卡），
+ * 与「交付给用户的文件」是两张卡（`dsh-client-ui-deliverables/src/client/turn-deliverables.ts:1-7`）。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * `PresentedFile[]` 的收口校验（等价官方 `isPresentedFile()`，
+ * `dsh-client-ui-deliverables/src/presented.ts:49-54`）：
+ * `path` 必须是非空字符串，`description` 要么没有要么是字符串。
+ *
+ * **不在这里按路径去重**：官方 `presentedForClosing()`（`turn-deliverables.ts:261-265`）
+ * 是「同路径留最新那份、位置按首次出现」，那一步在 `artifacts.ts` 的 `filesOf()` 里做。
+ * 这里只负责「哪些条目算合法的 `PresentedFile`」。
+ */
+function presentedFiles(value: unknown): PresentedFile[] {
+  if (!Array.isArray(value)) return []
+  const files: PresentedFile[] = []
+  for (const entry of value) {
+    if (!isRecord(entry) || Array.isArray(entry)) continue
+    const path = stringValue(entry.path)
+    if (path === undefined || path.trim().length === 0) continue
+    const description = stringValue(entry.description)
+    files.push(description === undefined ? { path } : { path, description })
+  }
+  return files
+}
+
+/** 产物行的 id：同一个 `present` 调用只占一行（`arguments` 兜底与事件共用它）。 */
+function presentedItemId(callId: string | undefined, turn: string | undefined, seq: number): string {
+  if (callId !== undefined && callId.length > 0) return `presented:${callId}`
+  return `presented:${turn ?? '?'}:${Number.isSafeInteger(seq) ? seq : 0}`
+}
+
+/**
+ * 落一行 `ArtifactActivity`。
+ *
+ * 合并规则（唯一一处）：同一个 callId 只留一行 —— `present` 的 `tool/call`
+ * 通常先到（兜底 `source:'arguments'`），随后 `deliverables/presented` 到达时
+ * **整体替换**成 `source:'event'`（路径此时已是 Host 解析后的值）。反过来
+ * （事件先到、参数后到）不会把权威行降级。
+ */
+function applyArtifact(
+  current: ChatItem[],
+  presented: { turn?: string; callId?: string; files: PresentedFile[]; source: ArtifactActivity['source'] },
+  sessionId: string,
+  event: NativeSessionEvent,
+): ChatItem[] {
+  if (presented.files.length === 0) return current
+  const id = presentedItemId(presented.callId, presented.turn, event.seq)
+  const existing = current.find(item => item.id === id)
+  if (existing?.kind === 'artifact') {
+    if (presented.source !== 'event' && existing.source === 'event') return current
+    return current.map(item => item.id === id && item.kind === 'artifact'
+      ? {
+          ...item,
+          files: presented.files,
+          source: presented.source,
+          ...(presented.turn === undefined ? {} : { turn: presented.turn }),
+          ...(presented.callId === undefined ? {} : { callId: presented.callId }),
+        }
+      : item)
+  }
+  const activity: ArtifactActivity = {
+    kind: 'artifact',
+    id,
+    sessionId,
+    createdAt: Number.isFinite(event.time) && event.time > 0 ? event.time : Date.now(),
+    ...(presented.turn === undefined ? {} : { turn: presented.turn }),
+    ...(presented.callId === undefined ? {} : { callId: presented.callId }),
+    files: presented.files,
+    source: presented.source,
+  }
+  return [...current, activity]
+}
+
+/**
+ * `deliverables/presented` 的归约。
+ *
+ * 事件形状（官方 `SessionEventMap` 扩展，`dsh-tool-present/src/types.ts:12-16`）：
+ * `{ turn: number; callId: string; files: PresentedFile[] }`。校验照抄官方
+ * `isPresentedData()`（`dsh-client-ui-deliverables/src/presented.ts:72-77`）：
+ * `turn` 是 >= 1 的安全整数、`callId` 非空、`files` 是数组；不合格整条忽略。
+ */
+function applyPresentedEvent(
+  current: ChatItem[],
+  data: UnknownRecord,
+  sessionId: string,
+  event: NativeSessionEvent,
+): ChatItem[] {
+  const turn = data.turn
+  if (typeof turn !== 'number' || !Number.isSafeInteger(turn) || turn < 1) return current
+  const callId = stringValue(data.callId)
+  if (callId === undefined || callId.length === 0) return current
+  if (!Array.isArray(data.files)) return current
+  return applyArtifact(
+    current,
+    { turn: String(turn), callId, files: presentedFiles(data.files), source: 'event' },
+    sessionId,
+    event,
+  )
+}
+
+/**
+ * `present` 的 `tool/call` 兜底：参数 schema 是 `{ files: [{ path, description? }] }`
+ * （`@deepseek-ai/dsh-tool-present/src/index.ts:45-58`）。
+ *
+ * 为什么留着这条：远端 `session/follow` 的窗口可能从 `deliverables/presented`
+ * **之后**开始（上翻/重连），此时权威事件不在窗口里，只有工具调用还在。
+ * dsh-Go 的工具行也读这份参数（`app/lib/ui/chat/tool_view.dart:246-251`），
+ * 所以这不是自创识别 —— 读的是同一个工具的公开 schema。
+ */
+function applyPresentCall(
+  current: ChatItem[],
+  data: UnknownRecord,
+  sessionId: string,
+  event: NativeSessionEvent,
+): ChatItem[] {
+  const name = stringValue(data.name) ?? stringValue(data.toolName)
+  if (name !== 'present') return current
+  const args = jsonObjectOf(data.arguments)
+  const files = presentedFiles(args?.files)
+  if (files.length === 0) return current
+  const callId = stringValue(data.callId)
+  return applyArtifact(current, {
+    ...(replyGroup(data) === undefined ? {} : { turn: replyGroup(data) }),
+    ...(callId === undefined ? {} : { callId }),
+    files,
+    source: 'arguments',
+  }, sessionId, event)
+}
+
+/** 工具参数是模型流式拼出来的 JSON 字符串；解析不出来就当没有（绝不猜）。 */
+function jsonObjectOf(value: unknown): UnknownRecord | undefined {
+  if (isRecord(value) && !Array.isArray(value)) return value
+  if (typeof value !== 'string' || value.length === 0) return undefined
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return isRecord(parsed) && !Array.isArray(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function toolCallDetail(view: UnknownRecord | undefined, argumentsText: string): ToolDisplayDetail | undefined {

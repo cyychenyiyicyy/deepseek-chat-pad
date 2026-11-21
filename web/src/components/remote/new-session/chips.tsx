@@ -1,8 +1,8 @@
 import clsx from 'clsx'
 import type { ReactNode } from 'react'
 import type { TranslationKey } from '../../../i18n/index.js'
-import { IconChevronDownOutline14, IconThinkOutline16 } from '../../base/icons.js'
-import styles from './NewSessionPanel.module.css'
+import { IconChevronDownOutline14 } from '../../base/icons.js'
+import styles from './NewSessionPage.module.css'
 
 /**
  * 新建会话页的三档控件 —— 尺寸全部照 dsh-Go 的 `empty_actions.dart` 搬过来：
@@ -130,11 +130,20 @@ export const SegmentedPill = <T extends string>({
   </div>
 )
 
-/** 提示行（dsh-Go 的 `TipLine`）：一枚小图标 + 一行灰字。 */
+/**
+ * 提示行（dsh-Go 的 `TipLine`）：一枚小灯泡 + 一行灰字。
+ *
+ * 灯泡是 dsh-Go 那一行用的图标（`AppIcons.tip`，`empty_actions.dart:583`）。`base/icons.tsx`
+ * 里没有灯泡、那一层归别的任务，所以这里画一个本地版（纯装饰，`aria-hidden`）。
+ */
 export const TipLine = ({ text }: { text: string }) => (
   <div className={styles.tip}>
     <span className={styles.tipIcon} aria-hidden>
-      <IconThinkOutline16 />
+      <svg width={16} height={16} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M8 2.2a4.4 4.4 0 1 0 0 8.8 4.4 4.4 0 0 0 0-8.8Z" fill="currentColor" />
+        <rect x="6.35" y="11.55" width="3.3" height="1.15" rx="0.575" fill="currentColor" />
+        <rect x="6.85" y="13.45" width="2.3" height="1.15" rx="0.575" fill="currentColor" opacity="0.7" />
+      </svg>
     </span>
     <span className={styles.tipText}>{text}</span>
   </div>

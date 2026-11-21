@@ -1,0 +1,118 @@
+/* [S3] 截图页的外壳样式：只画「手机里那一块」，不引 App 的布局层 */
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(120% 80% at 50% 0%, #eef2f8 0%, #e6ebf3 45%, #dfe5ee 100%);
+  font-family:
+    'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+#root {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+/* 390×844 = 家用手机竖屏；这里只借它的宽度跟圆角 */
+.phone {
+  box-sizing: border-box;
+  width: 390px;
+  padding: 14px 12px 16px;
+  border-radius: 26px;
+  background: var(--dsw-alias-bg-base, #fff);
+  box-shadow:
+    0 0 0 1px rgba(16, 24, 40, 0.06),
+    0 18px 40px rgba(16, 24, 40, 0.12);
+}
+
+.sider {
+  display: flex;
+  flex-direction: column;
+  min-height: 420px;
+}
+
+.siderTop {
+  padding: 0 4px 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary, #1f2329);
+}
+
+/* 本机 / 远程 胶囊（与 `RemoteModeSwitch` 同款，只为让截图有上下文） */
+.modePill {
+  display: flex;
+  gap: 2px;
+  box-sizing: border-box;
+  margin: 0 4px 12px;
+  padding: 2px;
+  border-radius: 100px;
+  background-color: var(--dsw-alias-interactive-bg-hover, rgba(38, 49, 72, 0.06));
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  text-align: center;
+}
+
+.modePill > span {
+  flex: 1;
+  padding: 3px 0;
+  border-radius: 100px;
+}
+
+.modePillActive {
+  background-color: var(--dsw-alias-bg-base, #fff);
+  color: var(--dsw-alias-label-primary, #1f2329);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08);
+}
+
+/* ── 输入区外壳：模拟 App 里那个圆角输入框 ── */
+.composerHost {
+  width: 100%;
+}
+
+.mockComposer {
+  box-sizing: border-box;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
+  border-radius: 18px;
+  background: var(--dsw-alias-bg-base, #fff);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.mockTextarea {
+  box-sizing: border-box;
+  min-height: 74px;
+  padding: 12px 14px 4px;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary, #1f2329);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mockPlaceholder {
+  color: var(--dsw-alias-label-tertiary, #9aa1ab);
+}
+
+.mockPlus {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.1));
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}

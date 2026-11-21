@@ -1,93 +1,134 @@
 /*
- * 新建会话面板（W1）。
+ * 新建会话**页**（W6）。
  *
- * 尺寸与留白照 dsh-Go 的 `chat/empty_state.dart` + `chat/empty_actions.dart`：
- *   - 控件三档：QuietChip 36 / SetupItem 32 / PrimaryPill 36；
- *   - 节奏：hero 底 12 → 标题 → 4 → 副标题 → 12 → 工作区胶囊 → 8 → 选项行 → 28 → 提示行；
- *   - 字号：标题 displaySmall（22/28）、副标题 bodyLarge（14）、胶囊 14、选项 13、提示 12。
+ * 与 W1 那版 `NewSessionPanel` 的区别只有形态：那时它是从右边滑出来的一列（420px + 遮罩），
+ * 现在它是**一个真实视图** —— 平板/桌面铺满右侧内容区、手机整屏覆盖，会话列表照旧在左边。
+ * 层级照 dsh-Go 的 `chat/empty_state.dart` + `chat/new_chat_options.dart`：
+ *
+ *   顶部一行（返回 + 标题）→ 居中一列（淡装饰 / 大标题 / 一句说明 / 工作区大胶囊 /
+ *   三个小胶囊 / 提示行）→ 底部吸底（取消 + 创建并开始）
+ *
+ * 尺寸：
+ *   - 内容列 max-width 560（dsh-Go 的空态控件列是 `readingWidth - 2*floatInset = 696`，
+ *     这里窄一点，因为本页没有建议卡片网格，太宽会显得散）；
+ *   - 控件三档：工作区大胶囊 44 / 选项小胶囊 34 / 底部按钮 40；
+ *   - 节奏：装饰 40 + 12 → 标题 22/28 → 4 → 说明 14 → 16 → 工作区胶囊 → 12 → 选项行 → 24 → 提示行。
  * 颜色一律走 `theme.css` 的 dsw-* 变量，暗色/亮色自动跟随。
  */
 
-.overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  display: flex;
-  justify-content: flex-end;
-  background-color: rgb(0 0 0 / 32%);
-  animation: ns-fade-in var(--ds-transition-duration, 120ms) var(--ds-ease-in-out, ease-out);
-}
+/* ────────────────────────────── 外壳 ────────────────────────────── */
 
-.overlayMobile {
-  justify-content: stretch;
-}
-
-.panel {
+/*
+ * 平板 / 桌面：铺满右侧内容区。
+ * 父级 `RemoteChatView .view` 是 `position:absolute; inset:0; display:flex; flex-direction:column`，
+ * 所以这里 `flex: 1` 就等于「占满整块内容区」—— 不是浮在上面的层，也不盖左侧会话列表。
+ */
+.page {
   position: relative;
   display: flex;
+  flex: 1;
   flex-direction: column;
   box-sizing: border-box;
+  min-width: 0;
   min-height: 0;
   background-color: var(--dsw-alias-bg-base);
   color: var(--dsw-alias-label-primary);
-  box-shadow: -8px 0 32px rgb(0 0 0 / 18%);
-  animation: ns-slide-in var(--ds-transition-duration, 120ms) var(--ds-ease-in-out, ease-out);
+  animation: ns-page-in var(--ds-transition-duration, 140ms) var(--ds-ease-in-out, ease-out);
 }
 
-/* 平板 / 桌面：右栏 */
-.panelSide {
-  width: min(420px, 92vw);
-  height: 100%;
-  border-top-left-radius: 20px;
-  border-bottom-left-radius: 20px;
+/*
+ * 手机（<768px）：整屏覆盖。
+ *
+ * 为什么用 `fixed` 而不是铺满 `.content`：手机上左栏是抽屉（`Sider.module.css` z-index 800），
+ * 从抽屉里点「新建对话」时抽屉正在收起，铺满内容区的页面会被它压住一会儿。这里盖到它上面
+ * （860），并让高度跟着**视觉视口**走 —— `--app-viewport-height` / `--app-viewport-top` 由
+ * `useMobileViewport` 在键盘弹起时写到 `.frame` 上，于是底部按钮始终留在键盘上方。
+ */
+.pageMobile {
+  position: fixed;
+  top: var(--app-viewport-top, 0px);
+  right: 0;
+  bottom: auto;
+  left: 0;
+  height: var(--app-viewport-height, 100dvh);
+  z-index: 860;
 }
 
-/* 手机：全屏 */
-.panelMobile {
-  width: 100%;
-  height: 100%;
+/* ─────────────────── 顶部一行：返回 + 标题 ─────────────────── */
+
+.topBar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  /* 与 RemoteChatView 的顶栏、左栏 logo 行同一条公式：两栏的标题行看齐 */
+  height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
+  padding: var(--ds-top-offset) 12px 0;
+  background-color: var(--dsw-alias-bg-base);
 }
 
-.closeButton {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  z-index: 2;
+.backButton {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   padding: 0;
   border: none;
   border-radius: 100px;
   background: none;
-  color: var(--dsw-alias-label-tertiary);
+  color: var(--dsw-alias-label-secondary);
   cursor: pointer;
 }
 
-.closeButton:hover {
+.backButton:hover {
   background-color: var(--dsw-specific-sidebar-nav-item-hover);
   color: var(--dsw-alias-label-primary);
 }
 
-/* 居中一列：dsh-Go 的空态也是 `Center + maxWidth` 的一列 */
-.column {
+.topTitle {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 15px;
+  line-height: 22px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* ─────────────────── 中间：居中一列 ─────────────────── */
+
+.body {
   display: flex;
   flex: 1;
-  flex-direction: column;
-  align-items: center;
-  box-sizing: border-box;
-  width: 100%;
-  max-width: 460px;
-  margin: 0 auto;
-  padding: 64px 20px 24px;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
   scrollbar-color: var(--scroll-color) transparent;
 }
 
-/* ── hero：淡装饰 + 标题 + 副标题 ── */
+/*
+ * `margin: auto`（而不是父级 `justify-content: center`）：内容少时上下左右都居中，
+ * 内容多到超过屏幕时自动退化成贴边 + 可滚动 —— 后者用 justify-content 会被裁掉上沿。
+ */
+.column {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  box-sizing: border-box;
+  /* dsh-Go：`ChatEmptyState.maxWidth = AppSpace.floatingWidth = 696`、`sideMargin = 12`；
+     竖向略偏上（它用 `Alignment(0, -0.25)`），所以底部留白比顶部多一截。 */
+  width: 100%;
+  max-width: 696px;
+  margin: auto;
+  padding: 28px 12px 56px;
+}
 
+/* 一条很淡的鲸尾（dsh-Go 空态的那个装饰）：一根尾柄分向两侧 */
 .hero {
   display: flex;
   align-items: center;
@@ -98,7 +139,8 @@
   opacity: 0.45;
 }
 
-.heroTitle {
+.headline {
+  margin: 0;
   font-size: 22px;
   line-height: 28px;
   font-weight: 500;
@@ -106,7 +148,7 @@
   color: var(--dsw-alias-label-primary);
 }
 
-.heroSubtitle {
+.subtitle {
   margin-top: 4px;
   font-size: 14px;
   line-height: 20px;
@@ -114,7 +156,7 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
-/* ── 中间：准备在哪工作（大选择） ── */
+/* ── 工作区：这一页的「大选择」（dsh-Go 的 `QuietChip` + `ConstrainedBox(maxWidth: 280)`） ── */
 
 .workspaceSection {
   display: flex;
@@ -122,54 +164,72 @@
   align-items: center;
   gap: 6px;
   width: 100%;
+  /* dsh-Go `ChatEmptyState.slotGap = 12` */
   margin-top: 12px;
 }
 
-/* 工作区那枚：比 `.chip` 更高更宽（40px / 最多 320px），是这一页的「大选择」。
-   选择器写成 `.chip.workspacePill` 是为了压过后面 `.chip` 的 max-width（同优先级时后者会赢）。 */
+/* 工作区胶囊上面那行小标（页面自己的；短列表里的分组标题是下面的 `.sectionLabel`） */
+.workspaceLabel {
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 短列表里的分组标题（模型按 provider 分组、思考强度那一行） */
+.sectionLabel {
+  padding: 14px 10px 6px;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/*
+ * 工作区那枚：dsh-Go 的 QuietChip —— 36 高、14 号字、7% 淡底，
+ * `paddingFor(icon, trailing)` = 左 13（14 - leadingAir 1）/ 右 10（14 - chevronAir 4），
+ * 宽度跟着内容走、封顶 280。它比下面那排选项「大」靠的是**有底色 + 大一档字**，而不是更高。
+ */
 .chip.workspacePill {
-  display: flex;
-  justify-content: center;
-  box-sizing: border-box;
-  width: 100%;
-  max-width: 320px;
-  height: 40px;
-  padding: 0 12px 0 14px;
+  display: inline-flex;
+  width: auto;
+  max-width: 280px;
+  height: 36px;
+  padding: 0 10px 0 13px;
   font-size: 14px;
 }
 
-.chip.workspacePill .chipLabel {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-align: center;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-/* ── 一排三个胶囊：模型(含思考强度) / 权限预设 / agent preset ── */
+/* ── 一排三个小胶囊：模型(含思考强度) / 权限预设 / agent preset ── */
 
 .pillRow {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  /* dsh-Go `NewChatOptions`：`Wrap(alignment: center, spacing: 2)`、`optionsGap = 8` */
+  gap: 2px;
   max-width: 100%;
-  margin-top: 10px;
+  margin-top: 8px;
 }
 
+/*
+ * 选项小胶囊 = dsh-Go 的 `SetupItem`：32 高、13 号字、**无底色**（只有按下才亮）、
+ * 圆角 8、左右 8、图标 14 + 间距 5 + 文字 + 右箭头 14。
+ * 「a row of them reads as this chat's settings rather than as more buttons」——它是设置项的口吻，
+ * 所以别给它加填充底。
+ */
 .optionPill {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   box-sizing: border-box;
   max-width: 100%;
-  height: 34px;
-  padding: 0 8px 0 11px;
+  height: 32px;
+  padding: 0 8px;
   border: none;
-  border-radius: 100px;
-  background-color: rgb(255 255 255 / 5%);
+  border-radius: 8px;
+  background: none;
   font: inherit;
   font-size: 13px;
   line-height: 18px;
@@ -178,7 +238,7 @@
 }
 
 .optionPill:hover:not(:disabled) {
-  background-color: rgb(255 255 255 / 10%);
+  background-color: var(--dsw-alias-button-ghost-active-fill);
 }
 
 .optionPill:disabled {
@@ -194,34 +254,22 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
+/* `base/icons.tsx` 的图标是 16 号：这里按 dsh-Go 的 SetupItem 缩到 14（只缩放，不换图标） */
+.optionPillIcon > svg {
+  width: 14px;
+  height: 14px;
+}
+
 .optionPillLabel {
   min-width: 0;
-  max-width: 190px;
+  /* dsh-Go `_itemMaxWidth = 200` */
+  max-width: 200px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-/* 思考强度：选项行下面一行可点的灰字（点开同一个模型 sheet 的分段控件） */
-.effortHint {
-  margin-top: 6px;
-  padding: 2px 8px;
-  border: none;
-  border-radius: 8px;
-  background: none;
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-tertiary);
-  cursor: pointer;
-}
-
-.effortHint:hover {
-  color: var(--dsw-alias-label-secondary);
-  background-color: var(--dsw-specific-sidebar-nav-item-hover);
-}
-
-/* 工作区那枚基础胶囊（`QuietChip`）；`.workspacePill` 只是把它拉宽 */
+/* 工作区那枚基础胶囊（`QuietChip`）；`.workspacePill` 只是把它拉宽拉高 */
 .chip {
   display: inline-flex;
   align-items: center;
@@ -264,13 +312,15 @@
   text-overflow: ellipsis;
 }
 
-/* ── 提示行 ── */
+/* ── 提示行（dsh-Go 的 `TipLine`：一行灰字 + 一枚小灯泡，padding 10/8） ── */
 
 .tip {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
-  margin-top: 24px;
+  gap: 8px;
+  /* dsh-Go `ChatEmptyState.suggestionsGap = 28`（建议卡片与控件之间那一段；本页没有建议网格，
+     这段留白留给提示行） */
+  margin-top: 28px;
   padding: 8px 10px;
   color: var(--dsw-alias-label-tertiary);
 }
@@ -288,7 +338,7 @@
   text-align: left;
 }
 
-/* ── 底部吸底：取消 + 创建并开始 ── */
+/* ─────────────────── 底部吸底：取消 + 创建并开始 ─────────────────── */
 
 .footer {
   flex-shrink: 0;
@@ -298,17 +348,31 @@
   background-color: var(--dsw-alias-bg-base);
 }
 
-.footerButtons {
+/* 与上面那列同宽：主按钮的中线与工作区胶囊的中线对齐 */
+.footerInner {
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 696px;
+  margin: 0 auto;
+}
+
+.footerButtons {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 .secondaryPill {
   box-sizing: border-box;
-  height: 36px;
-  padding: 0 20px;
+  height: 40px;
+  padding: 0 22px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 100px;
   background: none;
@@ -326,8 +390,8 @@
 
 .primaryPill {
   box-sizing: border-box;
-  height: 36px;
-  padding: 0 20px;
+  height: 40px;
+  padding: 0 24px;
   border: none;
   border-radius: 100px;
   background-color: var(--dsw-alias-button-primary-fill);
@@ -351,6 +415,7 @@
 
 .spinner {
   display: inline-flex;
+  flex-shrink: 0;
   color: var(--dsw-alias-label-tertiary);
   animation: ns-spin 1s linear infinite;
 }
@@ -389,11 +454,10 @@
   overflow-wrap: anywhere;
 }
 
-/* 模型应用失败：一块卡片 + 两个明确出口（重试 / 跳过用默认模型） */
+/* 模型应用失败：一快卡片 + 两个明确出口（重试 / 跳过用默认模型） */
 .failureCard {
   box-sizing: border-box;
   width: 100%;
-  margin-top: 20px;
   padding: 12px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 14px;
@@ -445,24 +509,39 @@
 
 /* ────────────────────────────── 短列表 ────────────────────────────── */
 
+/*
+ * dsh-Go 用 `showAppSheet`（= `showModalBottomSheet`）：**全屏模态** + 从底部升起的圆角面板
+ * （`AppShape.xl` 圆角 28、Material 在宽屏上的 640 居中上限、`maxHeightRatio = 9/16`）。
+ * Web 上最接近的就是这一套：遮罩铺满整个可见区（不是只铺内容区 —— 那就不像模态了），
+ * 面板贴底、最宽 640 居中、`max-height: 86%`。
+ *
+ * 高度跟着视觉视口走：手机上新工作区那一档里有输入框，键盘弹起时面板要留在键盘上方。
+ */
 .sheetBackdrop {
-  position: absolute;
-  inset: 0;
-  z-index: 3;
+  position: fixed;
+  top: var(--app-viewport-top, 0px);
+  right: 0;
+  bottom: auto;
+  left: 0;
+  z-index: 880;
   display: flex;
   align-items: flex-end;
+  height: var(--app-viewport-height, 100dvh);
   background-color: rgb(0 0 0 / 34%);
   animation: ns-fade-in var(--ds-transition-duration, 120ms) var(--ds-ease-in-out, ease-out);
 }
 
+/* 短列表本体：贴底、宽屏居中、顶部圆角 28（dsh-Go 的底部弹层） */
 .sheet {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
   width: 100%;
+  max-width: 640px;
   max-height: 86%;
-  border-top-left-radius: 20px;
-  border-top-right-radius: 20px;
+  margin: 0 auto;
+  border-top-left-radius: 28px;
+  border-top-right-radius: 28px;
   background-color: var(--dsw-alias-bg-base);
   box-shadow: 0 -8px 32px rgb(0 0 0 / 22%);
   animation: ns-sheet-in 160ms var(--ds-ease-in-out, ease-out);
@@ -470,9 +549,10 @@
 
 .sheetHeader {
   display: flex;
+  /* dsh-Go `SheetTitleBar.inset = 20`：标题与关闭键离弹层两边 20 */
   align-items: center;
   gap: 8px;
-  padding: 14px 14px 6px 18px;
+  padding: 16px 20px 8px;
 }
 
 .sheetTitle {
@@ -534,14 +614,6 @@
   height: 1px;
   margin: 6px 10px;
   background-color: var(--dsw-alias-border-l2);
-}
-
-.sectionLabel {
-  padding: 14px 10px 6px;
-  font-size: 12px;
-  line-height: 16px;
-  font-weight: 500;
-  color: var(--dsw-alias-label-tertiary);
 }
 
 /* 一行可选值（标题 + 副标题 + 右侧 meta + 勾） */
@@ -889,16 +961,15 @@
 
 /* ── 动效 ── */
 
-@keyframes ns-fade-in {
+@keyframes ns-page-in {
   from {
     opacity: 0;
   }
 }
 
-@keyframes ns-slide-in {
+@keyframes ns-fade-in {
   from {
-    transform: translateX(24px);
-    opacity: 0.6;
+    opacity: 0;
   }
 }
 
@@ -915,9 +986,26 @@
   }
 }
 
+/* 尊重系统「减弱动态效果」 */
+@media (prefers-reduced-motion: reduce) {
+  .page,
+  .sheetBackdrop,
+  .sheet,
+  .spinner {
+    animation: none;
+  }
+}
+
+/* ────────────────────────────── 手机（<768px） ────────────────────────────── */
+
 @media not all and (min-width: 768px) {
+  /* 手机上内容更靠上一点：底部按钮已经吃掉一截，再居中就会显得挤 */
   .column {
-    padding: 56px 18px 20px;
+    padding: 20px 12px 32px;
+  }
+
+  .footer {
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
   }
 
   /* 手机上「取消」按内容宽、主操作吃掉剩下的宽度（两者都吸底） */

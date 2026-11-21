@@ -3,7 +3,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import {
   IconPanelLeftOutline16,
-  IconRefreshOutline16,
   IconSearchOutline16,
   IconSettingsOutline16,
   IconLinkOutline16,
@@ -21,7 +20,6 @@ import { showToast } from '../base/toastState.js'
 import { openSettings } from '../settings/settingsDialogState.js'
 import { RemoteModeSwitch, useRemoteMode } from '../remote/RemoteModeSwitch.js'
 import { RemoteSessionList } from '../remote/RemoteSessionList.js'
-import { useRemoteStore } from '../../services/remote/store.js'
 import { closeMobileSider, useMobileSider } from './mobileSiderState.js'
 import { SessionItem } from './SessionItem.js'
 import styles from './Sider.module.css'
@@ -32,15 +30,6 @@ import styles from './Sider.module.css'
  *
  * 两种模式共用这一份骨架：胶囊只决定列表读哪一份数据，右栏详情由 `App` 决定。
  */
-
-/** 数据层方法可能同步抛、也可能返回 rejected 的 promise；报错统一落在 store.error */
-const fireAndForget = (action: () => unknown) => {
-  try {
-    void Promise.resolve(action()).catch(() => undefined)
-  } catch {
-    // 同步抛错已由数据层写入状态，界面不重复提示
-  }
-}
 
 /** 一屏先渲染这么多，其余点「显示更多」再补 —— 会话几百条时首屏才不卡 */
 const LIST_PAGE = 60
@@ -58,7 +47,6 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
 
   const pinnedIds = usePins((state) => state.ids)
   const remoteMode = useRemoteMode((state) => state.mode)
-  const remotePhase = useRemoteStore((state) => state.phase)
   const groups = useMemo(() => {
     const pinned = new Set(pinnedIds)
     const all = groupSessions(sessions, now, t, (id) => pinned.has(id))
@@ -129,19 +117,12 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
 
       {remoteMode === 'remote' ? (
         <>
-          {/* 远程模式下这里不再是「新建会话」，而是刷新远端列表 + 进连接设置 */}
+          {/*
+            [S3] 这里原来是「刷新会话」一整行 36px 的大按钮 —— 用户反馈「这个刷新会话按钮太大了」。
+            刷新已经搬到会话列表标题行右侧的小图标里（`RemoteSessionList` 的 `.listHeader`），
+            所以这一行只剩「连接设置」一个入口，不再占掉列表上方的一整行。
+          */}
           <div className={styles.remoteActions}>
-            <button
-              type="button"
-              className={styles.newChat}
-              disabled={remotePhase !== 'ready'}
-              onClick={() => fireAndForget(() => useRemoteStore.getState().refreshSessions())}
-            >
-              <span className={styles.newChatIcon}>
-                <IconRefreshOutline16 />
-              </span>
-              {t('remoteRefreshSessions')}
-            </button>
             <IconButton
               size="m"
               icon={<IconLinkOutline16 />}

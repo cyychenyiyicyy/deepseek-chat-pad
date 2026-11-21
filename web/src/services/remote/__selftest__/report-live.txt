@@ -1,0 +1,24 @@
+[PASS] A1 status：在跑 / 停下，停下时工具名跟着清掉
+[PASS] A2 无变化的输入返回**原对象**（列表每行都订阅着它，不能白渲染）
+[PASS] A3 activity 只推时间；added 带 running；removed 整条删掉
+[PASS] A4 [核心] list 对账：刚连上就能认出「两个在跑」，且不留过期 running
+[PASS] A5 list 对账：不认识 `running` 字段的老 Host 保持原状态（不误熄）
+[PASS] A6 list 对账：有待审批的会话即使不在列表里也留着（子会话 / 被截断的行）
+[PASS] A7 汇总：两个在跑 + 一个待审批；活动会话可以排除在外
+[PASS] B1 $events api-session/status → store 里在跑 / 停下
+[PASS] B2 $events 的 emit 形状解析（adapter 那一层）与这里一致
+[PASS] B3 待审批：同 eventId 重投不翻倍；cancel / 停下 / 删除都能销账
+[PASS] B4 别的会话的审批也能进运行态（这就是通知里那条「谁在等你」）
+[PASS] B5 工具名只由打开着的会话喂（别的会话 Host 不转发）
+[PASS] C1 投影解析：turn / turnState / activeTurnId / status 四种形状都认
+[PASS] C2 baseline 帧：整份投影里每个会话都校正一次
+[PASS] C3 增量帧：只有 turn 相关的键会改结论，其它键跳过
+[PASS] C4 老 Host 没有这些投影键：一条都不改（fail-open，不误熄）
+[PASS] D1 list 对账入口 + reset：断开之后一条都不留
+[PASS] D2 重连重建：先脏后对账，过期 running 一定熄掉
+[PASS] E1 [核心] 通知 items 里必须有「没打开过的运行中会话」
+[PASS] E2 待审批的会话进 items 时状态是 approval（哪怕它没在跑）
+[PASS] E3 `liveNotifyOthers()`：活动会话不进「其它会话」，空会话不进快照
+[PASS] E4 `deriveOtherWorkItem()`：有工具名说工具，没有就说「正在回复」
+
+总计 22 项，22 PASS / 0 FAIL

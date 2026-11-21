@@ -82,6 +82,7 @@ import {
 } from './keepAlive.js'
 import {
   clearWork,
+  deriveOtherWorkItem,
   NOTIFY_MAX_ITEMS,
   probeNotify,
   pushWorkState,
@@ -181,6 +182,40 @@ import {
   type CachedSessionRow,
   type RemoteCacheStatus,
 } from './cache.js'
+/*
+ * [S4 串台修复] 帧归属规则只有一份，在 `routing.ts`（纯函数 + 自测），
+ * 而且是**照 dsh-Go 的 Dart 实现翻译**过来的（对照表见该文件头部）。
+ * 本文件只负责在正确的时机问它：这条帧是不是这个会话的、这条流还作不作数。
+ */
+import {
+  acceptCacheWrite,
+  belongsToSession,
+  commitSessionTranscript,
+  ensureSessionDebug,
+  followEpochIsCurrent,
+  historyOwnerIsCurrent,
+  noteSessionDrop,
+  newFollowEpoch,
+  sessionDropSnapshot,
+  trimSessionTranscripts,
+  type FollowEpochTicket,
+} from './routing.js'
+/*
+ * [S3 全局运行态] 「谁在跑」不再只由打开的会话决定： *   - `session/list` 行的 `running`（权威）+ `$events` 的 `api-session/*`（实时）
+ *     + `session/control` 的 turn 投影（校正）三条来源都喂给 `liveSessions.ts`；
+ *   - 本文件只做**接线**（哪里拿到信号就喂给它）+ 把结论同步回 `state.streaming`，
+ *     判定规则全在那个文件里（纯函数 + 自测）。
+ */
+import {
+  liveNotifyOthers,
+  liveRunningOf,
+  noteLiveControlFrame,
+  noteLiveEventsItem,
+  noteLiveTool,
+  reconcileLiveWithList,
+  resetLiveSessions,
+  useLiveSessions,
+} from './liveSessions.js' // —— S3 live ——
 
 /** 把 adapter 的 `ChatItem` 家族转出去：U2 渲染消息时只需要 import 这一个入口。 */
 export type {
@@ -556,7 +591,24 @@ interface ActiveSession {
   capabilities: string[]
   /** 当前打开的会话 id（`null` = 还没开会话）。 */
   sessionId: string | null
+  /**
+   * `sessionId` 那一份 transcript（**当前正在显示的那份**）。
+   *
+   * 它只是 `transcripts` 里的一格 —— 写它之前一律先确认「这条数据属于同一个会话」。
+   */
   transcript: RemoteTranscriptState
+  /**
+   * [S4] 每个会话一份 transcript（`sessionId → 归约状态`）。
+   *
+   * 照 dsh-Go `transcript.dart:159` 的 `class ChatTranscript` + `chat_state.dart:462-465`
+   * 的「一个 ChatController 持有一份 ChatTranscript」翻过来：那边每个会话一个 controller，
+   * 对象身份本身就是隔离；我们是单连接单活动会话，所以把「一份 per 会话」显式存成 map。
+   *
+   * 有了它，还在飞的旧 follow 流（切会话时没来得及关掉的那条）写快照 / 帧时，
+   * 落进的是**它自己那个会话的格子**，而不是「当时正好开着的会话」—— 串台从结构上没了。
+   * 上限 `MAX_SESSION_TRANSCRIPTS` 份，按最近使用淘汰（切走的会话回到它时直接接着用）。
+   */
+  transcripts: Map<string, RemoteTranscriptState>
   hasMore: boolean
   follow: RemoteStreamHandle | null
   events: RemoteStreamHandle | null
@@ -776,10 +828,64 @@ const setPaging = (hasMore: boolean, loadingOlder: boolean): void => {
   useRemotePaging.setState({ hasMore, loadingOlder })
 }
 
-/** 把归约后的时间线推给 UI（同时重算待审批列表）。 */
-const syncItems = (session: ActiveSession): void => {
+/**
+ * 把归约后的时间线推给 UI（同时重算待审批列表）。
+ *
+ * [S4] `ownerId` = 这批 items **属于哪个会话**。默认取此刻的活动会话（绝大多数调用点
+ * 都是「刚归约完当前会话」）；异步流程回来后会话可能已经换了，那时必须显式传自己
+ * 打开时那个 id —— 对不上就整批丢掉并计数。
+ */
+const syncItems = (session: ActiveSession, ownerId: string | null = session.sessionId): void => {
+  if (ownerId === null || ownerId.length === 0) {
+    // 会话还没开：没有可显示的东西
+    noteSessionDrop('frame')
+    return
+  }
+  if (session.sessionId !== ownerId) {
+    // 有会话开着，但不是这批内容的会话：只进它自己的格子，别推给屏幕
+    noteSessionDrop('staleFlow')
+    return
+  }
   const items = session.transcript.items
   useRemoteStore.setState({ items, pendingApprovals: pendingApprovalsOf(items) })
+}
+
+/** transcript 内存上限：切走过的会话回到它时直接接着用，但别无限攒（一台设备会翻很多会话）。 */
+const MAX_SESSION_TRANSCRIPTS = 6
+
+/** 淘汰最久没用的那一份（永远不动当前会话那份）。 */
+const trimTranscripts = (session: ActiveSession): void => {
+  trimSessionTranscripts(session.transcripts, session.sessionId, MAX_SESSION_TRANSCRIPTS)
+}
+
+/**
+ * 往**某个会话**的 transcript 里提交一次归约结果。
+ *
+ * 这是 `transcript.dart` 的 `ChatTranscript.apply()/prependHistory()` 在我们这边的等价入口：
+ *   - 有归属的会话就一定写进**它自己的格子**（`transcripts`），哪怕它已经不显示了；
+ *   - 只有当它还是活动会话时，才同步给 UI（`session.transcript` + `state.items`）。
+ *
+ * 返回 `true` = 同时推给了屏幕。
+ */
+const commitTranscript = (
+  session: ActiveSession,
+  sessionId: string,
+  next: RemoteTranscriptState,
+): boolean => {
+  const result = commitSessionTranscript(session.transcripts, sessionId, session.sessionId, next)
+  if (!result.stored) {
+    noteSessionDrop('frame')
+    return false
+  }
+  if (!result.shown) {
+    // 不当面：内容已经归到它自己那格了，回到那个会话时接着用（不串到当前会话）
+    noteSessionDrop('staleFlow')
+    return false
+  }
+  trimTranscripts(session)
+  session.transcript = next
+  syncItems(session, sessionId)
+  return true
 }
 
 const requireSession = (): ActiveSession => {
@@ -788,6 +894,46 @@ const requireSession = (): ActiveSession => {
   }
   return active
 }
+
+/* ── follow 代际（S4）：切会话时把上一代的异步流程全部作废 ────────────────
+ *
+ * 照 dsh-Go 的 `SessionFollowEpoch` / `_canControl` / `_requireCurrent` 翻：
+ * 每次开流领一个新 epoch，异步回来的每一段先问「我这个 epoch 还是不是最新的」。
+ *
+ * 为什么需要「代际」而不只是比 sessionId：`openSessionFlow()` 是 async，用户在会话
+ * 列表里连点 A→B 时两条流程会**交错**执行（`await closeStreamQuietly` / `await
+ * openFollow` 都是让出点）。各自恢复执行时都会做三件危险的事：
+ *   ① `session.follow = handle` —— 晚到的那条把句柄覆盖成**上一条会话**的流；
+ *   ② 它的 sink 还在往 transcript 里写快照 / follow 帧；
+ *   ③ 被覆盖掉的那条流从此再没人 `close()` —— 变成一条永远在推帧的孤儿流。
+ * 代际号让「A→B→A」这种绕回去的情况也不会认错：回来时 epoch 已经变了，老流程照样作废。
+ */
+let sessionEpoch = 0
+
+/** 开一条新流程：领一张代际工牌，拿到的工牌只有最新那条流程能用。 */
+const newFlowTicket = (sessionId: string): FollowEpochTicket => {
+  const ticket = newFollowEpoch(sessionId, sessionEpoch)
+  sessionEpoch = ticket.epoch
+  return ticket
+}
+
+/** 工牌比对用的「当下」。 */
+const epochCursor = (session: ActiveSession): { sessionId: string | null; epoch: number } => ({
+  sessionId: session.sessionId,
+  epoch: sessionEpoch,
+})
+
+/**
+ * 「当下这条流」的工牌（**不推进代际**）。
+ *
+ * 给「本来就在当前流上、只是要等一个 RPC 回来」的动作用（翻页）：它们不该开新代际，
+ * 只需要证明回来时世界还是原来那个（Dart `_checkHistoryOwner(epoch)`）。
+ */
+const currentFlowTicket = (sessionId: string): FollowEpochTicket => ({ sessionId, epoch: sessionEpoch })
+
+/** 这张工牌现在还作不作数（连接换了 / 会话换了 / 代际被顶掉 → false）。 */
+const flowIsCurrent = (session: ActiveSession, ticket: FollowEpochTicket): boolean =>
+  active === session && followEpochIsCurrent(ticket, epochCursor(session))
 
 /* ── 流的分发（按 streamId） ───────────────────────────────────────────── */
 
@@ -1049,6 +1195,22 @@ const cacheBucketNow = (): { serverUrl: string; hostDeviceId: string } | null =>
  */
 const applyRemoteSessionRows = (rows: RemoteSessionRow[]): void => {
   const now = Date.now()
+  /*
+   * —— S3 live —— 列表是**权威对账**点：行的 `running` 是 Host 自己算的。
+   * 刚进 App 时「有一个会话正在跑」就是靠这一句被认出来的
+   * （在那之前只有 `session/follow` 才知道，而那个要先点进去）。
+   */
+  reconcileLiveWithList(
+    rows.flatMap((row) =>
+      row.parentSessionId === undefined && row.origin !== 'subagent'
+        ? [{
+          sessionId: row.sessionId,
+          ...(row.running === undefined ? {} : { running: row.running }),
+          ...(row.updatedAt === undefined ? {} : { updatedAt: row.updatedAt }),
+        }]
+        : [],
+    ),
+  )
   const bucket = cacheBucketNow()
   const remote: CachedSessionRow[] = projectSessions(rows)
   const cached = bucket === null ? [] : (readSessionsCache({ ...bucket, now })?.sessions ?? [])
@@ -1069,6 +1231,16 @@ const applyRemoteSessionRows = (rows: RemoteSessionRow[]): void => {
 
 const persistTimelineNow = (session: ActiveSession, sessionId: string): void => {
   if (session.transcript.items.length === 0) return
+  /*
+   * [S4] 桶键 = **快照 / 帧自带的 sessionId**（`sessionId` 参数），内容却在
+   * `session.transcript` 里。两者对不上就说明这份 transcript 已经不是那个会话的了
+   * （切会话的中间态 / 孤儿流写的），此时写下去就是把 A 的内容存进 B 的桶 ——
+   * 下次打开 B 会先直出一屏 A 的消息，比时间线画错更难发现。宁可少写一屏。
+   */
+  if (!acceptCacheWrite(sessionId, session.sessionId)) {
+    noteSessionDrop('cache')
+    return
+  }
   writeTimelineCache({
     serverUrl: session.server.url,
     hostDeviceId: session.host.deviceId,
@@ -1278,19 +1450,32 @@ const openEventsStream = async (session: ActiveSession): Promise<void> => {
       }
       const forwarded = forwardedSessionEvent(value)
       if (forwarded !== undefined) applyForwardedSessionEvent(forwarded)
+      // —— S3 live —— 全局运行态：`api-session/*` 增量 + 别的会话的待审批（不打开的会话也要知道）
+      noteLiveEventsItem(value)
       // [R6 通知] 记录 `api-session/status` 与其他会话的审批请求（只读，不改下面的分发）
       noteRemoteNotifyItem(value)
       // [R9 红点] 别的会话的待处理审批 / 提问（按 eventId 去重；活动会话不计）
       notePendingInteractionEvent(value)
+      /*
+       * [S4] `$events` 是**连接级**流：上面那几条都是「整个账号」的事（目录增量、通知、
+       * 别处的红点），而下面这两条是**会话级**的 —— 只许进当前会话的时间线。
+       *
+       * 先把 owner 取出来用一次，后面不重复读 `session.sessionId`：一拍之内它不会变，
+       * 但「读两次」的写法一旦将来有人在中间插了 await，两次就会指向不同会话。
+       */
+      const owner = session.sessionId
       // 会话内控制（W2）：`user-questions/request` 要在 `attachWait` 里抢窗口，
       // 所以和「落时间线」分开投喂 —— 时间线归 adapter，应答状态归 sessionControls。
-      ingestEventsItem(value, session.sessionId)
-      if (session.sessionId !== null) {
-        const next = reduceEventsItem(session.transcript.items, value, session.sessionId)
-        if (next !== session.transcript.items) {
-          session.transcript = { ...session.transcript, items: next }
-          syncItems(session)
-        }
+      ingestEventsItem(value, owner)
+      if (owner === null || owner.length === 0) {
+        // 会话还没开（或刚切走）：这条帧没有归宿，别写进任何 transcript
+        noteSessionDrop('frame')
+      } else {
+        // 基线取**这个会话自己**那份（Dart：`ChatTranscript` 是 controller 的字段）
+        const base = session.transcripts.get(owner) ?? session.transcript
+        // `reduceEventsItem` 内部按 `waterfall.agentId` 过滤：不带/不符的 item 原样返回
+        const next = reduceEventsItem(base.items, value, owner)
+        if (next !== base.items) commitTranscript(session, owner, { ...base, items: next })
       }
     },
     onClosed: (reason) => {
@@ -1323,6 +1508,8 @@ const openControlStream = async (session: ActiveSession): Promise<void> => {
   let closed = false
   const sink: StreamSink = {
     onValue: (value) => {
+      // —— S3 live —— 投影是「打开会话后」唯一能校正运行态的东西（`turn` / `turnState` / `status`）
+      noteLiveControlFrame(value)
       applyControlFrame(value)
     },
     onClosed: (reason, failure) => {
@@ -1459,6 +1646,8 @@ const teardownConnection = (): void => {
   stopKeepAliveFlow()
   // [R9 红点] 记账跟着连接作废（界面状态由 INITIAL_STATE 复位）
   resetPendingInteractions()
+  // —— S3 live —— 运行态也一样：旧连接的「谁在跑」一条都不许留到下一次连接
+  resetLiveSessions()
   loginServerUrl = null
   loginTokenClaimed = false
 }
@@ -1539,6 +1728,8 @@ const establishSession = async (
       capabilities: [],
       sessionId: null,
       transcript: createTranscriptState(),
+      // [S4] 每条连接一份「会话 → transcript」的登记表（Dart 的 ChatTranscript per controller）
+      transcripts: new Map(),
       hasMore: false,
       follow: null,
       events: null,
@@ -2680,6 +2871,8 @@ const switchHostFlow = async (targetId: string): Promise<void> => {
             cacheStatus: emptyCacheStatus(),
             error: null,
           })
+          // —— S3 live —— 换 Host = 换一份运行态（否则新 Host 上会亮着旧 Host 的「运行中」）
+          resetLiveSessions()
         },
         connect: async (hostDeviceId: string) => {
           await establishSession(client, server, account, { preferredHostId: hostDeviceId })
@@ -2736,10 +2929,26 @@ const openSessionFlow = async (id: string): Promise<void> => {
     fail(error)
     return
   }
+  /*
+   * [S4] 先领代际工牌，再做任何 await。
+   *
+   * 从这一刻起，**还在飞的上一条 `openSessionFlow`（以及它的 sink）全部作废**：
+   * 它们恢复执行时会发现 `flowIsCurrent()` 为 false，于是既不会覆盖 `session.follow`、
+   * 也不会往 `session.transcript` 写快照 / follow 帧，还会把自己刚开出来的流关掉。
+   * 没有这一步，用户连点两次会话就能让两条流程交错，造成「孤儿 follow 流」——
+   * 那条流永远收不到 `close`，之后每一帧都落进「当时正好开着的会话」里。
+   */
+  const ticket = newFlowTicket(id)
   // 切走之前先把手上的内容写盘（攒着的最后几帧别丢）
   flushTimelinePersist()
   await closeStreamQuietly(session, session.follow)
   session.follow = null
+  // 让位之后可能已经不是我们这一代了（用户又点了一个会话）：后面的初始化一步都不能做，
+  // 否则会把 `session.sessionId` / `state.activeSessionId` 抢回这个会话。
+  if (!flowIsCurrent(session, ticket)) {
+    noteSessionDrop('staleFlow')
+    return
+  }
   session.sessionId = id
   /*
    * R8：**先铺缓存**。有缓存就立刻直出一屏（顶部挂「正在同步…」），
@@ -2752,8 +2961,18 @@ const openSessionFlow = async (id: string): Promise<void> => {
     sessionId: id,
     now: Date.now(),
   })
-  session.transcript =
-    cachedTimeline === null ? createTranscriptState() : { items: cachedTimeline.items, cursor: -1, transient: 0 }
+  /*
+   * [S4] 优先用**内存里这个会话自己的那份**（照 Dart：切走的 `ChatTranscript` 还在
+   * controller 里，切回来接着用；只有从没打开过的会话才走磁盘缓存 → 骨架）。
+   * 这条也让「切走 → 切回」不再闪一下缓存版。
+   */
+  const remembered = session.transcripts.get(id)
+  const painted = remembered ?? (cachedTimeline === null
+    ? createTranscriptState()
+    : { items: cachedTimeline.items, cursor: -1, transient: 0 })
+  session.transcripts.set(id, painted)
+  trimTranscripts(session)
+  session.transcript = painted
   session.hasMore = false
   // 会话内控制（W2）跟着切会话：投影 / 提问 / 队列都是「当前会话」的
   selectControlSession(id)
@@ -2764,16 +2983,25 @@ const openSessionFlow = async (id: string): Promise<void> => {
    * 而且 `pendingInteractionCounts` 本来就不计活动会话，所以不会立刻又亮回来。
    */
   clearPendingInteractions({ sessionId: id })
+  /*
+   * —— S3 live —— 打开会话时先按**全局运行态**把「生成中」摆正：
+   * 打开一个已经在跑的会话时，`turn/start` 早就过去了，follow 首帧不会再有它，
+   * 只看 follow 增量的话 `streaming` 永远是 false —— 用户反馈的「发送按钮不变停止」
+   * 就是这一行没做的事。真实值随后由 `session/control` 投影与 `$events` 继续校正。
+   */
+  const liveRunning = liveRunningOf(id)
+  // 「缓存直出」只在**确实用磁盘缓存画的**那一屏才算（内存里那份不算缓存）
+  const fromCache = remembered === null && cachedTimeline !== null
   useRemoteStore.setState({
     activeSessionId: id,
-    items: cachedTimeline?.items ?? [],
-    streaming: false,
+    items: painted.items,
+    streaming: liveRunning,
     pendingApprovals: [],
     error: null,
     cacheStatus: {
       ...useRemoteStore.getState().cacheStatus,
-      timelineFromCache: cachedTimeline !== null,
-      timelineLoading: cachedTimeline === null,
+      timelineFromCache: fromCache,
+      timelineLoading: remembered === null && cachedTimeline === null,
       timelineSettled: false,
       timelineFailed: false,
     },
@@ -2783,8 +3011,24 @@ const openSessionFlow = async (id: string): Promise<void> => {
   const ready = deferred<void>()
   let applied = false
   let closed = false
+  /*
+   * [S4] 这三条 sink 全都闭包着 `session`（**共享可变对象**）和 `id`（开流那一刻的会话）。
+   * 切走之后 `session.transcript` 已经是别人的了，所以**每次落到 transcript 之前**
+   * 都要用 `ticket` 验一遍：这是不是还是「我服务的那条流」。不验就是串台。
+   */
   const sink: StreamSink = {
     onValue: (value) => {
+      if (!flowIsCurrent(session, ticket)) {
+        // 孤儿帧：这条流早该在切走时关掉了，还推说明上一代没被正确解绑 —— 丢弃
+        noteSessionDrop('staleFlow')
+        return
+      }
+      /*
+       * 读**自己那一份** transcript（Dart：`ChatTranscript` 是 controller 的字段，
+       * `apply()` 只动 `this`，永远不会去读别人的）。这里用登记的格子兜一层：
+       * 就算 `session.transcript` 因为别的路径被换过，归约基线也不会变成别人的内容。
+       */
+      const current = session.transcripts.get(id) ?? session.transcript
       if (!applied) {
         const snapshot = parseSnapshot(value)
         if (snapshot === null) {
@@ -2793,26 +3037,35 @@ const openSessionFlow = async (id: string): Promise<void> => {
         }
         // R8：快照是权威窗口，但**不丢**本地已经画出来的东西 —— 同 id 服务端覆盖、
         // 乐观行按 requestRpcId 对齐、更早的历史页留在头部（`cache.mergeTimelineItems`）。
-        const local = session.transcript.items
         const fresh = reduceSnapshot(snapshot, id)
-        session.transcript = { ...fresh, items: mergeTimelineItems(local, fresh.items) }
+        const next = { ...fresh, items: mergeTimelineItems(current.items, fresh.items) }
         session.hasMore = snapshot.hasMore
         applied = true
-        syncItems(session)
+        // 只往 `id` 这个会话的格子里写（+ 它是活动会话时才推给屏幕）
+        commitTranscript(session, id, next)
         setPaging(snapshot.hasMore, false)
         patchTimelineStatus(id, { timelineFromCache: false, timelineLoading: false, timelineSettled: true })
         scheduleTimelinePersist(session, id)
         ready.resolve()
         return
       }
-      session.transcript = reduceFollowItem(session.transcript, value, id)
+      const next = reduceFollowItem(current, value, id)
       const running = runningForFollowItem(value)
       if (running !== undefined) useRemoteStore.setState({ streaming: running })
-      syncItems(session)
+      commitTranscript(session, id, next)
       scheduleTimelinePersist(session, id)
     },
     onClosed: (reason, failure) => {
       closed = true
+      /*
+       * 只有**自己还是当前那条流**时才能动共享槽位：`session.follow` 可能已经被
+       * 新一代的 openSessionFlow 换成了别人的句柄，这里清掉等于把新流「弄丢」。
+       */
+      if (!flowIsCurrent(session, ticket)) {
+        noteSessionDrop('staleFlow')
+        if (!applied) ready.reject(new RemoteApiError(failure?.code ?? 'STREAM_CLOSED', '会话流在快照之前就关闭了'))
+        return
+      }
       session.follow = null
       useRemoteStore.setState({ streaming: false })
       if (!applied) {
@@ -2836,14 +3089,29 @@ const openSessionFlow = async (id: string): Promise<void> => {
         }),
       sink,
     )
+    /*
+     * [S4] 关键的一行：`await openFollow` 期间用户可能已经切走了。这时**绝不能**
+     * `session.follow = handle` —— 那会把新一代的句柄顶掉，而自己这条流从此没人关，
+     * 变成一条永久推帧的孤儿流（串台的源头）。自己开的流自己关。
+     */
+    if (!flowIsCurrent(session, ticket)) {
+      noteSessionDrop('staleFlow')
+      await closeStreamQuietly(session, handle)
+      return
+    }
     // 同上：缓冲帧里可能已经带了 `closed`，别把死句柄存回去。
     session.follow = closed ? null : handle
     await withTimeout(ready.promise, SNAPSHOT_TIMEOUT_MS, 'RPC_TIMEOUT', '等待会话快照超时')
   } catch (error) {
-    await closeStreamQuietly(session, session.follow)
-    session.follow = null
-    patchTimelineStatus(id, { timelineLoading: false, timelineSettled: true, timelineFailed: true })
-    fail(error)
+    // 只有自己仍是当前流才收尾共享槽位；否则关自己那份句柄就够了
+    if (flowIsCurrent(session, ticket)) {
+      await closeStreamQuietly(session, session.follow)
+      session.follow = null
+      patchTimelineStatus(id, { timelineLoading: false, timelineSettled: true, timelineFailed: true })
+      fail(error)
+      return
+    }
+    noteSessionDrop('staleFlow')
   }
 }
 
@@ -2858,6 +3126,12 @@ const loadOlderFlow = async (): Promise<void> => {
   const id = session.sessionId
   if (id === null) return
   if (!session.hasMore || useRemotePaging.getState().loadingOlder) return
+  /*
+   * [S4] 翻页也领工牌（Dart `_checkHistoryOwner(epoch)`）：这次 `history` RPC 回来时，
+   * 必须还是**同一个会话、同一条 follow**，否则这一页属于上一条会话，不能落到当前时间线。
+   * 注意这里**不能** `newFlowTicket()` —— 那是「开新流」，会把当前 follow 的工牌顶掉。
+   */
+  const ticket = currentFlowTicket(id)
   const beforeSeq = oldestSeqOfItems(session.transcript.items)
   // 没有任何带 seq 的行 = 没锚点，只能承认没有更早的（比乱发一个 beforeSeq 安全）。
   if (beforeSeq === undefined) {
@@ -2872,18 +3146,28 @@ const loadOlderFlow = async (): Promise<void> => {
       ...(session.transcript.cursor >= 0 ? { throughSeq: session.transcript.cursor } : {}),
       maxMessages: DEFAULT_HISTORY_PAGE_SIZE,
     })
+    /*
+     * [S4] `pageHistory` 回来时会话可能已经换了。dsh-Go 在同一位置的做法是
+     * `_checkHistoryOwner(epoch)`（`session_api.dart:1325`）：本次翻页领的 epoch
+     * 必须还是当前那条 follow 的，否则这次结果整份作废。
+     */
+    if (!historyOwnerIsCurrent(ticket, epochCursor(session))) {
+      noteSessionDrop('staleAction')
+      return
+    }
     session.hasMore = page.hasMore
     const older = foldHistory(historyEntriesFromRecords(page.records), id, false)
     if (older.length > 0) {
-      session.transcript = { ...session.transcript, items: prependHistory(older, session.transcript.items) }
-      syncItems(session)
+      // 归到 `id` 自己的格子（`ChatTranscript.prependHistory` 的同义操作）
+      commitTranscript(session, id, { ...session.transcript, items: prependHistory(older, session.transcript.items) })
       // R8：翻页追加到头部（`prependHistory` 自己去重），顺手把更大的窗口写进缓存
       scheduleTimelinePersist(session, id)
     }
   } catch (error) {
     fail(error)
   } finally {
-    setPaging(session.hasMore, false)
+    // 切走之后这个游标属于上一条会话，别去动它
+    if (belongsToSession(session.sessionId, id)) setPaging(session.hasMore, false)
   }
 }
 
@@ -2912,34 +3196,49 @@ const sendFlow = async (
   // 乐观上屏：requestId 同时是 `session/prompt` 的幂等键与 Host 回显的 `source.rpcId`，
   // `addUserMessage()` 靠它把这条本地行替换成权威行。
   const requestId = newRequestId()
-  session.transcript = {
+  // [S4] 乐观行落进 `id` 自己的格子（Dart：`_pending` 是 ChatController 的字段，天然属于该会话）
+  commitTranscript(session, id, {
     ...session.transcript,
     items: addOptimisticUserMessage(session.transcript.items, id, text, requestId),
-  }
+  })
   useRemoteStore.setState({ streaming: true, error: null })
-  syncItems(session)
 
   try {
     await sendPrompt(session.link, id, text, attachments, {
       requestId,
       ...(mode === undefined ? {} : { mode }),
     })
+    /*
+     * [S4] Host 已受理，但**此刻的活动会话可能已经不是 id 了**（用户发完就切走）。
+     * 乐观行属于 `id`，回写也必须只回 `id`：否则 `clearSendState` 会跑在别人的
+     * transcript 上，运气不好还会把 B 的内容当成 A 的写进缓存。
+     *
+     * 为什么这里比 sessionId 而不是比代际：A→B→A 切回来时，这条乐观行确实还是 A 的，
+     * 落回 A 是对的（代际只用来挡「开流」这种抢共享槽位的动作）。
+     */
+    if (!belongsToSession(session.sessionId, id)) {
+      noteSessionDrop('staleAction')
+      return
+    }
     // Host 已受理：清掉「发送中」挂起标记。steer/插话不一定回显这条消息，
     // 不清的话它会永远停在发送中（真机反馈的 bug）。
-    session.transcript = {
+    commitTranscript(session, id, {
       ...session.transcript,
       items: clearSendState(session.transcript.items, requestId),
-    }
-    syncItems(session)
+    })
   } catch (error) {
     // 失败**不删行**：把原因留在行上（契约要求「可读错误」给到 UI），同时写进 state.error。
     const info = describeRemoteError(error)
-    session.transcript = {
-      ...session.transcript,
-      items: markSendState(session.transcript.items, requestId, 'failed', info.text),
+    if (belongsToSession(session.sessionId, id)) {
+      commitTranscript(session, id, {
+        ...session.transcript,
+        items: markSendState(session.transcript.items, requestId, 'failed', info.text),
+      })
+      useRemoteStore.setState({ streaming: false })
+    } else {
+      // 行在 id 的 transcript 里（切走时已随缓存/重新打开保留），别往别人的上面盖
+      noteSessionDrop('staleAction')
     }
-    useRemoteStore.setState({ streaming: false })
-    syncItems(session)
     fail(error)
   }
 }
@@ -2974,18 +3273,31 @@ const respondApprovalFlow = async (eventId: string, decision: ApprovalDecision):
     fail(new RemoteApiError('EVENT_STREAM_NOT_READY', '还没拿到 $events 的 clientId'))
     return
   }
+  /*
+   * [S4] 应答属于**点下去那一刻的会话**。`respondApprovalApi` 回来时用户可能已经切走，
+   * 这时把卡片落定到活动 transcript 就是改别人的审批卡。
+   */
+  const owner = session.sessionId
+  if (owner === null) {
+    fail(new RemoteApiError('SESSION_NOT_OPEN', '先选一个会话再应答审批'))
+    return
+  }
   try {
     await respondApprovalApi(session.link, { clientId: session.eventClientId, eventId, decision })
+    if (!belongsToSession(session.sessionId, owner)) {
+      noteSessionDrop('staleAction')
+      clearPendingInteractions({ eventId })
+      return
+    }
     // 本地先落定，不必等 Host 回投（官方客户端也是这么做的）。
-    session.transcript = {
+    commitTranscript(session, owner, {
       ...session.transcript,
       items: resolveApprovalItem(
         session.transcript.items,
         eventId,
         decision === 'allow_once' ? 'allowed-once' : 'rejected',
       ),
-    }
-    syncItems(session)
+    })
     // [R9 红点] 本机应答完 = 这条不再「等你点」了
     clearPendingInteractions({ eventId })
   } catch (error) {
@@ -2998,12 +3310,16 @@ const respondApprovalFlow = async (eventId: string, decision: ApprovalDecision):
        * `PERMISSION_NOT_PENDING`，但那一条其实已经 allowed-once 了 ——
        * 再把它改成「已失效」会把一次成功的允许显示成失败（真实发生过）。
        */
+      if (!belongsToSession(session.sessionId, owner)) {
+        noteSessionDrop('staleAction')
+        clearPendingInteractions({ eventId })
+        return
+      }
       if (shouldExpireApproval(session.transcript.items, eventId)) {
-        session.transcript = {
+        commitTranscript(session, owner, {
           ...session.transcript,
           items: resolveApprovalItem(session.transcript.items, eventId, 'unavailable'),
-        }
-        syncItems(session)
+        })
       }
       clearPendingInteractions({ eventId })
     }
@@ -3164,6 +3480,22 @@ export const useRemoteStore = create<RemoteState>(() => ({
 
 /** 带附件发一条消息（P1 的收据 / 图片走这里；契约里的 `send()` 只发文本）。 */
 export const sendRemoteMessage = sendFlow
+
+/**
+ * 诊断用：会话路由的丢弃计数（S4）。
+ *
+ * 真机排查「消息串会话」时先看这里：正常使用应该**恒为 0**。
+ *   - `staleFlow` 涨：切会话太频繁，旧 follow 流的帧被挡下来了（说明修复在生效）；
+ *   - `staleAction` 涨：发送 / 翻页 / 审批的异步结果回来时会话已经换了；
+ *   - `cache` 涨：有内容想写进不属于它的缓存桶（被挡住）；
+ *   - `frame` 涨：`$events` 帧到达时光没有活动会话（切会话的中间态）。
+ *
+ * 等价入口：`__dsDebug.sessionDrops`（同一个计数器；默认不打日志）。
+ */
+export const remoteSessionDrops = sessionDropSnapshot
+
+// 模块加载即把 `__dsDebug.sessionDrops` 准备好：真机上不必先进过任何分支就能看
+ensureSessionDebug()
 
 /** 当前连接是否可用（`phase === 'ready'`）。 */
 export const isRemoteReady = (): boolean => useRemoteStore.getState().phase === 'ready'
@@ -3427,7 +3759,17 @@ export interface NotifyOtherSession {
   running: boolean
   /** 待审批的工具名（只有别的会话走这里；活动会话用时间线） */
   approvalTool?: string
+  /**
+   * —— S3 live —— 待审批**条数**：来自全局运行态的记账（`liveSessions.ts`）。
+   *
+   * 为什么需要它：`approvalTool` 只有「走 `$events` waterfall 并且拿到 toolName」时才有，
+   * 而重连后 Host 只重投 pending 的**那一类**信号不一定带工具名 —— 只知道「有几条在等你」
+   * 也远好过整个会话从通知栏里消失。
+   */
+  approvalCount?: number
   approvalTs?: number
+  /** —— S3 live —— 正在调用的工具展示名（只有当前打开的会话才有；别的会话 Host 不转发） */
+  tool?: string
   /** 最近活动时间（排序用） */
   updatedAt: number
 }
@@ -3456,15 +3798,17 @@ export const assembleNotifySnapshot = (input: NotifySnapshotInput): WorkPush | n
     else rest.push({ item: input.active, at: input.activeUpdatedAt })
   }
   for (const other of input.others) {
-    if (other.approvalTool !== undefined && other.approvalTool.length > 0) {
-      const tool = other.approvalTool
+    // [S3] 待审批：有工具名就说工具名，只知道条数也得把它说出来
+    const approvalCount = other.approvalCount ?? (other.approvalTool !== undefined && other.approvalTool.length > 0 ? 1 : 0)
+    if (approvalCount > 0) {
+      const tool = other.approvalTool?.trim() ?? ''
       approvals.push({
         item: {
           sessionId: other.sessionId,
           title: other.title,
           state: 'approval',
-          tool,
-          detail: `等待你确认 ${tool}`,
+          ...(tool.length === 0 ? {} : { tool }),
+          detail: tool.length === 0 ? '有一个操作需要你确认' : `等待你确认 ${tool}`,
           ts: other.approvalTs ?? other.updatedAt,
         },
         at: other.approvalTs ?? other.updatedAt,
@@ -3472,8 +3816,16 @@ export const assembleNotifySnapshot = (input: NotifySnapshotInput): WorkPush | n
       continue
     }
     if (!other.running) continue
+    const tool = other.tool?.trim() ?? ''
     rest.push({
-      item: { sessionId: other.sessionId, title: other.title, state: 'running', detail: '正在回复…', ts: other.updatedAt },
+      // 映射本身在 `notify.ts`（`deriveOtherWorkItem`）：这条的**来源**是全局运行态，
+      // 不是时间线，所以映射规则放在通知层而不是数据层。
+      item: deriveOtherWorkItem({
+        sessionId: other.sessionId,
+        title: other.title,
+        ...(tool.length === 0 ? {} : { tool }),
+        ts: other.updatedAt,
+      }),
       at: other.updatedAt,
     })
   }
@@ -3610,6 +3962,33 @@ export const scheduleRemoteNotifySync = (): void => {
   }, NOTIFY_SYNC_COALESCE_MS)
 }
 
+/**
+ * [S3] `notifySignals`（R6 的记账）→ 交给快照的那一列。
+ *
+ * 它与全局运行态**同源冗余**：两边都吃 `api-session/status` / `approval/request`。
+ * 区别只在初始条件 —— `notifySignals` 从「这一代连接收到的第一个 status」开始记账，
+ * 所以「连上时它已经在跑」那种会话它永远不会知道；反过来它多带一个**工具名**
+ * （waterfall 的 `request.toolName`），这正是运行态里没有的东西，于是两条都要保留。
+ */
+const signalsAsOthers = (
+  activeSessionId: string | null,
+  state: RemoteState,
+): NotifyOtherSession[] => {
+  const others: NotifyOtherSession[] = []
+  for (const [sessionId, signal] of notifySignals) {
+    if (sessionId === activeSessionId) continue
+    if (!signal.running && signal.approval === null) continue
+    others.push({
+      sessionId,
+      title: notifyTitleOf(state.sessions, sessionId),
+      running: signal.running,
+      ...(signal.approval === null ? {} : { approvalTool: signal.approval.tool, approvalTs: signal.approval.ts }),
+      updatedAt: notifyUpdatedAtOf(state.sessions, sessionId),
+    })
+  }
+  return others
+}
+
 const buildNotifySnapshot = (state: RemoteState, active: WorkItem | null): WorkPush | null => {
   const activeSessionId = state.activeSessionId
   /*
@@ -3630,17 +4009,42 @@ const buildNotifySnapshot = (state: RemoteState, active: WorkItem | null): WorkP
     }
   }
   const others: NotifyOtherSession[] = []
-  for (const [sessionId, signal] of notifySignals) {
-    if (sessionId === activeSessionId) continue
-    if (!signal.running && signal.approval === null) continue
-    others.push({
-      sessionId,
-      title: notifyTitleOf(state.sessions, sessionId),
-      running: signal.running,
-      ...(signal.approval === null ? {} : { approvalTool: signal.approval.tool, approvalTs: signal.approval.ts }),
-      updatedAt: notifyUpdatedAtOf(state.sessions, sessionId),
+  /*
+   * —— S3 live —— 别的会话 = **全局运行态** ∪ `notifySignals`（R6 的记账）。
+   *
+   * 为什么要有这条并集：`notifySignals` 只在「这一代连接里收到过 `api-session/status`」
+   * 时才有条目，而用户反馈的正是「进 App 时它已经在跑」—— 那一轮 `status` 早发完了，
+   * 于是通知里根本没有它。`liveSessions` 的初值来自 `session/list` 行的 `running`，
+   * 所以「没打开过的运行中会话」这时才第一次出现在通知里。
+   *
+   * 两边都是**同源冗余**（都吃 `api-session/*` 与 waterfall），任一边漏了不会整体失效。
+   * 合并规则（取 running 的或、审批取大值）在 `liveNotifyOthers()` 之外这里只做一次去重。
+   */
+  const liveOthers = liveNotifyOthers(useLiveSessions.getState(), {
+    activeSessionId,
+    titleOf: (sessionId) => notifyTitleOf(state.sessions, sessionId),
+    updatedAtOf: (sessionId) => notifyUpdatedAtOf(state.sessions, sessionId),
+  })
+  const merged = new Map<string, NotifyOtherSession>()
+  for (const other of [...liveOthers, ...signalsAsOthers(activeSessionId, state)]) {
+    const existing = merged.get(other.sessionId)
+    if (existing === undefined) {
+      merged.set(other.sessionId, other)
+      continue
+    }
+    // 两条来源都见过它：在跑的取「谁都说在跑」，审批取较大的条数
+    merged.set(other.sessionId, {
+      ...existing,
+      // 工具名只有运行态那条有
+      ...(existing.tool === undefined && other.tool !== undefined ? { tool: other.tool } : {}),
+      ...(other.approvalTool === undefined ? {} : { approvalTool: other.approvalTool }),
+      ...(other.approvalTs === undefined ? {} : { approvalTs: other.approvalTs }),
+      running: existing.running || other.running,
+      approvalCount: Math.max(existing.approvalCount ?? 0, other.approvalCount ?? 0),
+      updatedAt: Math.max(existing.updatedAt, other.updatedAt),
     })
   }
+  for (const other of merged.values()) others.push(other)
   const finished: WorkItem[] = []
   for (const entry of notifyFinished.values()) finished.push(entry.item)
   const activeItem = active !== null && (active.state === 'running' || active.state === 'approval') ? active : null
@@ -3782,6 +4186,49 @@ export const installRemoteNotify = (): void => {
 }
 
 installRemoteNotify()
+
+/* ────────────────────────────────────────────────────────────────────────
+ * 九、[S3 全局运行态] 接线：信号进（`liveSessions.ts`）→ 状态出（`state.streaming`）
+ *
+ * 为什么必须有这一段：按钮、提示语、通知三处读的都是 `state.streaming`，
+ * 而它原来只由「当前会话的 follow 增量」推导 —— 也就是说**用户不点进去，谁在跑都不知道**。
+ * 这一段把两边的方向接起来：
+ *
+ *   ① 时间线 → 运行态：打开着的会话调了什么工具（别的会话 Host 不转发工具名）；
+ *   ② 运行态 → `state.streaming`：只在「当前会话的运行态真的翻转」时写一次，
+ *      不是每帧都写 —— 否则会把 `sendFlow` 的乐观值洗掉（发送瞬间闪一下发送键）。
+ *
+ * 订阅挂在 store 模块上（不是某个页面），所以**任何页面**都成立；幂等。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+const installLiveSessionBridge = (): void => {
+  useRemoteStore.subscribe((state, previous) => {
+    try {
+      if (state.activeSessionId === null) return
+      if (state.activeSessionId === previous.activeSessionId && state.items === previous.items) return
+      // 时间线里最后一条还在 running 的工具 = 「它现在正在干什么」
+      const runningTool = notifyLatestItem(state.items, (item) => item.kind === 'tool' && item.state === 'running')
+      noteLiveTool(state.activeSessionId, runningTool === undefined ? undefined : notifyToolLabel(runningTool))
+    } catch {
+      // 订阅里抛错会把 zustand 的 setState 弄崩：全部吞掉
+    }
+  })
+  useLiveSessions.subscribe((state, previous) => {
+    try {
+      const activeId = useRemoteStore.getState().activeSessionId
+      if (activeId === null) return
+      const before = previous.byId[activeId]?.running === true
+      const next = state.byId[activeId]?.running === true
+      if (before === next) return
+      if (useRemoteStore.getState().streaming === next) return
+      useRemoteStore.setState({ streaming: next })
+    } catch {
+      // 同上
+    }
+  })
+}
+
+installLiveSessionBridge()
 
 /*
  * [R14] 点通知直达会话：装在 store 模块上，和上面两条同一个位置 ——
@@ -3927,4 +4374,58 @@ export const notePendingInteractionEvent = (value: unknown): void => {
   } catch {
     // 静默：红点只是界面提示
   }
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * 九、[S1 无感重载] 启动时用缓存铺时间线（不依赖连接）
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * 重载之后**先把上一次那个会话的时间线铺上**，不等连接就绪。
+ *
+ * ## 为什么必须单独有这么一条
+ *
+ * `openSession(id)` 的第一步是 `requireSession()` —— 还没有活连接时它直接失败，
+ * 于是「缓存直出」这条设计在「页面刚重载」这个最需要它的时刻恰好用不上：
+ * 用户先看到一屏空白，直到握手成功、列表拉回、会话重开。
+ *
+ * 而缓存桶（`serverUrl + hostDeviceId`）**在连接之前就算得出来**：`cacheBucketNow()`
+ * 没有活连接时会退回盘上那条 `last-session`。所以这里只读一次 `localStorage`，
+ * 就能把上一屏原样铺出来，顶部挂「正在同步…」——`cacheStatus` 里
+ * `timelineFromCache=true` + `timelineSettled=false` 正是那条提示的开关
+ * （判定见 `cache.ts` 的 `timelineHintState()`）。
+ *
+ * ## 三条纪律
+ *
+ * 1. **不抢**：已经有会话开着、或时间线里已经有内容，就什么都不做（幂等、可重复调）；
+ * 2. **不发请求**：一条网络都不打，只读盘；
+ * 3. **不伪装成已同步**：`timelineSettled` 保持 false，界面才敢说「正在同步」而不是
+ *    「这就是全部」。真正的快照由随后的 `openSession()` 落定。
+ *
+ * @param sessionId 要铺哪个会话（调用方从 `uiState` 快照里读到，见 `uiState.ts`）
+ */
+export const hydrateCachedTimeline = (sessionId: string): void => {
+  if (sessionId.length === 0) return
+  const state = useRemoteStore.getState()
+  if (state.activeSessionId !== null || state.items.length > 0) return
+  const bucket = cacheBucketNow()
+  if (bucket === null) return
+  const cached = readTimelineCache({ ...bucket, sessionId, now: Date.now() })
+  if (cached === null || cached.items.length === 0) return
+  // 读盘期间可能已经有会话开起来了（自动恢复很快）：再查一次，别拿缓存盖掉新的
+  const latest = useRemoteStore.getState()
+  if (latest.activeSessionId !== null || latest.items.length > 0) return
+  useRemoteStore.setState({
+    activeSessionId: sessionId,
+    items: cached.items,
+    streaming: false,
+    cacheStatus: {
+      ...latest.cacheStatus,
+      timelineFromCache: true,
+      timelineLoading: false,
+      timelineSettled: false,
+      timelineFailed: false,
+    },
+  })
+  setPaging(false, false)
 }

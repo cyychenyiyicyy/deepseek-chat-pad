@@ -209,8 +209,40 @@ export const normalizeWorkPush = (push: WorkPush, now: () => number = () => Date
   return { items, ...(activeSessionId.length === 0 ? {} : { activeSessionId }) }
 }
 
-/** 逐字段浅比较（载荷没变就不发；比 JSON 字符串比较更明确，也不受键序影响） */
-export const sameWorkPush = (a: WorkPush, b: WorkPush): boolean => {
+/**
+ * [S3] 「别的会话」（用户**没打开**的那个）在通知里长什么样。
+ *
+ * 来源不是时间线，而是**全局运行态**（`liveSessions.ts`）：`session/list` 行的
+ * `running` + `$events` 的 `api-session/*`。所以「进 App 时已经在跑、一次都没点开」
+ * 的会话也能进 `items`（这正是用户反馈的那一条：以前只有打开过的会话才会出现）。
+ *
+ * 三条规矩与 `deriveNotifyItem()` 一致：只发摘要、不发正文；工具名是**展示名**；
+ * 不知道工具名时不编一个 —— 说「正在回复…」而不是挂一个上一轮的工具名。
+ */
+export interface WorkOtherInput {
+  sessionId: string
+  title: string
+  /** 正在调用的工具展示名（没有就不写） */
+  tool?: string
+  /** 事件时间（用于 digest，同一条事件 ts 稳定才不会反复响铃） */
+  ts: number
+}
+
+export const deriveOtherWorkItem = (input: WorkOtherInput): WorkItem => {
+  const tool = cleanText(input.tool, NOTIFY_TOOL_MAX)
+  const title = cleanText(input.title, NOTIFY_TITLE_MAX)
+  const stamp = Number.isFinite(input.ts) && input.ts > 0 ? Math.round(input.ts) : Date.now()
+  return {
+    sessionId: input.sessionId,
+    title: title.length === 0 ? '会话' : title,
+    state: 'running',
+    ...(tool.length === 0 ? {} : { tool }),
+    detail: tool.length === 0 ? '正在回复…' : `正在调用 ${tool}`,
+    ts: stamp,
+  }
+}
+
+/** 逐字段浅比较（载荷没变就不发；比 JSON 字符串比较更明确，也不受键序影响） */export const sameWorkPush = (a: WorkPush, b: WorkPush): boolean => {
   if (a.activeSessionId !== b.activeSessionId) return false
   if (a.items.length !== b.items.length) return false
   return a.items.every((item, index) => {

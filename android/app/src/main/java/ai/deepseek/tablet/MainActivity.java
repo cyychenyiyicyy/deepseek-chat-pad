@@ -16,6 +16,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -45,6 +46,7 @@ import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
+import androidx.lifecycle.Lifecycle;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -105,6 +107,29 @@ public final class MainActivity extends AppCompatActivity {
 
     private static final long ACTIVITY_RESTART_DELAY_MS = 600L;
 
+    /* ── 渲染进程回收后的恢复节奏（S1） ───────────────────────────────────
+     * 「切出去再回来就整页重来」的根因是：渲染进程在后台被回收之后，回前台一律 recreate()。
+     * 现在分三档，前两档都**不动 Activity**，只有真的崩溃循环才重建（见 handleRendererLoss）。 */
+
+    /**
+     * 失败窗口：这段时间内连续丢渲染进程才算「崩溃循环」。
+     *
+     * <p>为什么需要窗口：单次回收（内存压力）在国产 ROM 上极常见，一失败就重建 Activity 等于
+     * 把用户刚回来的那一屏直接扔掉；而「加载完立刻又死」才是真的坏了，那种必须升级。
+     */
+    private static final long RENDERER_FAILURE_WINDOW_MS = 60_000L;
+    /** 窗口内允许的**就地**恢复次数；超过就重建 Activity（页面自己能稳住才是常态） */
+    private static final int MAX_IN_PLACE_RECOVERY = 2;
+    /**
+     * 页面加载完成后多久算「这一次真的活着」。
+     *
+     * <p>必须在「加载完成」之后再等一段：只看 {@code onPageFinished} 会把「加载完就死」也当成
+     * 恢复成功，于是崩溃循环永远升级不了（无限重新加载）。活到这个点才清零失败计数。
+     */
+    private static final long RENDERER_HEALTHY_AFTER_MS = 15_000L;
+    /** 页面 UI 状态中转箱的容量上限（一次快照 JSON 的字节数；草稿本来就限 8 KB/条） */
+    private static final int UI_RELAY_MAX_CHARS = 64 * 1024;
+
     /** 出站必须是 https：初始 URL 在 ProxyHandler 里已校验，这里兜住重定向到 http 的情况。 */
     private static final Interceptor HTTPS_ONLY_INTERCEPTOR = chain -> {
         String scheme = chain.request().url().scheme();
@@ -131,13 +156,36 @@ public final class MainActivity extends AppCompatActivity {
     private boolean pendingMultiple;
     private String loadedUrl;
     private boolean renderProcessRestartScheduled;
+    /** 当前 WebView 的底色（跟着网页主题走；WebView 就地重建时用它，避免闪一下深色） */
+    private int surfaceColor = COLOR_BACKGROUND;
     /**
      * 应用是否可见。后台时绝不做任何会把界面拉回前台的操作——
      * 系统在后台回收 WebView 渲染进程非常常见，若此时重建 Activity 就会「自己跳出来」。
      */
     private boolean appVisible;
-    /** 后台期间渲染进程被回收过，等用户自己回来时再重建 */
-    private boolean rendererNeedsRebuild;
+
+    /* ── 渲染进程丢失后的恢复状态（S1） ───────────────────────────────────
+     * 以前只有一个 `rendererNeedsRebuild`：只要在后台丢过渲染进程，回前台就 recreate()
+     * 整个 Activity —— 而 onDestroy 会 stop() 本地服务器（连带拆 WS 隧道、停掉保活前台服务），
+     * 再走一遍 startServerAsync + loadUrl。用户看到的就是「切出去一下回来整页重来」。
+     * 现在拆成「待恢复 / 已连续失败」两个标记，配合就地重建 WebView（见 rebuildWebViewInPlace）。 */
+
+    /** 后台期间渲染进程丢过，等用户回来再恢复（**不再**一回来就 recreate） */
+    private boolean rendererRecoveryPending;
+    /** 待恢复时直接升级成「重建 Activity」：连续失败已经发生过了 */
+    private boolean rendererRecoveryEscalate;
+    /** 当前失败窗口内已经就地恢复过几次 */
+    private int rendererRecoveryFailures;
+    /** 失败窗口起点（`SystemClock.uptimeMillis()`；0 = 没有正在观察的失败） */
+    private long rendererFailureWindowStart;
+    /**
+     * 页面 UI 状态中转箱（S1）。
+     *
+     * <p>**必须是 Activity 上的同一个实例**：WebView 就地重建时 {@link #configureWebView()}
+     * 会重新注册一次 JS 桥，如果每次都 new 一个，刚存进去的那份快照就跟着旧实例一起丢了
+     * （这正是「草稿恢复不了」的坑）。
+     */
+    private final UiStateRelay uiStateRelay = new UiStateRelay();
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -189,6 +237,7 @@ public final class MainActivity extends AppCompatActivity {
             controller.setAppearanceLightNavigationBars(!dark);
         }
         int background = dark ? COLOR_BACKGROUND : COLOR_BACKGROUND_LIGHT;
+        surfaceColor = background;
         window.setBackgroundDrawable(new ColorDrawable(background));
         if (rootLayout != null) {
             rootLayout.setBackgroundColor(background);
@@ -228,20 +277,34 @@ public final class MainActivity extends AppCompatActivity {
         super.onResume();
         appVisible = true;
         // 每次真的回到前台都检查一次：通知权限（13+，只问一次）与后台保活自愈。
-        // 放在这个位置（早于下面 rendererNeedsRebuild 的提前 return）才能保证重建路径也走到。
+        // 放在这个位置（早于下面渲染进程恢复的提前 return）才能保证恢复路径也走到。
         requestNotificationPermissionOnce();
         restoreKeepAliveIfNeeded();
-        if (rendererNeedsRebuild) {
-            // 后台被回收过，用户已经回来了，这时重建是可见且合理的
-            rendererNeedsRebuild = false;
-            renderProcessRestartScheduled = false;
-            Log.i(TAG, "rebuilding after background renderer loss");
-            mainHandler.post(() -> {
-                if (!isFinishing() && !isDestroyed()) {
-                    recreate();
-                }
-            });
-            return;
+        if (rendererRecoveryPending) {
+            /*
+             * 后台丢过渲染进程，用户现在回来了：**只重建 WebView**，不重建 Activity。
+             *
+             * 为什么不是 recreate()：Activity 重建会把本地服务器、WS 隧道、保活前台服务
+             * 一起拆掉（onDestroy），再整页加载一遍。而用户真正在意的是「回来的还是原来那一屏」。
+             * 换一个 WebView 只丢页面本身，服务器端口不变 → origin 不变 → 缓存照样直出，
+             * 页面还能从原生中转箱（DSNativeUi）里把草稿 / 滚动位置捞回来。
+             */
+            rendererRecoveryPending = false;
+            boolean escalated = rendererRecoveryEscalate;
+            rendererRecoveryEscalate = false;
+            if (!escalated && rebuildWebViewInPlace()) {
+                Log.i(TAG, "renderer recovery on resume: WebView rebuilt in place (no activity recreate)");
+            } else {
+                // 连续失败 / 连 WebView 都造不出来：这时重建 Activity 才是合理的
+                renderProcessRestartScheduled = false;
+                Log.i(TAG, "renderer recovery on resume: escalating to activity recreate");
+                mainHandler.post(() -> {
+                    if (!isFinishing() && !isDestroyed()) {
+                        recreate();
+                    }
+                });
+                return;
+            }
         }
         if (webView != null) {
             webView.resumeTimers();
@@ -548,11 +611,7 @@ public final class MainActivity extends AppCompatActivity {
         rootLayout.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        webView = new WebView(this);
-        webView.setLayoutParams(new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
-        webView.setBackgroundColor(COLOR_BACKGROUND);
-        webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        webView = newShellWebView();
         rootLayout.addView(webView);
 
         errorView = new TextView(this);
@@ -596,6 +655,21 @@ public final class MainActivity extends AppCompatActivity {
         });
 
         setContentView(rootLayout);
+    }
+
+    /**
+     * 造一个主 WebView（回调、JS 桥由 {@link #configureWebView()} 装，摆放位置由调用方决定）。
+     *
+     * <p>抽出来的唯一原因：渲染进程被回收后要**就地**换一个新的（见
+     * {@link #rebuildWebViewInPlace()}），而那份配置必须和启动时逐字一致 —— 抄两遍迟早会漏。
+     */
+    private WebView newShellWebView() {
+        WebView view = new WebView(this);
+        view.setLayoutParams(new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        view.setBackgroundColor(surfaceColor);
+        view.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        return view;
     }
 
     /** 最近一次拿到的状态栏高度（**物理像素**，换算成 CSS px 由 publishSafeTop 负责）；
@@ -674,6 +748,9 @@ public final class MainActivity extends AppCompatActivity {
         webView.addJavascriptInterface(new ThemeBridge(), "DSNative");
         // 来源记忆的读/清（页面长按「+」时用 reset() 换来源，见 PickerBridge 注释）
         webView.addJavascriptInterface(new PickerBridge(), "DSNativePicker");
+        // UI 状态中转箱（S1）：页面重载 / WebView 就地重建后，把草稿与滚动位置捞回来。
+        // 只活在内存里，退出应用即消失（见 UiStateRelay 的注释）。
+        webView.addJavascriptInterface(uiStateRelay, "DSNativeUi");
 
         webView.setWebViewClient(new ShellWebViewClient());
         webView.setWebChromeClient(new ShellWebChromeClient());
@@ -805,6 +882,10 @@ public final class MainActivity extends AppCompatActivity {
             if (lastSafeTop > 0) {
                 publishSafeTop(lastSafeTop);
             }
+            // 「加载完成」不等于「这一次真的活着」：见 markRendererHealthy 的注释
+            mainHandler.removeCallbacks(markRendererHealthy);
+            mainHandler.postDelayed(markRendererHealthy, RENDERER_HEALTHY_AFTER_MS);
+            Log.i(TAG, "page finished: " + url);
         }
 
         @Override
@@ -833,22 +914,16 @@ public final class MainActivity extends AppCompatActivity {
         @Override
         public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
             boolean crashed = detail != null && detail.didCrash();
-            // 渲染进程 OOM/崩溃：返回 true 吃掉这次崩溃，重建 Activity 而不是闪退
-            Log.e(TAG, "render process gone (crashed=" + crashed + ")");
-            // 这个回调就在 WebView 内部调用栈里，立刻 destroy 有重入风险，挪到下一个消息周期
-            mainHandler.post(() -> {
-                destroyWebView();
-                if (!appVisible) {
-                    // 后台被系统回收：只做记录，等用户下次回来再重建。
-                    // 这里一旦 startActivity，应用就会自己跳到前台。
-                    rendererNeedsRebuild = true;
-                    renderProcessRestartScheduled = false;
-                    Log.i(TAG, "renderer gone while backgrounded; rebuild deferred");
-                    return;
-                }
-                showError(getString(R.string.error_renderer_lost));
-                scheduleActivityRestart();
-            });
+            /*
+             * 两种情况必须分开（以前不分，这就是「切出去再回来就整页重来」的根因）：
+             *   didCrash()=false：系统在回收内存，渲染进程被 kill —— 国产 ROM 切后台极常见；
+             *   didCrash()=true ：页面自己崩了（渲染侧 native 崩溃 / OOM 打死）。
+             * 两种都得销毁这个实例（返回 true 之后它已经不可用），但**恢复方式**不该一样：
+             * 回收只要重新加载一次就够，连续崩溃才需要重建 Activity。
+             */
+            Log.e(TAG, "render process gone (crashed=" + crashed + ", visible=" + isVisibleNow() + ")");
+            // 这个回调就在 WebView 内部调用栈里，立刻 destroy / loadUrl 有重入风险，挪到下一个消息周期
+            mainHandler.post(() -> handleRendererLoss(crashed));
             return true;
         }
     }
@@ -1217,6 +1292,58 @@ public final class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * UI 状态中转箱（S1）：页面把「草稿 / 滚动位置 / 当前会话」暂存在这里。
+     *
+     * <p><b>为什么需要它。</b>`sessionStorage` 的寿命 = **浏览上下文**：WebView 一旦被销毁重建
+     * （渲染进程被系统回收，见 {@link #rebuildWebViewInPlace()}），浏览器就会把它清空 ——
+     * 而那恰恰是用户遇到的「切出去一下回来草稿没了」。这份中转箱挂在本 Activity 上，
+     * 换 WebView 不会丢；Activity 自己重建或退出应用就没了 —— 正好是「这一次运行内有效」
+     * 的语义（**不是** `localStorage`，不会跨启动残留、不会串到下一次会话）。
+     *
+     * <p><b>三条纪律。</b>
+     * <ol>
+     *   <li>**只进内存、绝不落盘**：没有 SharedPreferences、不写文件，进程结束就消失；</li>
+     *   <li>**不做任何业务判断**：收到的字符串原样存、原样给，键与结构全由页面决定
+     *       （原生不多知道一件界面上的事，与 {@link PickerBridge} 同一个原则）；</li>
+     *   <li>调用发生在 **JavaBridge 线程**（不是主线程），读写都要加锁。</li>
+     * </ol>
+     */
+    public class UiStateRelay {
+
+        /** 页面写进来的那份快照（JSON 字符串；`null` = 还没有） */
+        private String payload;
+
+        /** 页面在状态变化 / 切后台之前推一份（超过上限整份丢掉，别把内存撑爆）。 */
+        @android.webkit.JavascriptInterface
+        public void put(String json) {
+            if (json == null || json.length() > UI_RELAY_MAX_CHARS) {
+                Log.w(TAG, "ui relay: 快照为空或过大，丢弃（"
+                        + (json == null ? "null" : json.length() + " chars") + "）");
+                return;
+            }
+            synchronized (this) {
+                payload = json;
+            }
+        }
+
+        /** 页面启动时读一次（没有就返回空串：调用方只判长度，不用判 null）。 */
+        @android.webkit.JavascriptInterface
+        public String take() {
+            synchronized (this) {
+                return payload == null ? "" : payload;
+            }
+        }
+
+        /** 清空（退出登录等场景；幂等）。 */
+        @android.webkit.JavascriptInterface
+        public void clear() {
+            synchronized (this) {
+                payload = null;
+            }
+        }
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         if (requestCode != REQ_FILE_CHOOSER) {
@@ -1377,7 +1504,130 @@ public final class MainActivity extends AppCompatActivity {
         // manifest 里声明了 configChanges，横竖屏不重建 Activity，WebView 状态保留
     }
 
-    private void scheduleActivityRestart() {
+    /* ── 渲染进程丢失后的恢复（S1） ─────────────────────────────────────── */
+
+    /**
+     * 页面加载完成之后再等一段，才承认「这一次真的活了」。
+     *
+     * <p>为什么不能只看 {@code onPageFinished}：崩溃循环的形态就是「加载完立刻再死」。
+     * 若在 onPageFinished 就清零，失败计数永远到不了阈值 → 无限重新加载，用户看到的是
+     * 一直闪。活过 {@link #RENDERER_HEALTHY_AFTER_MS} 才清零，崩溃循环才有出口。
+     */
+    private final Runnable markRendererHealthy = () -> {
+        rendererFailureWindowStart = 0L;
+        rendererRecoveryFailures = 0;
+        renderProcessRestartScheduled = false;
+    };
+
+    /** 现在「用户真的在看这一页」吗（onResume 之后、onPause 之前，且 Activity 处于 RESUMED）。 */
+    private boolean isVisibleNow() {
+        if (!appVisible || isFinishing() || isDestroyed()) {
+            return false;
+        }
+        return getLifecycle().getCurrentState().isAtLeast(Lifecycle.State.RESUMED);
+    }
+
+    /**
+     * 渲染进程丢失的统一收口（`onRenderProcessGone` 只负责把它挪到下一个消息周期）。
+     *
+     * <p>三档恢复，前两档都**不重建 Activity**：
+     * <ol>
+     *   <li>后台丢的：只记一笔，等用户自己回来（绝不 startActivity —— 那等于应用自己跳到前台）；</li>
+     *   <li>前台丢的（或回来时发现丢过）：就地换一个 WebView 重新加载；</li>
+     *   <li>窗口期内连续失败：才 recreate()。</li>
+     * </ol>
+     *
+     * @param crashed true = 渲染进程自己崩了；false = 被系统回收（内存压力）
+     */
+    private void handleRendererLoss(boolean crashed) {
+        // 返回 true 之后这个实例已经不可用：必须销毁，否则它会静默吃掉所有触摸与回调
+        destroyWebView();
+        if (isFinishing() || isDestroyed()) {
+            return;
+        }
+        boolean escalate = noteRendererFailure(crashed);
+        if (!isVisibleNow()) {
+            /*
+             * 用户已经切走了（或正在切）：这一屏谁都看不见，重建是纯浪费 —— 更不该 startActivity
+             * 把应用拉回前台（那是「应用会自己跳出来」的老毛病）。等下一次 onResume。
+             */
+            rendererRecoveryPending = true;
+            rendererRecoveryEscalate = escalate;
+            Log.i(TAG, "renderer gone while backgrounded; recovery deferred to resume (escalate=" + escalate + ")");
+            return;
+        }
+        if (!escalate && rebuildWebViewInPlace()) {
+            Log.i(TAG, "renderer recovery: WebView rebuilt in place (failure #" + rendererRecoveryFailures + ")");
+            return;
+        }
+        // 连续失败 / 连地址都没有：这时重建 Activity 才是合理的
+        showError(getString(R.string.error_renderer_lost));
+        scheduleActivityRecreate();
+    }
+
+    /**
+     * 记一次渲染进程丢失，并回答「该不该升级成重建 Activity」。
+     *
+     * <p>窗口期内前 {@link #MAX_IN_PLACE_RECOVERY} 次都先就地恢复（多数情况下一次就够），
+     * 之后才升级。崩溃（{@code didCrash}）与回收走同一套计数：连崩三次说明页面真的坏了，
+     * 而连被回收三次说明这台机器内存实在紧张 —— 两种情况都该把 Activity 也换掉。
+     */
+    private boolean noteRendererFailure(boolean crashed) {
+        long now = SystemClock.uptimeMillis();
+        if (rendererFailureWindowStart == 0L || now - rendererFailureWindowStart > RENDERER_FAILURE_WINDOW_MS) {
+            rendererFailureWindowStart = now;
+            rendererRecoveryFailures = 0;
+        }
+        rendererRecoveryFailures += 1;
+        boolean escalate = rendererRecoveryFailures > MAX_IN_PLACE_RECOVERY;
+        Log.i(TAG, "renderer failure #" + rendererRecoveryFailures + " within window (crashed=" + crashed
+                + ", escalate=" + escalate + ")");
+        return escalate;
+    }
+
+    /**
+     * 只重建 WebView（**不重建 Activity、不重启本地服务器**），再加载同一地址。
+     *
+     * <p>为什么这样比 recreate() 好：
+     * <ul>
+     *   <li>Activity 重建会走 {@link #onDestroy} → {@code server.stop()}，连带拆掉 WS 隧道
+     *       （{@code RemoteWsHandler.cancelAll}）与后台保活前台服务，回来时连接得从头建；</li>
+     *   <li>本地服务器不重启 = 端口不变（{@link LocalServer} 优先固定端口）= origin 不变，
+     *       {@code localStorage} 里的会话缓存照样能直出；</li>
+     *   <li>页面还能从原生中转箱（{@code DSNativeUi}）把草稿、滚动位置捞回来 —— 换成
+     *       Activity 重建就什么都没了。</li>
+     * </ul>
+     *
+     * @return false = 现在没法就地恢复（没有地址 / 视图还没建好），调用方该升级
+     */
+    private boolean rebuildWebViewInPlace() {
+        final String url = loadedUrl;
+        if (url == null || rootLayout == null || isFinishing() || isDestroyed()) {
+            return false;
+        }
+        destroyWebView();
+        WebView view = newShellWebView();
+        webView = view;
+        // 加在 index 0：errorView 是后加的，必须压在它下面（否则错误页会被新的 WebView 盖住）
+        rootLayout.addView(view, 0);
+        configureWebView();
+        if (errorView != null) {
+            errorView.setVisibility(View.GONE);
+        }
+        view.setVisibility(View.VISIBLE);
+        Log.i(TAG, "renderer recovery: reload " + url + " in a fresh WebView");
+        view.loadUrl(url);
+        return true;
+    }
+
+    /**
+     * 崩溃循环的最后一档：重建 Activity。
+     *
+     * <p>用 {@link #recreate()} 而不是 {@code startActivity(CLEAR_TASK) + finish()}：后者会
+     * 新建一个任务、把界面整个掀掉重来（用户看到的是「应用自己重启了」）。recreate() 留在
+     * 原位，而且只有**连续就地恢复失败**之后才会走到这里。
+     */
+    private void scheduleActivityRecreate() {
         if (renderProcessRestartScheduled || !appVisible) {
             return;
         }
@@ -1386,10 +1636,8 @@ public final class MainActivity extends AppCompatActivity {
             if (isFinishing() || isDestroyed()) {
                 return;
             }
-            Intent restart = new Intent(MainActivity.this, MainActivity.class);
-            restart.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-            startActivity(restart);
-            finish();
+            Log.i(TAG, "renderer recovery: escalating to activity recreate");
+            recreate();
         }, ACTIVITY_RESTART_DELAY_MS);
     }
 
@@ -1419,6 +1667,8 @@ public final class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         Log.i(TAG, "onDestroy");
+        // 「加载完成 15 秒后才算稳定」的确认可能还挂着：Activity 都要走了，别让它去改状态
+        mainHandler.removeCallbacks(markRendererHealthy);
         // 选择器面板可能还挂着：Activity 走了必须把回调收尾，否则页面的「+」会一直等
         cancelFileChooser();
         if (server != null) {
