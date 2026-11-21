@@ -1009,20 +1009,21 @@ final class RemoteWsHandler {
             open = true;
             tunnel.upstream = webSocket;
             openSignal.countDown();
-            // OkHttp 默认不会主动投递消息：先申请 1 条，之后每处理完一条再申请
-            webSocket.request(1);
+            // OkHttp 4.x 的背压口子：request() 无参，返回当前队列字节数，不是「申请 N 条」。
+            // 客户端 socket 不需要人为限流，这里只是保持每处理完一条就续上。
+            webSocket.request();
         }
 
         @Override
         public void onMessage(WebSocket webSocket, String text) {
             tunnel.writeText(text);
-            webSocket.request(1);
+            webSocket.request();
         }
 
         @Override
         public void onMessage(WebSocket webSocket, ByteString bytes) {
             tunnel.writeBinary(bytes.toByteArray());
-            webSocket.request(1);
+            webSocket.request();
         }
 
         @Override
