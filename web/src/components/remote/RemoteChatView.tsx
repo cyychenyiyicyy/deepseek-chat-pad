@@ -103,6 +103,25 @@ export const RemoteChatView = () => {
     if (el) el.scrollTop = el.scrollHeight
   }, [activeSessionId])
 
+  /*
+   * 启动 / 回到前台：续上一次没完成的登录（K2）。
+   *
+   * 为什么这里也要挂（设置面板里已经挂了一份）：真机上发生的是「切到系统浏览器授权 →
+   * App 被系统杀掉 → 重启 → 直接回到远程会话页」，设置面板根本没打开过。两个入口都调
+   * 数据层那套幂等的动作（单飞 + 静默），重复触发不会多发请求。
+   * 同时也补一次「回前台立即轮询」：后台的 `setTimeout` 会被系统节流，2s 定时器靠不住。
+   */
+  useEffect(() => {
+    fireAndForget(() => useRemoteStore.getState().resumeLogin())
+    if (typeof document === 'undefined') return undefined
+    const onVisible = (): void => {
+      if (document.visibilityState !== 'visible') return
+      fireAndForget(() => useRemoteStore.getState().onAppForeground())
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [])
+
   const onScroll = () => {
     const el = scrollRef.current
     if (!el) return
@@ -173,7 +192,8 @@ export const RemoteChatView = () => {
       ) : !ready ? (
         <div className={styles.centerState}>
           <div className={styles.centerTitle}>
-            {t(phase === 'error' ? 'remotePhaseError' : 'remoteNotConnected')}
+            {/* 等待授权（系统浏览器里）是「正在登录」而不是「失败了」：别让用户以为要重来 */}
+            {t(phase === 'error' ? 'remotePhaseError' : phase === 'waiting-auth' ? 'remotePhaseWaitingAuth' : 'remoteNotConnected')}
           </div>
           <div className={styles.centerHint}>
             {error ? `${error.code}: ${error.message}` : t('remoteNotConnectedHint')}

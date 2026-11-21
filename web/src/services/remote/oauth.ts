@@ -13,15 +13,14 @@
  * ```
  *  POST {qrStartUrl} {}                     ← 建一次「登录会话」，两种入口共用
  *        │  {qrId, scanUrl, expiresIn}
- *        ├── mode='browser' → POST /__ds_auth/open {url, serverUrl, mode}
- *        │       mode='inline'（默认，应用内全屏 WebView）/ 'external'（系统浏览器）
- *        │       用户在窗口里完成授权
+ *        ├── mode='browser' → POST /__ds_auth/open {url, serverUrl, mode:'external'}
+ *        │       默认交给**系统浏览器**完成授权（见「为什么默认是系统浏览器」）
  *        └── mode='qr'      → 把 scanUrl 渲染成二维码，用另一台设备扫
  *        ▼
  *  每 ~2s GET /api/v1/auth/oauth/qr/{qrId}
  *        │  pending → expired / complete（账号 token 只返回一次）
  *        ▼
- *  POST /__ds_auth/close                    ← 浏览器模式收尾，别把授权页留在后台
+ *  POST /__ds_auth/close                    ← 浏览器模式收尾（external 下是 no-op，幂等）
  *        ▼
  *  GET /api/v1/auth/me → POST /api/v1/devices/register → 设备 token pair
  * ```
@@ -29,11 +28,44 @@
  * 两种入口**共用同一个 qrId 与同一套轮询**：浏览器模式是「本机授权」，扫码模式是
  * 「另一台已登录该站的设备扫一下授权」，产物完全一样。
  *
+ * ## 为什么默认是系统浏览器（K2）
+ *
+ * 应用内 WebView 打开第三方授权页有两个真机问题：① Google 这类 provider 直接拒
+ * `disallowed_useragent`；② 用户在 WebView 里授权完、回 App 的那一步经常被系统回收进程。
+ * 所以原生容器默认改成 `external`（`Intent.ACTION_VIEW`），`inline` 只作为可选覆盖项保留。
+ *
+ * ⚠️ **`external` 之后 `state.open` 恒为 `false`，不能再拿它判断「用户取消了」**：
+ * 系统浏览器不在壳的窗口栈里，原生拿不到「页面已关闭」这个信号，`/__ds_auth/open` 会回
+ * `{ok:true, open:false, mode:'external', launched:true}`。取消只能靠用户点「取消登录」，
+ * 或者等轮询拿到 `expired` / 本地超时。`authPageState().open === false` 同理。
+ *
+ * ## 会话可恢复（App 被系统杀掉也不丢登录）
+ *
+ * 「切到系统浏览器 → 回后台」时 Android 常直接把 WebView 进程杀掉，页面内存状态全丢；
+ * 但**服务端会话独立于 App 进程**（`qrId` 还在、没过期就能继续轮询拿到 token）。所以只要把
+ * 「待完成会话」落盘就能续上：
+ *
+ * ```
+ *  发起登录 ──► localStorage['dsp.remote.pending-login.v1']
+ *    │            = {serverUrl, providerId, mode, qrId, scanUrl, startedAt, expiresAt}
+ *    ├──► 系统浏览器里授权             │
+ *    ▼                                ▼
+ *  （进程可能被杀）        resumePendingLogin()  ← App 启动、visibilitychange→visible 都调
+ *                                   │
+ *                     pending / 网络瞬断 ──► 继续轮询（会话在服务端，不随进程死掉）
+ *                     complete          ──► 落账号 + 注册设备 + 删键
+ *                     expired / 超时    ──► 删键 + 返回原因
+ *                     401 / 404         ──► 删键 + 终止（qrId 已作废，重试无意义）
+ * ```
+ *
+ * 键里**只有 qrId / scanUrl 这类非敏感字段**，token 一律不进这个键（token 只走
+ * `storage.ts`）。`resumePendingLogin()` 幂等：并发调用只有一个轮询在飞，后到者拿同一个 Promise。
+ *
  * ## 原生容器契约（J7 已落地：`android/.../RemoteAuthHandler.java`）
  *
  * | 端点 | 方法 | body | 返回 |
  * |---|---|---|---|
- * | `/__ds_auth/open`  | POST | `{url, title?, serverUrl?, allowHost?, mode?}` | `{ok,open,mode,id,url}` |
+ * | `/__ds_auth/open`  | POST | `{url, title?, serverUrl?, allowHost?, mode?}` | `{ok,open,mode,id,url,launched?}` |
  * | `/__ds_auth/close` | POST | `{}` | `{ok,open:false,closed}`（幂等） |
  * | `/__ds_auth/state` | GET  | – | `{ok,open,mode,id,url,title,lastRedirect}` |
  *
@@ -50,9 +82,14 @@
  *
  * ## 边界
  *
- * - 本文件**不碰 localStorage**：落盘统一走 `connection.loginWithAccountToken()`。
+ * - 本文件只碰**一个** localStorage 键：`dsp.remote.pending-login.v1`（待完成会话，
+ *   **非敏感**：只有 qrId / scanUrl / 过期时刻）。账号与设备 token 的落盘仍然统一走
+ *   `connection.loginWithAccountToken()`；`resumePendingLogin()` 的默认落地会复用
+ *   `storage.upsertAccount()`（与前者同键同字段），因为它要在**没有连接**的情况下
+ *   也能把账号拿到手。
  * - 本文件**不碰 Noise / WebSocket**：建链是 `store.ts` 的事。
- * - token 只作为返回值与 `Authorization` 头存在：不进 URL、不进日志、不进错误信息。
+ * - token 只作为返回值与 `Authorization` 头存在：不进 URL、不进日志、不进错误信息，
+ *   也**不进** `dsp.remote.pending-login.v1`。
  */
 
 import type { AccountDeviceDescriptor, DeviceTokenPair } from '../../vendor/dsh-remote/protocol/index.js'
@@ -72,6 +109,7 @@ import {
   type OAuthQrPollResult,
   type ServerApiDeps,
 } from './serverApi.js'
+import { upsertAccount } from './storage.js'
 
 /* ── 原生容器端点（J7） ───────────────────────────────────────────────── */
 
@@ -91,6 +129,14 @@ const MAX_POLL_FAILURES = 3
 /** 账号 token 最小长度（上游 `api.ts` 对 complete 的同款下限） */
 const MIN_ACCOUNT_TOKEN_LENGTH = 16
 
+/**
+ * 待完成登录会话的 localStorage 键（跨进程恢复用）。
+ *
+ * 只存 `{serverUrl, providerId, mode, qrId, scanUrl, startedAt, expiresAt}` ——
+ * **没有 token**：token 只活在这一个进程的内存里，领到就落 `storage.ts` 的账号表。
+ */
+export const PENDING_LOGIN_STORAGE_KEY = 'dsp.remote.pending-login.v1'
+
 /* ── 类型 ─────────────────────────────────────────────────────────────── */
 
 /**
@@ -109,6 +155,30 @@ export interface ProviderLoginSession {
   /** 授权页地址，同时也是二维码内容（已过同源校验） */
   scanUrl: string
   /** 本地算的过期时刻（毫秒；服务器仍是权威） */
+  expiresAt: number
+  /** 授权页**实际**用的打开方式（`qr` 模式没有；`no_browser` 回退时是 `inline`） */
+  authMode?: AuthPageMode
+  /** 需要让用户知道的一句话（例如「本机没有可用浏览器，已改用应用内登录」） */
+  notice?: string
+}
+
+/**
+ * 落盘的「待完成登录会话」（`dsp.remote.pending-login.v1` 的内容）。
+ *
+ * 加 `serverUrl` 与 `startedAt` 是必须的：qrId 只在**那台服务器**上有效（换服务器等于换一套
+ * 账号体系），而 `startedAt` 让恢复流程能算出「这次等待到底等了多久」，不至于拿一个
+ * 半路上的误判当超时。**不含 token** —— 这是它能进 localStorage 的前提。
+ */
+export interface PendingLoginRecord {
+  /** 归一化后的服务器地址（`normalizeServerUrl` 的产物） */
+  serverUrl: string
+  providerId: string
+  mode: ProviderLoginMode
+  qrId: string
+  scanUrl: string
+  /** 发起时刻（毫秒） */
+  startedAt: number
+  /** 会话过期时刻（毫秒；服务器仍是权威） */
   expiresAt: number
 }
 
@@ -152,6 +222,47 @@ export interface WaitProviderLoginOptions extends QrPollOptions {
   signal?: AbortSignal
   /** 每次判定为 pending 回调（UI 更新倒计时 / 「等待你在浏览器里完成授权…」） */
   onPending?: (elapsedMs: number) => void
+}
+
+/** `resumePendingLogin()` 的终态（`none` = 本来就没有待完成会话） */
+export type ResumeLoginStatus = 'none' | 'complete' | 'expired' | 'timeout' | 'cancelled' | 'failed'
+
+/** `resumePendingLogin()` 的结果：`status` 之外带上可直显的原因，便于 UI 分辨「过期」与「网络挂了」 */
+export interface ResumeLoginResult {
+  status: ResumeLoginStatus
+  /** 命中的持久化会话（`none` 时没有） */
+  record?: PendingLoginRecord
+  /** 机器码（`QR_EXPIRED` / `QR_TIMEOUT` / `OAUTH_ABORTED` / 服务器返回的码…） */
+  code?: string
+  /** 中文原因，UI 可以原样显示 */
+  message?: string
+  /** `complete` 且走默认落地路径时的产物（账号已落盘，但**没有**建链） */
+  result?: OAuthSignInResult
+}
+
+export interface ResumePendingLoginOptions {
+  deps?: OAuthDeps
+  /**
+   * `complete` 之后怎么落地。缺省 = `completeProviderLogin()` + `storage.upsertAccount()`
+   * （只把账号与设备 token 落盘，**不建链**）；`store.ts` 会传一个「顺手建链」的实现。
+   *
+   * 注意：账号 token 只能领一次，这个回调抛错就等于这次登录失败（qrId 已经用掉了），
+   * 所以实现里不要做「稍后重试」的假设。
+   */
+  complete?: (input: { record: PendingLoginRecord; token: string }) => Promise<OAuthSignInResult | void>
+  /** 轮询间隔，默认 `DEFAULT_PROVIDER_POLL_INTERVAL_MS`（2s） */
+  intervalMs?: number
+  /**
+   * 本次恢复的等待预算，默认 `DEFAULT_PROVIDER_LOGIN_TIMEOUT_MS`（3 分钟）。
+   * **从调用时刻算起**（不是从 `startedAt`）：App 可能被杀了半小时才回来，
+   * 那段时间不该算进「我们等了多久」；硬上限仍是会话自己的 `expiresAt`。
+   */
+  timeoutMs?: number
+  signal?: AbortSignal
+  /** 每次判定为 pending 回调（UI 刷倒计时） */
+  onPending?: (elapsedMs: number) => void
+  /** 时钟注入（自测用） */
+  now?: () => number
 }
 
 /* ── 小工具 ───────────────────────────────────────────────────────────── */
@@ -199,6 +310,119 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> => {
     signal?.addEventListener('abort', onAbort, { once: true })
   })
 }
+
+/* ── 待完成登录会话（跨进程恢复：`dsp.remote.pending-login.v1`） ──────── */
+
+/**
+ * localStorage 取用点：隐私模式 / 配额满 / 非浏览器环境（例如 tsx 自测）返回 null，
+ * 上层一律降级成「只在本次进程内有效」，**绝不抛** —— 登录不该因为存不下而失败。
+ */
+const pendingStore = (): Storage | null => {
+  try {
+    return globalThis.localStorage ?? null
+  } catch {
+    return null
+  }
+}
+
+const isPositiveTime = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0
+
+/** 一条记录的结构校验（坏数据一律当没有，不让它把整个登录流程带进沟里） */
+const parsePendingLogin = (value: unknown): PendingLoginRecord | null => {
+  if (!isRecord(value)) return null
+  const { serverUrl, providerId, mode, qrId, scanUrl, startedAt, expiresAt } = value
+  if (typeof serverUrl !== 'string' || serverUrl.length === 0) return null
+  if (typeof providerId !== 'string' || providerId.length === 0) return null
+  if (mode !== 'browser' && mode !== 'qr') return null
+  if (typeof qrId !== 'string' || qrId.length === 0) return null
+  if (typeof scanUrl !== 'string' || scanUrl.length === 0) return null
+  if (!isPositiveTime(startedAt) || !isPositiveTime(expiresAt)) return null
+  if (expiresAt < startedAt) return null
+  return { serverUrl, providerId, mode, qrId, scanUrl, startedAt, expiresAt }
+}
+
+/**
+ * 读待完成会话。
+ *
+ * 坏数据会被**顺手删掉**：留着只会让每次启动都白跑一遍恢复流程。
+ */
+export const readPendingLogin = (): PendingLoginRecord | null => {
+  const ls = pendingStore()
+  if (ls === null) return null
+  try {
+    const raw = ls.getItem(PENDING_LOGIN_STORAGE_KEY)
+    if (raw === null) return null
+    const record = parsePendingLogin(JSON.parse(raw) as unknown)
+    if (record === null) {
+      ls.removeItem(PENDING_LOGIN_STORAGE_KEY)
+      return null
+    }
+    return record
+  } catch {
+    // 解析失败 / localStorage 抛错：当没有
+    return null
+  }
+}
+
+/** 写待完成会话；返回是否真的落盘（存不下也不报错，本次进程内仍然可续） */
+export const writePendingLogin = (record: PendingLoginRecord): boolean => {
+  const ls = pendingStore()
+  if (ls === null) return false
+  try {
+    ls.setItem(PENDING_LOGIN_STORAGE_KEY, JSON.stringify(record))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 清掉待完成会话（用户取消 / 已完成 / 已失效都走这里） */
+export const clearPendingLogin = (): void => {
+  const ls = pendingStore()
+  if (ls === null) return
+  try {
+    ls.removeItem(PENDING_LOGIN_STORAGE_KEY)
+  } catch {
+    // 清不掉也不影响：内容本身是非敏感的，下次发起登录会覆盖它
+  }
+}
+
+/**
+ * 只在「当前键还是这次会话」时清。
+ *
+ * 为什么要这个：恢复流程是异步的，用户可能中途又点了一次登录（新 qrId 已经落盘）。
+ * 老的恢复流程收尾时无条件删键，会把**新会话**删掉 —— 下次启动就续不上了。
+ */
+const clearPendingLoginIf = (qrId: string): void => {
+  const current = readPendingLogin()
+  if (current !== null && current.qrId !== qrId) return
+  clearPendingLogin()
+}
+
+/** 记录 → 会话（两者只差 `serverUrl` / `startedAt`） */
+export const pendingLoginSession = (record: PendingLoginRecord): ProviderLoginSession => ({
+  providerId: record.providerId,
+  mode: record.mode,
+  qrId: record.qrId,
+  scanUrl: record.scanUrl,
+  expiresAt: record.expiresAt,
+})
+
+/** 会话 → 记录（发起登录时落盘用） */
+export const pendingLoginRecordOf = (
+  serverUrl: string,
+  session: ProviderLoginSession,
+  startedAt: number = Date.now(),
+): PendingLoginRecord => ({
+  serverUrl,
+  providerId: session.providerId,
+  mode: session.mode,
+  qrId: session.qrId,
+  scanUrl: session.scanUrl,
+  startedAt,
+  expiresAt: session.expiresAt,
+})
 
 /* ── 原生桥 ───────────────────────────────────────────────────────────── */
 
@@ -318,24 +542,34 @@ const nativeErrorDetail = (response: NativeResponse): string => {
   return text === undefined ? `：${code}` : `：${text}（${code}）`
 }
 
+/** 原生回的错误码（`{ok:false,error:"no_browser"}` 里的那个），不是的话给空串 */
+const nativeErrorCode = (response: NativeResponse): string =>
+  isRecord(response.body) && typeof response.body.error === 'string' ? response.body.error : ''
+
 /**
  * 原生响应判定。
  *
  * - 404：壳里 → `OAUTH_BRIDGE_UPDATE_REQUIRED`（旧 APK）；不在壳里 → `OAUTH_UNAVAILABLE`；
- * - 4xx/5xx：`NATIVE_BRIDGE_ERROR`，带上 `{ok:false,error}` 的中文解释；
+ * - 4xx/5xx：`NATIVE_BRIDGE_ERROR`，带上 `{ok:false,error}` 的中文解释（**码留在
+ *   `details.nativeError`**：`no_browser` 要走「回退应用内 WebView」的分支）；
  * - 2xx + 非 JSON（静态托管的 `index.html` 回落）：按非壳环境处理 —— 绝不把 HTML 当「已打开」；
  * - 2xx + `{ok:false}`：`OAUTH_FAILED`。
+ *
+ * ⚠️ `open:false` 不是错误：`external`（系统浏览器）模式原生就是回 `open:false, launched:true`，
+ * 这里**不看** `open`，只看 `ok` 与 HTTP 码。
  */
 const assertNativePage = (response: NativeResponse, path: string): void => {
   if (isMissingEndpoint(response)) throw isShellLikely() ? bridgeUpdateRequired(path) : unavailableError(path)
   const detail = nativeErrorDetail(response)
+  const nativeError = nativeErrorCode(response)
   if (response.status >= 500) {
     throw new RemoteApiError(
       'NATIVE_BRIDGE_ERROR',
       `App 原生登录桥返回 HTTP ${response.status}${detail}`,
       response.status,
-      true,
-      { path },
+      // `no_browser` 是确定性的（换台设备才会有浏览器），别让上层当成「过会儿重试就好」
+      nativeError === 'no_browser' ? false : true,
+      { path, nativeError },
     )
   }
   if (response.status >= 400) {
@@ -344,27 +578,32 @@ const assertNativePage = (response: NativeResponse, path: string): void => {
       `App 原生登录桥返回 HTTP ${response.status}${detail}`,
       response.status,
       false,
-      { path },
+      { path, nativeError },
     )
   }
   if (response.body === undefined && response.text.trim().length > 0) {
     throw isShellLikely() ? bridgeUpdateRequired(path) : unavailableError(path)
   }
   if (isRecord(response.body) && response.body.ok === false) {
-    throw new RemoteApiError('OAUTH_FAILED', `App 打不开授权页面${detail}`, undefined, false, { path })
+    throw new RemoteApiError('OAUTH_FAILED', `App 打不开授权页面${detail}`, undefined, false, {
+      path,
+      nativeError,
+    })
   }
 }
 
 /* ── 原生授权页：open / close / state ─────────────────────────────────── */
 
-/** 授权页打开方式（原生契约）：`inline` = 应用内全屏 WebView（默认），`external` = 系统浏览器 */
+/** 授权页打开方式（原生契约）：`external` = 系统浏览器（默认），`inline` = 应用内全屏 WebView */
 export type AuthPageMode = 'inline' | 'external'
 
-/**
- * 这些 provider 的登录页**拒绝 WebView**（Google 会报 `disallowed_useragent`，见
- * `input-J6-登录方式调研.md` §6.2 / dsh-Go `hosts_state.dart:509-510`），只能交给系统浏览器。
+/*
+ * 为什么现在默认 `external`：`google` 这类 provider 的登录页**拒绝 WebView**
+ * （`disallowed_useragent`，见 `input-J6-登录方式调研.md` §6.2 / dsh-Go
+ * `hosts_state.dart:509-510`），而应用内 WebView 还多一个真机坑 —— 用户在授权页里操作时
+ * App 进程被系统回收，回来登录状态全丢。系统浏览器同时解掉这两个问题，代价是原生拿不到
+ * 「授权页已关闭」这个信号（`/__ds_auth/state` 的 `open` 恒 false，**不能**据此判取消）。
  */
-const WEBVIEW_HOSTILE_PROVIDERS = new Set(['google'])
 
 export interface OpenAuthPageInput {
   /** 授权页地址（必须是 https，且与 `serverUrl` 严格同源 —— 原生态也会再校验一次） */
@@ -376,7 +615,7 @@ export interface OpenAuthPageInput {
   serverUrl: string
   /** 窗口标题（原生截断到 48 字符） */
   title?: string
-  /** `inline`（默认）/ `external`（系统浏览器） */
+  /** `external`（默认，系统浏览器）/ `inline`（应用内 WebView） */
   mode?: AuthPageMode
   /** 额外允许的 host 名单（自建反代用；一般不用，原生态做白名单校验） */
   allowHost?: string
@@ -385,12 +624,14 @@ export interface OpenAuthPageInput {
 /**
  * 用原生容器打开授权页。
  *
- * 原生实现：`RemoteAuthHandler`（J7）。三种模式行为：
- *   - `inline`（默认）：应用内全屏 WebView + 标题栏与「关闭」按钮；
- *   - `external`：`Intent.ACTION_VIEW` 交给系统浏览器。
+ * 原生实现：`RemoteAuthHandler`（J7）。两种模式行为：
+ *   - `external`（默认）：`Intent.ACTION_VIEW` 交给系统浏览器，响应 `{ok,open:false,mode,launched}`；
+ *   - `inline`：应用内全屏 WebView + 标题栏与「关闭」按钮。
  *
  * 页面侧只做两件事：确保 `url` 是 https（原生对 http 直接 400 `https_required`），
  * 以及把 `serverUrl` 一起带上（原生态的同源闸门）。
+ *
+ * `open:false` **不**等于失败：`assertNativePage` 只认 `ok:false` 与 4xx/5xx。
  */
 export const openAuthPage = async (input: OpenAuthPageInput, deps: OAuthDeps = {}): Promise<void> => {
   const url = input.url.trim()
@@ -446,7 +687,11 @@ export interface AuthPageState {
 }
 
 /**
- * 授权页当前状态（诊断 / 回到前台时校正 UI）；非壳环境或旧 APK → `null`。
+ * 授权页当前状态（诊断用）；非壳环境或旧 APK → `null`。
+ *
+ * ⚠️ **`open === false` 不代表用户取消了**：「用系统浏览器」（`mode:'external'`）时
+ * 授权页根本不在壳的窗口栈里，原生只能恒回 `open:false`。判断登录是否成功**只看轮询结果**
+ * （`complete` / `expired`），判断取消只看用户是否点了「取消登录」。
  *
  * 想区分「非壳」与「旧 APK」用 `probeAuthBridge()`。
  */
@@ -499,17 +744,33 @@ export interface StartProviderLoginOptions {
   probeHealth?: boolean
   /**
    * 打开授权页的方式（`browser` 模式生效，原生态值）：
-   *   `inline`（默认）= 应用内全屏 WebView；`external` = 系统浏览器。
-   * 缺省按 provider 自动选：Google 的登录页拒绝 WebView（`disallowed_useragent`），走 `external`。
+   *   `external`（**默认**）= 系统浏览器；`inline` = 应用内全屏 WebView（仅作为覆盖项保留）。
+   * K2 起默认走系统浏览器：WebView 里第三方授权页会被 Google 之类拒绝，且回 App 时
+   * 进程很容易被系统回收（登录状态随之丢光）。
    */
   authMode?: AuthPageMode
   /** 额外允许的 host（自建反代；一般不用） */
   allowHost?: string
 }
 
-/** 该 provider 是否只能交给系统浏览器（拒绝 WebView） */
-const defaultAuthMode = (provider: OAuthProvider): AuthPageMode =>
-  WEBVIEW_HOSTILE_PROVIDERS.has(provider.id) ? 'external' : 'inline'
+/**
+ * 原生容器默认用哪种方式打开授权页。
+ *
+ * `external` = 系统浏览器（K2 起默认）：原生侧返回 `{ok:true, open:false, mode:'external',
+ * launched:true}`，**`open:false` 是正常现象**（见 `authPageState` 的注释）。
+ *
+ * 为什么显式传而不是「靠原生默认」：两台机器上的 APK 版本可能不一样（旧包默认 `inline`），
+ * 显式传能让「页面说了算」；`mode` 只用原生认的两个值 —— `external`（别名 `browser` / `tab`）
+ * 与 `inline`（别名 `webview`），别的值原生回 `400 bad_mode`。
+ */
+const defaultAuthMode = (): AuthPageMode => 'external'
+
+/** 原生「这台设备没有可用浏览器」的错误码（`500 {ok:false,error:"no_browser",suggestInline:true}`） */
+const NATIVE_NO_BROWSER = 'no_browser'
+
+/** 这次失败是不是「系统浏览器打不开、但应用内 WebView 还能试一次」 */
+const shouldFallbackToInline = (error: unknown): boolean =>
+  isRemoteApiError(error) && error.details?.nativeError === NATIVE_NO_BROWSER
 
 /**
  * 建一个 provider 登录会话。
@@ -517,6 +778,13 @@ const defaultAuthMode = (provider: OAuthProvider): AuthPageMode =>
  * `browser` 模式会顺手让原生容器打开授权页（这一步失败就整体失败，非壳环境在这里报
  * 「只能在 App 内使用」，旧 APK 报「请更新 App」）；`qr` 模式只建会话，`scanUrl` 交给
  * UI 画二维码 —— 因此**普通浏览器里也能用扫码登录**（用另一台设备扫）。
+ *
+ * **顺序很关键**：会话建好就立刻落盘（`dsp.remote.pending-login.v1`），**然后**才打开
+ * 授权页 —— 切到系统浏览器的那一瞬间 App 就进后台了，进程随时可能被系统杀掉；先开页后落盘
+ * 等于把「最容易出事的窗口」留在了没有持久化的时候。
+ *
+ * 系统浏览器打不开（原生 `no_browser`）时**自动回退应用内 WebView 重试一次**，并在返回值
+ * 的 `notice` 里带上「已改用应用内登录」——不吞掉这个降级，用户要知道授权页在哪。
  */
 export const startProviderLogin = async (
   serverUrl: string,
@@ -535,31 +803,58 @@ export const startProviderLogin = async (
   if (options.probeHealth !== false) await health({ url: base }, apiDeps)
 
   const session = await startOAuthQrLogin({ url: base }, provider, apiDeps)
-  const expiresAt = Date.now() + qrExpiryMs(session.expiresIn)
-
-  if (mode === 'browser') {
-    // 授权页没打开就没什么可轮询的：直接把失败抛给 UI（这个 qrId 随之作废，
-    // 服务器侧会自己过期，不需要额外的 cancel 端点）
-    await openAuthPage(
-      {
-        url: session.scanUrl,
-        // 原生态用它做严格同源校验：不传的话自建/LAN 服务器会吃 private_host_rejected(403)
-        serverUrl: base,
-        title: options.title ?? `${provider.displayName} 登录`,
-        mode: options.authMode ?? defaultAuthMode(provider),
-        ...(options.allowHost === undefined ? {} : { allowHost: options.allowHost }),
-      },
-      deps,
-    )
-  }
-
-  return {
+  const startedAt = Date.now()
+  const expiresAt = startedAt + qrExpiryMs(session.expiresIn)
+  const result: ProviderLoginSession = {
     providerId: provider.id,
     mode,
     qrId: session.qrId,
     scanUrl: session.scanUrl,
     expiresAt,
   }
+
+  // 先落盘（App 下一秒就可能被杀）；老记录被直接覆盖 —— 同一台设备只续最后一次登录
+  writePendingLogin(pendingLoginRecordOf(base, result, startedAt))
+
+  if (mode === 'browser') {
+    // 授权页没打开就没什么可轮询的：把失败抛给 UI，并且**别留**一个永远等不到的会话
+    // （服务器侧会自己过期，不需要额外的 cancel 端点）
+    const request = { url: session.scanUrl, title: options.title ?? `${provider.displayName} 登录` }
+    // 原生态用它做严格同源校验：不传的话自建 / LAN 服务器会吃 private_host_rejected(403)
+    const authMode = options.authMode ?? defaultAuthMode()
+    try {
+      await openAuthPage(
+        {
+          ...request,
+          serverUrl: base,
+          mode: authMode,
+          ...(options.allowHost === undefined ? {} : { allowHost: options.allowHost }),
+        },
+        deps,
+      )
+    } catch (error) {
+      if (authMode === 'external' && shouldFallbackToInline(error)) {
+        // 这台设备没装浏览器（或系统不认这个 Intent）：退回应用内 WebView 再试一次。
+        // 反过来说，`inline` 失败就是真失败，不再回退。
+        try {
+          await openAuthPage(
+            { ...request, serverUrl: base, mode: 'inline', ...(options.allowHost === undefined ? {} : { allowHost: options.allowHost }) },
+            deps,
+          )
+          result.notice = '本机没有可用浏览器，已改用应用内登录'
+          result.authMode = 'inline'
+        } catch (fallbackError) {
+          clearPendingLoginIf(session.qrId)
+          throw fallbackError
+        }
+      } else {
+        clearPendingLoginIf(session.qrId)
+        throw error
+      }
+    }
+  }
+
+  return result
 }
 
 /**
@@ -690,7 +985,202 @@ export const signInWithProvider = async (
     })
     return await completeProviderLogin(serverUrl, token, options)
   } finally {
+    // 一步到位地登完了：别把待完成会话留在盘上（否则下次启动会去续一个已经完成的 qrId）
+    clearPendingLoginIf(session.qrId)
     if (mode === 'browser') await closeAuthPage(options.deps)
+  }
+}
+
+/* ── 会话可恢复：resumePendingLogin（K2） ─────────────────────────────── */
+
+/**
+ * 轮询失败的三种性质（K2 的硬要求：瞬断继续、401/404 终止、其余终止）。
+ *
+ * | 类别 | 判据 | 处置 |
+ * |---|---|---|
+ * | `transient` | 没有 HTTP 状态且 `retryable`（`NETWORK_ERROR` / `TIMEOUT`）、5xx、429 | 会话还在，继续轮（连败超 `MAX_POLL_FAILURES` 才放弃） |
+ * | `stale` | 401 / 404 / 410 | 服务器不认识这个 qrId（或它已作废），重试没有意义 → 终止并清理 |
+ * | `fatal` | 其余确定性错误（参数 / 协议 / 被取消） | 终止并清理 |
+ */
+type PollFailureKind = 'transient' | 'stale' | 'fatal'
+
+const classifyPollFailure = (error: unknown): PollFailureKind => {
+  if (!isRemoteApiError(error)) return 'fatal'
+  if (error.code === 'OAUTH_ABORTED') return 'fatal'
+  const status = error.status
+  if (status === 401 || status === 404 || status === 410) return 'stale'
+  if (status === undefined) return error.retryable ? 'transient' : 'fatal'
+  if (status === 429) return 'transient'
+  if (status >= 500) return error.retryable ? 'transient' : 'fatal'
+  return 'fatal'
+}
+
+/** 轮询失败的归类文案（UI 能直接显示的那种） */
+const describeResumeFailure = (error: unknown, kind: PollFailureKind): string => {
+  if (kind === 'transient') return `网络不稳定，重试 ${MAX_POLL_FAILURES} 次仍失败：${messageOf(error)}`
+  if (kind === 'stale') return '这次登录会话已经失效（服务器不再认识它），请重新发起登录'
+  return `续接登录失败：${messageOf(error)}`
+}
+
+/** 默认落地：`/auth/me` → `devices/register` → 账号落盘（**不建链**，建链是 store 的事） */
+const persistProviderLogin = async (
+  record: PendingLoginRecord,
+  token: string,
+  deps: OAuthDeps,
+): Promise<OAuthSignInResult> => {
+  const result = await completeProviderLogin(record.serverUrl, token, { deps })
+  // 与 `connection.loginWithAccountToken()` 同键同字段（scope=device + loginMethod），
+  // 只是这里没有 `RemoteClient`：恢复流程的目标是「账号先拿到手」，连接由上层决定。
+  upsertAccount({
+    email: result.account,
+    accessToken: result.tokens.accessToken,
+    refreshToken: result.tokens.refreshToken,
+    deviceId: result.deviceId,
+    scope: 'device',
+    serverUrl: record.serverUrl,
+    loginMethod: record.mode === 'qr' ? 'qr' : 'oauth',
+    accessTokenExpiresAt: result.tokens.accessTokenExpiresAt,
+    refreshTokenExpiresAt: result.tokens.refreshTokenExpiresAt,
+  })
+  return result
+}
+
+/** 单飞：并发调用只跑一个轮询（后到者拿同一个 Promise） */
+let resumeInFlight: Promise<ResumeLoginResult> | null = null
+
+/**
+ * abort 判定。
+ *
+ * 单独抽成函数而不是内联 `signal?.aborted === true`：TS 会把上一次比较的结果窄化进后面的
+ * 分支（`false | undefined`），循环里再比一次就被判成「不可能成立」—— 而 abort 是异步发生的，
+ * 恰恰会变。
+ */
+const signalAborted = (signal: AbortSignal | undefined): boolean => signal?.aborted === true
+
+/**
+ * 续上一次没完成的登录（App 重启 / 从浏览器切回前台时调用）。
+ *
+ * 幂等 + 并发安全：实现了「只允许一个轮询在飞」—— 因为 `complete` 的账号 token
+ * **只能领一次**，两个轮询同时打到服务器会让后到者拿到「complete 但没有 token」，
+ * 反而把一次成功的登录判成失败。
+ *
+ * 终态都会**清理持久化**（除非期间已经有一次新的登录写了新 qrId）：
+ *   - `complete`：`onComplete`/默认落地成功 → 删键；
+ *   - `expired` / `timeout` / `cancelled` / `failed`：删键并返回原因。
+ *
+ * 网络瞬断不算失败：会话在服务端活得好好的，继续轮就是了（`MAX_POLL_FAILURES` 次连败才放弃）。
+ */
+export const resumePendingLogin = (options: ResumePendingLoginOptions = {}): Promise<ResumeLoginResult> => {
+  if (resumeInFlight !== null) return resumeInFlight
+  const task = runResumePendingLogin(options).finally(() => {
+    resumeInFlight = null
+  })
+  resumeInFlight = task
+  return task
+}
+
+/** 测试 / 诊断用：当前是否有恢复流程在跑（不暴露内部 Promise） */
+export const isResumingPendingLogin = (): boolean => resumeInFlight !== null
+
+const runResumePendingLogin = async (options: ResumePendingLoginOptions): Promise<ResumeLoginResult> => {
+  const deps = options.deps ?? {}
+  const now = options.now ?? Date.now
+  const record = readPendingLogin()
+  if (record === null) return { status: 'none' }
+
+  /** 收尾：清键（只清自己这一条）+ 带上原因返回 */
+  const finish = (result: ResumeLoginResult): ResumeLoginResult => {
+    clearPendingLoginIf(record.qrId)
+    return result
+  }
+
+  if (now() >= record.expiresAt) {
+    return finish({
+      status: 'expired',
+      record,
+      code: 'QR_EXPIRED',
+      message: '这次登录已经过期（服务端会话失效），请重新发起登录',
+    })
+  }
+
+  const intervalMs = Math.max(options.intervalMs ?? DEFAULT_PROVIDER_POLL_INTERVAL_MS, 1)
+  const timeoutMs = Math.max(options.timeoutMs ?? DEFAULT_PROVIDER_LOGIN_TIMEOUT_MS, 1)
+  const startedAt = now()
+  // 预算从**本次恢复**算起：App 被杀了半小时不该算成「我们等了半小时」
+  const deadline = Math.min(startedAt + timeoutMs, record.expiresAt)
+  const complete = options.complete ?? ((input) => persistProviderLogin(input.record, input.token, deps))
+
+  let failures = 0
+  for (;;) {
+    if (signalAborted(options.signal)) {
+      return finish({ status: 'cancelled', record, code: 'OAUTH_ABORTED', message: '登录已取消' })
+    }
+
+    let polled: OAuthQrPollResult | undefined
+    try {
+      polled = await pollProviderLogin(record.serverUrl, record.qrId, { deps, expiresAt: record.expiresAt })
+      failures = 0
+    } catch (error) {
+      const kind = classifyPollFailure(error)
+      if (kind === 'transient' && failures < MAX_POLL_FAILURES) {
+        // 网络瞬断：会话（和盘上的记录）原样保留，接着轮
+        failures += 1
+      } else {
+        const aborted = signalAborted(options.signal)
+        return finish({
+          status: aborted ? 'cancelled' : 'failed',
+          record,
+          code: isRemoteApiError(error) ? error.code : 'OAUTH_FAILED',
+          message: aborted ? '登录已取消' : describeResumeFailure(error, kind),
+        })
+      }
+    }
+
+    if (polled !== undefined) {
+      if (polled.status === 'complete') {
+        try {
+          const done = await complete({ record, token: polled.token })
+          return finish({
+            status: 'complete',
+            record,
+            ...(done === undefined ? {} : { result: done }),
+          })
+        } catch (error) {
+          // 账号 token 已经用掉了，重试同一个 qrId 拿不到第二个：只能让用户重来
+          return finish({
+            status: 'failed',
+            record,
+            code: isRemoteApiError(error) ? error.code : 'OAUTH_FAILED',
+            message: `授权已完成，但换取设备凭据失败：${messageOf(error)}`,
+          })
+        }
+      }
+      if (polled.status === 'expired') {
+        return finish({
+          status: 'expired',
+          record,
+          code: 'QR_EXPIRED',
+          message: '这次登录已经过期（服务端会话失效），请重新发起登录',
+        })
+      }
+    }
+
+    const stamp = now()
+    if (stamp >= deadline) {
+      return finish({
+        status: 'timeout',
+        record,
+        code: 'QR_TIMEOUT',
+        message: `等待授权超时（${Math.round(timeoutMs / 1000)} 秒），请重新发起登录`,
+      })
+    }
+    options.onPending?.(stamp - startedAt)
+    try {
+      await sleep(Math.min(intervalMs, deadline - stamp), options.signal)
+    } catch {
+      // `sleep` 只会因为 abort 抛
+      return finish({ status: 'cancelled', record, code: 'OAUTH_ABORTED', message: '登录已取消' })
+    }
   }
 }
 

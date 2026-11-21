@@ -350,7 +350,16 @@ const expected = [
   'android.permission.INTERNET',
   'android.permission.ACCESS_NETWORK_STATE',
   // 分体式更新：下载完新包要能拉起系统安装器
-  'android.permission.REQUEST_INSTALL_PACKAGES'
+  'android.permission.REQUEST_INSTALL_PACKAGES',
+  // 后台保活前台服务（RemoteKeepAliveService）：服务本体 + Android 14 要求的 dataSync 类型权限
+  'android.permission.FOREGROUND_SERVICE',
+  'android.permission.FOREGROUND_SERVICE_DATA_SYNC',
+  // 常驻通知（Android 13+ 运行时权限）
+  'android.permission.POST_NOTIFICATIONS',
+  // 只声明给页面临时申请，保活服务自己不开 WakeLock
+  'android.permission.WAKE_LOCK',
+  // 拉起系统「忽略电池优化」授权页（data=package:<pkg>）
+  'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'
 ]
 for (const permission of expected) {
   if (!declaredPermissions.includes(permission)) manifestProblems.push(`清单缺少权限 ${permission}`)
@@ -396,7 +405,7 @@ if (!filePaths) {
   }
 }
 if (manifestProblems.length === 0) {
-  ok('manifest.security', '仅 INTERNET/ACCESS_NETWORK_STATE/REQUEST_INSTALL_PACKAGES，明文只放行回环，FileProvider 范围精确')
+  ok('manifest.security', '仅 INTERNET/ACCESS_NETWORK_STATE/REQUEST_INSTALL_PACKAGES + 保活那 5 项（FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC、POST_NOTIFICATIONS、WAKE_LOCK、REQUEST_IGNORE_BATTERY_OPTIMIZATIONS），明文只放行回环，FileProvider 范围精确')
 } else fail('manifest.security', manifestProblems.join('\n       '))
 
 // ---------------------------------------------------------------- 5. 关键实现断言（防止写漏需求点）

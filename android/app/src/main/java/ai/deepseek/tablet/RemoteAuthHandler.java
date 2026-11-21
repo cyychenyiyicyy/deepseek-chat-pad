@@ -40,7 +40,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * /__ds_auth/* 的实现：**应用内授权容器**（原生全屏 Dialog + WebView，或交给系统浏览器）。
+ * /__ds_auth/* 的实现：**授权页容器** —— <b>默认交给系统浏览器</b>，
+ * 只有显式 {@code mode:"inline"} 才用应用内的全屏 WebView（兜底）。
+ *
+ * <p><b>为什么默认是系统浏览器</b>（2026-11-21 真机反馈后定的，见
+ * {@code work/2026-11-21-chatpad接入DSH远程/input-J7-原生OAuth容器.md} §11）：
+ * 用户的账号都登录在系统浏览器里 —— 密码管理器、已保存的会话 cookie、双因素、通行证都在那边。
+ * 应用内 WebView 是另一个 cookie 罐，用户得把账号密码<b>再输一遍</b>。真机原话：
+ * 「人家账号都登录在自己系统浏览器上面，用内置浏览器人家还要自己再登录一遍」。
  *
  * <p>它解决的问题：远端 DSH Server 的第三方登录必须在浏览器里完成，而页面跑在
  * {@code http://127.0.0.1:18888} 的 WebView 里 —— 它既不能打开外部浏览器，也不能把
@@ -64,17 +71,29 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p>接口一览（页面同源 fetch，不需要任何额外权限）：
  * <pre>
- * POST /__ds_auth/open    {url, title?, serverUrl?, allowHost?, mode?}  → {ok,open,mode,id,url}
+ * POST /__ds_auth/open    {url, title?, serverUrl?, allowHost?, mode?}  → {ok,open,launched,mode,id,url}
  * POST /__ds_auth/close   {}                                           → {ok,open:false,closed}
- * GET  /__ds_auth/state                                                → {ok,open,mode,id,url,title,lastRedirect}
+ * GET  /__ds_auth/state                                                → {ok,open,launched,mode,id,url,title,lastRedirect}
+ * mode 缺省 = external（系统浏览器）；inline / webview = 应用内 WebView；其余 → 400 bad_mode
  * </pre>
+ *
+ * <p>两个字段的含义（前端最容易用错的地方）：
+ * <ul>
+ *   <li>{@code launched}：这次 {@code /open} 有没有真的把网页交出去（external = 浏览器已拉起）；</li>
+ *   <li>{@code open}：<b>只对 inline 有意义</b>（应用内窗口还开着吗）。external <b>恒为 false</b> ——
+ *       窗口在别的 App 里，原生看不见，也不知道用户什么时候把它关掉。</li>
+ * </ul>
+ * 所以「登录完成了没有／用户是不是取消了」永远由页面自己轮询服务端 {@code qr/{qrId}} 回答，
+ * 不要拿 {@code open} 当状态机。
  *
  * <p>线程模型（本类最容易写错的地方）：
  * <ul>
  *   <li>{@link #handle} 跑在 LocalServer 的线程池线程里，<b>绝不</b>在里面碰 View</li>
+ *   <li>external 模式<b>完全不碰 UI 线程、不等任何回调</b>：发一个 {@code startActivity}
+ *       就立刻返回 200（浏览器在别的 App 里，等它只会把 HTTP 连接挂住）</li>
  *   <li>Dialog / WebView 全部由 {@code activity.runOnUiThread(...)} 在 UI 线程创建，
  *       工作线程只用 {@link CountDownLatch} 等「窗口弹出来了没有」这一个事件（有超时）</li>
- *   <li>对外可读的状态（open / url / title / lastRedirect）都是 volatile，
+ *   <li>对外可读的状态（open / launched / mode / url / title / lastRedirect）都是 volatile，
  *       UI 线程写、worker 线程读，不加锁也不阻塞</li>
  *   <li>WebView 的 {@code destroy()} 推到主线程队列的下一拍：在它自己的回调栈里销毁会偶发崩溃</li>
  * </ul>
@@ -87,7 +106,7 @@ import java.util.concurrent.atomic.AtomicReference;
  *   <li>窗口里只放行 https 导航；{@code dshremote:} / {@code http:} / {@code file:} /
  *       {@code content:} / {@code intent:} / {@code javascript:} 一律拦下（只记录不导航），
  *       既不跳出 App 也不加载本地文件；</li>
- *   <li>token 只在 URL 里由服务端控制，本类不解析、不落日志（日志一律走 {@link #safeUrlForLog}）。</li>
+ *   <li>token 只在 URL 里由服务端控制，本类不解析、不落日志（日志一律走 {@link #safeLogUrl}）。</li>
  * </ul>
  */
 final class RemoteAuthHandler {
@@ -101,15 +120,22 @@ final class RemoteAuthHandler {
     private static final String PATH_CLOSE = "/__ds_auth/close";
     private static final String PATH_STATE = "/__ds_auth/state";
 
-    /** 默认模式：应用内全屏 WebView */
+    /**
+     * 应用内模式：全屏 Dialog + WebView。现在只是**兜底**（系统里一个浏览器都没有，
+     * 或者调用方明确要 WebView），必须显式传 {@code mode:"inline"} 才会走。
+     */
     private static final String MODE_INLINE = "inline";
     /**
-     * 外部模式：交给系统浏览器（{@code Intent.ACTION_VIEW}）。
+     * 默认模式：交给系统浏览器（{@code Intent.ACTION_VIEW}）。
      *
-     * <p>为什么需要它：Google 的登录页会直接拒绝 WebView（UA 里带 {@code wv} 或 JS 探测到
-     * 无浏览器环境就报 {@code disallowed_useragent}，见
-     * {@code input-J6-登录方式调研.md} §6.2 与 dsh-Go 的 {@code hosts_state.dart:509-510}）。
-     * 这种 provider 只能开系统浏览器，而"登录完成了没有"由页面的 QR 轮询回答，与哪个窗口完成无关。
+     * <p>为什么默认是它：用户的账号、密码管理器、双因素都在系统浏览器里（见类注释），
+     * 应用内 WebView 是隔离的 cookie 罐 —— 用户得重登一遍，真机反馈直接否掉了这条路。
+     * 顺带它还解决了 Google 拒绝 WebView 的问题（UA 带 {@code wv} / 探测到无浏览器环境就报
+     * {@code disallowed_useragent}，见 {@code input-J6-登录方式调研.md} §6.2 与 dsh-Go 的
+     * {@code hosts_state.dart:509-510}）。
+     *
+     * <p>代价：浏览器在别的 App 里，原生看不见它什么时候被关掉，所以 external 模式下
+     * {@code open} 恒为 false，登录结果只由页面的 QR 轮询回答。
      */
     private static final String MODE_EXTERNAL = "external";
 
@@ -151,7 +177,9 @@ final class RemoteAuthHandler {
     private volatile String currentUrl = "";
     private volatile String currentTitle = "";
     private volatile String lastRedirect = "";
-    private volatile String mode = MODE_INLINE;
+    private volatile String mode = MODE_EXTERNAL;
+    /** external 模式：这次 /open 是否已经把网页交给系统浏览器（inline 恒为 false） */
+    private volatile boolean launched;
     private volatile int sessionId;
 
     RemoteAuthHandler(Context context) {
@@ -256,39 +284,31 @@ final class RemoteAuthHandler {
         String title = trimToEmpty(body.optString("title", ""));
         String serverUrl = trimToEmpty(body.optString("serverUrl", body.optString("server", "")));
         String allowHost = trimToEmpty(body.optString("allowHost", body.optString("allow_host", "")));
-        String requestedMode = trimToEmpty(body.optString("mode", MODE_INLINE)).toLowerCase(Locale.US);
+        // 默认 external（系统浏览器）；别名收敛与未知值的 400 都在 normalizeMode 里
+        String requestedMode = normalizeMode(body.optString("mode", MODE_EXTERNAL));
 
         // 校验放在开窗口之前：不允许的地址一个字节都不发出去
         validateUrl(url, serverUrl, allowHost);
         if (title.length() > MAX_TITLE_LENGTH) {
             title = title.substring(0, MAX_TITLE_LENGTH);
         }
-        // inline（默认，应用内全屏 WebView）之外都当外部浏览器；browser / tab 是给前端的别名
-        if (MODE_EXTERNAL.equals(requestedMode) || "browser".equals(requestedMode)
-                || "tab".equals(requestedMode)) {
-            requestedMode = MODE_EXTERNAL;
-        } else {
-            requestedMode = MODE_INLINE;
-        }
+        boolean external = MODE_EXTERNAL.equals(requestedMode);
         int id = beginSession(title, requestedMode);
 
-        if (MODE_EXTERNAL.equals(requestedMode)) {
-            OpenOutcome outcome = openExternally(url, id);
-            if (outcome.error != null) {
-                HttpUtil.sendJson(out, outcome.status, keepAlive, errorJson(outcome.error));
-                return !keepAlive;
-            }
-        } else {
-            OpenOutcome outcome = openInline(url, title, id);
-            if (outcome.error != null) {
-                HttpUtil.sendJson(out, outcome.status, keepAlive, errorJson(outcome.error));
-                return !keepAlive;
-            }
+        // external 只发一次 startActivity，不等任何 WebView 回调（也没有回调可等）：
+        // 浏览器在别的 App 里，登录是否成功由页面轮询服务端 qr/{qrId} 决定
+        OpenOutcome outcome = external ? openExternally(url, id) : openInline(url, title, id);
+        if (outcome.error != null) {
+            sendOpenFailure(out, outcome, keepAlive);
+            return !keepAlive;
         }
 
         JSONObject json = new JSONObject();
         json.put("ok", true);
-        json.put("open", open);
+        // external 没有「窗口」这个概念：open 恒为 false（别让前端以为还在等），
+        // launched 才表示「网页已经交给系统浏览器了」
+        json.put("open", !external && open);
+        json.put("launched", launched);
         json.put("mode", mode);
         json.put("id", id);
         json.put("url", currentUrl);
@@ -297,10 +317,31 @@ final class RemoteAuthHandler {
     }
 
     /**
-     * inline 模式：建（或复用）全屏窗口并加载 URL。
+     * 模式归一化：把前端可能送来的别名收敛成 {@link #MODE_EXTERNAL} / {@link #MODE_INLINE}。
      *
-     * <p>工作线程只等「窗口弹出来了没有」，不等用户操作 —— 那是页面轮询 {@code /state}
-     * 与 QR 会话的事。
+     * <p>缺省是 {@link #MODE_EXTERNAL} —— <b>不传 mode 一律走系统浏览器</b>。别名只收这几个，
+     * 其余一律 400 {@code bad_mode}：静默退回默认会让写错 mode 的前端以为「系统浏览器已经开了」，
+     * 出问题时连线索都没有。
+     */
+    private static String normalizeMode(String raw) {
+        String value = trimToEmpty(raw).toLowerCase(Locale.US);
+        if (value.length() == 0) {
+            return MODE_EXTERNAL;
+        }
+        if (MODE_EXTERNAL.equals(value) || "browser".equals(value) || "tab".equals(value)) {
+            return MODE_EXTERNAL;
+        }
+        if (MODE_INLINE.equals(value) || "webview".equals(value)) {
+            return MODE_INLINE;
+        }
+        throw new HttpError(400, "bad_mode");
+    }
+
+    /**
+     * inline 模式（兜底）：建（或复用）全屏窗口并加载 URL。
+     *
+     * <p>只有显式 {@code mode:"inline"} 才会走到这里。工作线程只等「窗口弹出来了没有」，
+     * 不等用户操作 —— 那是页面轮询 {@code /state} 与 QR 会话的事。
      */
     private OpenOutcome openInline(final String url, final String title, final int id) {
         Activity activity = resumedActivity();
@@ -343,7 +384,12 @@ final class RemoteAuthHandler {
         return new OpenOutcome(200, null);
     }
 
-    /** external 模式：交系统浏览器。完成后由页面的 QR 轮询收尾，原生不需要状态。 */
+    /**
+     * external 模式：交系统浏览器，<b>立刻返回</b>。
+     *
+     * <p>这里不做任何「等页面加载」的事：浏览器是另一个 App，我们既没有它的生命周期回调，
+     * 也不该为了它把页面发起的这条 HTTP 请求挂住。登录结果由页面轮询服务端 {@code qr/{qrId}}。
+     */
     private OpenOutcome openExternally(String url, int id) {
         Activity activity = resumedActivity();
         if (activity == null) {
@@ -351,14 +397,23 @@ final class RemoteAuthHandler {
         }
         try {
             Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            // NEW_TASK：浏览器有自己的任务栈，从 Activity 里起也要显式声明，
+            // 否则个别 ROM 会把浏览器塞进我们的任务里（返回栈行为很奇怪）
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            // 可选：告诉浏览器「是哪个 App 发起的」（API 3 起就有的常量，现行 SDK 里仍在）。
+            // 现代浏览器基本忽略它，加上无害；某些老浏览器会据此复用同一个窗口而不是再开一个
+            intent.putExtra(android.provider.Browser.EXTRA_APPLICATION_ID, activity.getPackageName());
             activity.startActivity(intent);
         } catch (ActivityNotFoundException noBrowser) {
+            // 本机真的没有能打开 https 的应用：这是「环境不支持」，不是「参数错了」。
+            // 500 + suggestInline：前端可以一键退回应用内 WebView
             Log.w(TAG, "系统里没有能打开 https 的应用");
-            return new OpenOutcome(503, "no_browser");
+            return new OpenOutcome(500, "no_browser", true);
         } catch (RuntimeException failed) {
             Log.w(TAG, "打开系统浏览器失败", failed);
             return new OpenOutcome(500, "open_external_failed: " + describe(failed));
         }
+        launched = true;
         open = false;
         currentUrl = url;
         Log.i(TAG, "auth 交给系统浏览器: " + safeLogUrl(url) + " (id=" + id + ")");
@@ -501,8 +556,8 @@ final class RemoteAuthHandler {
      *   <li>Cookie 走 {@code CookieManager} 的默认行为，<b>一个都不清</b>：「已登录就免密」的短路
      *       全靠会话 cookie，清了等于每次都要重新输密码。Cookie 是进程级的，窗口关了再开也还在</li>
      *   <li>文件访问关掉：这个 WebView 只加载远端网页，不需要 {@code file://}</li>
-     *   <li>UA 去掉 {@code wv} 标记：能少踩一点"这是 WebView"的探测（Google 仍可能拒，
-     *       那种 provider 请用 {@code mode:"external"} 开系统浏览器）</li>
+     *   <li>UA 去掉 {@code wv} 标记：能少踩一点"这是 WebView"的探测。Google 仍然会拒 ——
+     *       这也是默认改走系统浏览器的原因之一，{@code inline} 现在只是兜底</li>
      * </ul>
      */
     private void configureWebView(WebView view) {
@@ -543,6 +598,8 @@ final class RemoteAuthHandler {
             boolean keepAlive) throws IOException, JSONException {
         // body 可有可无：有就读掉，别把残留字节留给下一个请求
         readJsonBody(in, headers);
+        // external 模式下没有任何窗口可关：wasOpen 恒为 false
+        //（closed:false 是「本来就没开」，不是错误；重复调同样幂等）
         final boolean wasOpen = open;
         open = false;
         uiHandler.post(new Runnable() {
@@ -562,9 +619,14 @@ final class RemoteAuthHandler {
     // ---------------------------------------------------------------- GET /state
 
     private String stateJson() throws JSONException {
+        boolean external = MODE_EXTERNAL.equals(mode);
         JSONObject json = new JSONObject();
         json.put("ok", true);
-        json.put("open", open);
+        // external 模式没有「窗口开着」这个概念：open 恒为 false。
+        // 前端别拿它判断「用户取消了」—— 浏览器在别的 App 里，原生看不见；
+        // 登录结果只认页面自己轮询的 qr/{qrId}
+        json.put("open", !external && open);
+        json.put("launched", launched);
         json.put("mode", mode);
         json.put("id", sessionId);
         json.put("url", currentUrl);
@@ -588,6 +650,7 @@ final class RemoteAuthHandler {
         currentUrl = "";
         lastRedirect = "";
         open = false;
+        launched = false;
         return id;
     }
 
@@ -1072,15 +1135,37 @@ final class RemoteAuthHandler {
 
         private final int status;
         private final String error;
+        /** 失败时提示前端「可以退回 inline」：只有「本机没有浏览器」这一种值得回退 */
+        private final boolean suggestInline;
 
         OpenOutcome(int status, String error) {
+            this(status, error, false);
+        }
+
+        OpenOutcome(int status, String error, boolean suggestInline) {
             this.status = status;
             this.error = error;
+            this.suggestInline = suggestInline;
         }
     }
 
     private static String errorJson(String error) {
         return "{\"ok\":false,\"error\":" + JSONObject.quote(error) + "}";
+    }
+
+    /**
+     * 失败响应。{@code no_browser} 额外带 {@code suggestInline:true}：
+     * 系统里一个浏览器都没有时，前端可以一键退回应用内 WebView 而不是把登录入口整个藏掉。
+     */
+    private static void sendOpenFailure(OutputStream out, OpenOutcome outcome, boolean keepAlive)
+            throws IOException, JSONException {
+        JSONObject json = new JSONObject();
+        json.put("ok", false);
+        json.put("error", outcome.error);
+        if (outcome.suggestInline) {
+            json.put("suggestInline", true);
+        }
+        HttpUtil.sendJson(out, outcome.status, keepAlive, json.toString());
     }
 
     private static void requireReadOnly(String method) {

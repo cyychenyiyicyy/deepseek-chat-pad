@@ -20,11 +20,19 @@ import styles from './RemoteSettingsPanel.module.css'
  *     或桥是旧 APK 时，整排第三方入口禁用并给出原因 —— 邮箱密码不受影响。
  *     注意 `probeAuthBridge()` 返回的是 `'ready' | 'missing' | 'outdated'`（不是布尔），
  *     `missing` = 不在壳里，`outdated` = 在壳里但 APK 太旧。
- *   - **轮询在 UI 侧排**：`startProviderLogin()` 只负责建会话（browser 模式顺带打开授权页），
- *     之后由本组件的 2s 定时器调 `pollProviderLogin()`；启动路径上**不等结果、不轮询**，
- *     否则一次失败的登录会把设置弹窗卡住十几秒。
+ *   - **授权页在系统浏览器里**（K2）：主按钮点下去会把授权页交给系统浏览器，所以用户
+ *     「切走 → 回后台 → 进程可能被杀」。因此这里只做三件事：
+ *       ① 挂载时调一次 `resumeLogin()`（续上被杀进程前的那次登录）；
+ *       ② `visibilitychange → visible` 时再调一次，并**立刻补一拍**轮询
+ *          （后台的 `setTimeout` 会被系统节流，2s 定时器可能整段停摆）；
+ *       ③ 有 `pendingLogin` 就显示「等待授权…（剩余 mm:ss）」+ 取消。
+ *     判断「授权成功」只看轮询结果，**绝不**看 `authPageState().open`（external 下恒 false）。
  *   - 状态区把 `phase / transport / capabilities` 与**错误原文**（`code: message`）都摊开，
  *     远程链路的失败原因没法靠一句「连接失败」定位。
+ *   - **保活状态区（K3）**：状态胶囊下面是原生前台服务的三态徽标 + 两条权限提示。
+ *     只认 `store.keepAlive.supported`，老 APK / 普通浏览器不显示；**不新增任何端点** ——
+ *     通知权限没有页面可调的申请接口（`POST_NOTIFICATIONS` 只能由原生在主线程请求），
+ *     所以只给文字说明；电池优化有端点，但**只在点击里**调，状态以原生回读的快照为准。
  */
 
 /** 官方托管服务器（决策见 `plan-P0P1-实施契约.md` 第 3 行）。 */
@@ -74,6 +82,13 @@ export const RemoteSettingsPanel = () => {
   const error = useRemoteStore((state) => state.error)
   const providers = useRemoteStore((state) => state.oauthProviders)
   const qr = useRemoteStore((state) => state.qr)
+  /** 待完成登录（可能是**上个进程**留下的：`resumeLogin()` 会把它从 localStorage 恢复出来） */
+  const pendingLogin = useRemoteStore((state) => state.pendingLogin)
+  /**
+   * 原生保活服务的快照（K3）：`null` = 还没探过；`supported:false` = 这个环境没有这套端点
+   * （普通浏览器 / 旧 APK）。只有 `supported:true` 才渲染下面的保活状态区。
+   */
+  const keepAlive = useRemoteStore((state) => state.keepAlive)
   const { availability, retry } = useRemoteAvailability()
   // 预填上次用过的服务器与邮箱（storage 里已有的那份），没有就用默认值
   const [server, setServer] = useState(() => loadServers()[0]?.url ?? DEFAULT_SERVER)
@@ -88,11 +103,13 @@ export const RemoteSettingsPanel = () => {
   const [bridge, setBridge] = useState<AuthBridgeStatus | 'probing'>('probing')
   /** 倒计时用的当前时刻（每 1s 推一次） */
   const [now, setNow] = useState(() => Date.now())
+  /** 正在拉起「忽略电池优化」授权页（只驱动按钮 loading，状态以原生回读的快照为准） */
+  const [batteryAsking, setBatteryAsking] = useState(false)
   // 定时器回调里要读「最新的」服务器地址，避免把 effect 依赖写成 server（每敲一个字都重排）
   const serverRef = useRef(server)
   serverRef.current = server
 
-  const busy = phase === 'authing' || phase === 'connecting' || starting !== null
+  const busy = phase === 'authing' || phase === 'connecting' || phase === 'waiting-auth' || starting !== null
   const connected = phase === 'ready'
   const blocked = availability !== 'ready'
   const bridgeProbing = bridge === 'probing'
@@ -134,7 +151,8 @@ export const RemoteSettingsPanel = () => {
    * 停止条件全由状态驱动，不需要额外的取消标志：
    *   - `complete` / `expired` / `cancelled` / `error` → `status` 不再是 pending；
    *   - 连上之后 `phase === 'ready'`，`qr` 早就是 complete；
-   *   - 组件卸载（用户关掉设置弹窗）→ cleanup 里 clearInterval，绝不留后台定时器。 */
+   *   - 组件卸载（用户关掉设置弹窗）→ cleanup 里 clearInterval，绝不留后台定时器。
+   * 恢复流程（`resumeLogin()`）在跑的时候数据层会自己让路（只允许一个轮询在飞）。 */
   const qrPending = qr !== null && qr.status === 'pending'
   useEffect(() => {
     if (!qrPending) { return undefined }
@@ -144,17 +162,42 @@ export const RemoteSettingsPanel = () => {
     return () => clearInterval(timer)
   }, [qrPending])
 
-  /* ── 4. 二维码倒计时：只在「有一个在等的会话」时每秒推一次
-   *     `complete` / `expired` / `cancelled` 之后倒计时就没有意义了（也不会再画二维码），
-   *     定时器必须一起停掉：否则设置弹窗开着的时候会每秒白白重渲染一次。 ── */
+  /* ── 3b. 会话恢复（K2）+ 回前台补拍 ──────────────────────────────────
+   * 用户授权时要切到系统浏览器，App 进后台，进程随时可能被系统杀掉。所以：
+   *   ① 挂载就调一次 `resumeLogin()`：若是被杀进程前发起的那次登录，这里直接续上
+   *      （`dsp.remote.pending-login.v1` 里有 qrId，服务端会话跟进程无关）；
+   *   ② `visibilitychange → visible`（用户从浏览器切回来）调 `onAppForeground()`：
+   *      续登录 + **立刻补一拍**轮询（后台的 setTimeout 会被系统节流，别等 2s 定时器）
+   *      + 保活服务自检（系统可能在后台把它杀掉）。
+   *   ③ 挂载顺带探一次保活（`refreshKeepAlive()`，已有的 store 动作，只读 `state.json`）：
+   *      真机上「切后台就被杀、连接都建不起来」时，用户正是**没连上**才需要看到
+   *      通知权限 / 电池优化这两条提示，所以探测不能只挂在 `phase==='ready'` 之后。
+   * 三条路径都是幂等的（数据层单飞），重复触发不会多发请求。 */
+  useEffect(() => {
+    fireAndForget(() => useRemoteStore.getState().resumeLogin())
+    fireAndForget(() => useRemoteStore.getState().refreshKeepAlive())
+    if (typeof document === 'undefined') { return undefined }
+    const onVisible = (): void => {
+      if (document.visibilityState !== 'visible') { return }
+      fireAndForget(() => useRemoteStore.getState().onAppForeground())
+      setNow(Date.now())
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [])
+
+  /* ── 4. 倒计时：`complete` / `expired` / `cancelled` 之后就没有意义了
+   *     `pendingLogin` 也算在内 —— 它可能来自上个进程，倒计时必须跟着走。 ── */
   const qrId = qr?.qrId ?? null
   const qrTicking = qr !== null && qr.status === 'pending'
+  const pendingExpiresAt = pendingLogin?.expiresAt ?? null
+  const ticking = qrTicking || pendingExpiresAt !== null
   useEffect(() => {
-    if (qrId === null || !qrTicking) { return undefined }
+    if (!ticking) { return undefined }
     setNow(Date.now())
     const timer = setInterval(() => setNow(Date.now()), COUNTDOWN_INTERVAL_MS)
     return () => clearInterval(timer)
-  }, [qrId, qrTicking])
+  }, [ticking, qrId, pendingExpiresAt])
 
   /* ── 5. 二维码图片：只在 `mode === 'qr'` 时生成，渲染失败不炸整块面板 ── */
   const qrMode = qr?.mode ?? null
@@ -214,11 +257,37 @@ export const RemoteSettingsPanel = () => {
     fireAndForget(() => useRemoteStore.getState().disconnect())
   }
 
+  /**
+   * 拉起「忽略电池优化」授权页。
+   *
+   * ⚠️ **只能在用户点击里调**：Android 10+ 禁止后台弹 Activity，非点击路径调只会白跑。
+   * store 里这条动作自己会 `POST /__ds_keepalive/battery` 再重新读一次 `state.json`，
+   * 所以这里不需要额外刷新状态；用户可能没立刻从系统设置返回，状态以后台回读的为准。
+   */
+  const askBatteryExemption = async (): Promise<void> => {
+    setBatteryAsking(true)
+    try {
+      await useRemoteStore.getState().requestBatteryExemption()
+    } catch {
+      // 数据层已静默（保活是锦上添花，失败不该影响连接，也不该弹红字）
+    } finally {
+      setBatteryAsking(false)
+    }
+  }
+
   /* ── 活动登录会话的展示 ─────────────────────────────────────────────── */
 
-  // 浏览器授权：只在 pending 时提示「已打开登录页…」，授权成功自动切到连接态
-  const browsing = qr !== null && qr.mode === 'browser' && qr.status === 'pending'
-  // 扫码：`qr.mode === 'qr'` 才画二维码（浏览器模式的 scanUrl 已经交给原生容器了）
+  /* 浏览器授权（系统浏览器）：
+   *   - 首选 `pendingLogin`：它可能来自**上个进程**（用户授权时 App 被杀，回来就靠它续上）；
+   *   - 退路是 `qr`：同一进程内刚发起、`pendingLogin` 还没来得及写（例如 localStorage 不可用）。
+   * 判断「授权成功」只看轮询结果 —— `external` 模式下 `authPageState().open` 恒为 false，
+   * 拿它当取消信号会在打开浏览器的瞬间误判。 */
+  const loginMode = pendingLogin?.mode ?? (qr?.status === 'pending' ? qr.mode : null)
+  const waitingExpiresAt = pendingLogin?.expiresAt ?? (qr?.status === 'pending' ? qr.expiresAt : null)
+  const waitingSeconds = waitingExpiresAt === null ? 0 : Math.max(0, Math.ceil((waitingExpiresAt - now) / MILLIS_PER_SECOND))
+  const waitingAuth = !connected && loginMode === 'browser' && waitingExpiresAt !== null && now < waitingExpiresAt
+  const waitingProvider = pendingLogin?.providerId ?? qr?.providerId ?? null
+  // 扫码：`qr.mode === 'qr'` 才画二维码（浏览器模式的 scanUrl 已经交给系统浏览器了）
   const scanning = qr !== null && qr.mode === 'qr' && qr.status !== 'complete' && qr.status !== 'cancelled'
   const expiredByClock = qr !== null && now >= qr.expiresAt
   const qrExpired = qr !== null && (qr.status === 'expired' || (qr.status === 'pending' && expiredByClock))
@@ -383,18 +452,22 @@ export const RemoteSettingsPanel = () => {
         </div>
       )}
 
-      {/* ── 浏览器授权等待中：文案 + 取消（授权页在原生容器里，这边只等轮询） ── */}
-      {browsing ? (
+      {/* ── 浏览器授权等待中：已交给系统浏览器，这边只等轮询（可以随时取消） ── */}
+      {waitingAuth ? (
         <div className={styles.waiting} role="status">
           <span className={styles.waitingText}>
             {t('remoteLoginPageOpened')}
-            {qr === null ? '' : ` · ${providerName(qr.providerId)}`}
+            <span className={styles.waitingCountdown}>
+              {t('remoteLoginWaitingAuth', { time: formatCountdown(waitingSeconds) })}
+            </span>
+            {waitingProvider === null ? '' : ` · ${providerName(waitingProvider)}`}
           </span>
           <Button variant="outlined" size="s" onClick={cancelLogin}>
             {t('remoteLoginCancel')}
           </Button>
         </div>
       ) : null}
+      {waitingAuth ? <div className={styles.description}>{t('remoteLoginResumeHint')}</div> : null}
 
       {/* ── 扫码：二维码只在 `qr.mode === 'qr'` 时出现 ── */}
       {scanning && qr !== null ? (
@@ -468,6 +541,57 @@ export const RemoteSettingsPanel = () => {
           <span>{error.message}</span>
         </div>
       ) : null}
+
+      {/* ── 保活状态区（K3）：原生前台服务的三态 + 两条权限提示 ────────────
+       * 只在 `supported:true` 时出现（普通浏览器 / 旧 APK 没有 `/__ds_keepalive/*`）。
+       * 真机上「App 一切后台就被杀、登录都做不完」时，用户往往**还没连上**，
+       * 所以这一块必须不依赖 `phase==='ready'`。
+       * 通知权限没有可调的原生「申请」端点（`POST_NOTIFICATIONS` 只能由原生在主线程请求），
+       * 所以这里只给文字说明；电池优化有端点，但**只能在点击里**调。 */}
+      {keepAlive !== null && keepAlive.supported ? (
+        <div className={styles.keepAlive} role="group" aria-label={t('remoteKeepAliveTitle')}>
+          <div className={styles.keepAliveHead}>
+            <span className={styles.keepAliveTitle}>{t('remoteKeepAliveTitle')}</span>
+            <span
+              className={clsx(
+                styles.chip,
+                keepAlive.running && styles.chipOn,
+                !keepAlive.running && keepAlive.shouldRun && styles.chipError,
+              )}
+            >
+              <span className={styles.chipLabel}>{t('remoteStatus')}</span>
+              <span className={styles.chipValue}>
+                {t(keepAliveStateLabel(keepAlive.running, keepAlive.shouldRun))}
+              </span>
+            </span>
+          </div>
+
+          {keepAlive.notificationsGranted ? null : (
+            <>
+              <div className={styles.keepAliveWarn} role="status">
+                {t('remoteKeepAliveNotifyMissing')}
+              </div>
+              <div className={styles.description}>{t('remoteKeepAliveNotifyHowTo')}</div>
+            </>
+          )}
+
+          {keepAlive.batteryExempt ? null : (
+            <div className={styles.keepAliveRow}>
+              <span className={styles.keepAliveWarn}>{t('remoteKeepAliveBatteryMissing')}</span>
+              <Button
+                variant="outlined"
+                size="s"
+                disabled={batteryAsking}
+                onClick={() => void askBatteryExemption()}
+              >
+                {t(batteryAsking ? 'remoteKeepAliveBatteryAsking' : 'remoteKeepAliveBatteryAction')}
+              </Button>
+            </div>
+          )}
+
+          <div className={styles.description}>{t('remoteKeepAliveHint')}</div>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -510,10 +634,24 @@ const StatusChip = ({
 /** `phase` → 文案 key；未知取值按「未连接」处理（不猜状态） */
 const phaseLabel = (phase: string): TranslationKey => {
   if (phase === 'authing') return 'remotePhaseAuthing'
+  if (phase === 'waiting-auth') return 'remotePhaseWaitingAuth'
   if (phase === 'connecting') return 'remotePhaseConnecting'
   if (phase === 'ready') return 'remotePhaseReady'
   if (phase === 'error') return 'remotePhaseError'
   return 'remotePhaseIdle'
+}
+
+/**
+ * 保活三态 → 徽标文案 key。
+ *
+ * 三个状态来自原生快照的两个独立布尔（`running` / `shouldRun`），不是三选一枚举：
+ *   - `running`            → 服务在跑；
+ *   - `shouldRun && !running` → 该跑却没跑（系统在后台把它杀了），要提示用户；
+ *   - 其它                → 没连上、本来就不该跑（未启用）。
+ */
+const keepAliveStateLabel = (running: boolean, shouldRun: boolean): TranslationKey => {
+  if (running) return 'remoteKeepAliveRunning'
+  return shouldRun ? 'remoteKeepAliveEnabledIdle' : 'remoteKeepAliveInactive'
 }
 
 type Translate = ReturnType<typeof useTranslate>

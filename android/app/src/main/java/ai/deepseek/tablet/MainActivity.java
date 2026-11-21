@@ -1,8 +1,10 @@
 package ai.deepseek.tablet;
 
+import android.Manifest;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
@@ -59,7 +61,13 @@ public final class MainActivity extends AppCompatActivity {
 
     private static final String TAG = "DeepSeekTablet";
     private static final int REQ_FILE_CHOOSER = 4711;
+    /** 申请 POST_NOTIFICATIONS 的 requestCode（与 KeepAliveHandler 的 4713 刻意错开） */
+    private static final int REQ_POST_NOTIFICATIONS = 4712;
     private static final String LOOPBACK_HOST = "127.0.0.1";
+
+    /** 壳自己的轻量设置（目前只有「通知权限问过没有」这一项） */
+    private static final String PREFS_SHELL = "dsp.shell.v1";
+    private static final String KEY_NOTIF_ASKED = "notif_requested";
 
     private static final int COLOR_BACKGROUND = 0xFF0F1115;
     /** 浅色主题时的窗口底色，与网页 --dsw-alias-bg-base 对齐 */
@@ -162,9 +170,14 @@ public final class MainActivity extends AppCompatActivity {
         appVisible = false;
         super.onPause();
         if (webView != null) {
-            // 页面进入后台后停掉定时器与合成，后台 CPU / 内存占用明显下降
+            // 页面进入后台后停掉定时器与合成，后台 CPU / 内存占用明显下降。
+            // 但远程 DSH 的心跳跑在页面 JS 里：一旦冻结定时器，25s 的 ping 就断，
+            // 服务端 75 秒把连接踢掉 —— 用户切到系统浏览器授权、再切回来就只剩「已断开」。
+            // 所以保活服务在跑的时候不能停定时器（此时进程已被前台服务保活，不会白耗）。
             webView.onPause();
-            webView.pauseTimers();
+            if (!RemoteKeepAliveService.shouldRun(this)) {
+                webView.pauseTimers();
+            }
         }
     }
 
@@ -172,6 +185,10 @@ public final class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         appVisible = true;
+        // 每次真的回到前台都检查一次：通知权限（13+，只问一次）与后台保活自愈。
+        // 放在这个位置（早于下面 rendererNeedsRebuild 的提前 return）才能保证重建路径也走到。
+        requestNotificationPermissionOnce();
+        restoreKeepAliveIfNeeded();
         if (rendererNeedsRebuild) {
             // 后台被回收过，用户已经回来了，这时重建是可见且合理的
             rendererNeedsRebuild = false;
@@ -188,6 +205,62 @@ public final class MainActivity extends AppCompatActivity {
             webView.resumeTimers();
             webView.onResume();
         }
+    }
+
+    // ---------------------------------------------------------------- 后台保活 / 通知权限
+
+    /**
+     * Android 13+ 的运行时通知权限（{@code POST_NOTIFICATIONS}）。
+     *
+     * <p>没有它，后台保活的前台服务照样跑，只是那条「Chat Pad 正在保持远程连接」的常驻通知
+     * 不显示 —— 用户看不到后台有东西在跑，就会觉得「怎么偷偷跑了」。所以能要就要一次。
+     *
+     * <p>只用框架 API：{@code Activity.requestPermissions(int, String[], int)} 自 API 23 起就有，
+     * 不必引入 androidx 的 ActivityCompat（本项目虽已依赖 androidx.appcompat，但没必要为此多一层）。
+     * 每装一次只问一次：用户拒绝后不再反复弹（拒绝不影响保活本身）。
+     */
+    private void requestNotificationPermissionOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return;
+        }
+        if (RemoteKeepAliveService.isNotificationAllowed(this)) {
+            return;
+        }
+        SharedPreferences preferences = getSharedPreferences(PREFS_SHELL, MODE_PRIVATE);
+        if (preferences.getBoolean(KEY_NOTIF_ASKED, false)) {
+            return;
+        }
+        preferences.edit().putBoolean(KEY_NOTIF_ASKED, true).apply();
+        try {
+            requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS},
+                    REQ_POST_NOTIFICATIONS);
+        } catch (RuntimeException failed) {
+            // 个别 ROM 在窗口还没拿到焦点时会抛；失败就算了，拒绝也只是一条通知不显示
+            Log.w(TAG, "request POST_NOTIFICATIONS failed", failed);
+        }
+    }
+
+    /**
+     * 保活自愈：页面要求过保活（标志落盘在 {@link RemoteKeepAliveService}），但服务此刻没跑，
+     * 就在前台补一次 {@code startForegroundService}。
+     *
+     * <p>为什么必须在前台补：Android 12+ 从后台启动前台服务会被系统直接拒
+     * （{@code ForegroundServiceStartNotAllowedException}）。onResume 是「应用确实在前台」
+     * 的唯一可靠信号，在这里补成功率最高，也不会出现「后台偷偷拉起界面」的副作用。
+     *
+     * <p>这里只起服务，绝不重建 Activity、也绝不在 onTrimMemory 之类的低内存回调里做任何
+     * 重启界面的动作 —— 后台被回收时把界面拉回来，用户会觉得应用自己在跳。
+     */
+    private void restoreKeepAliveIfNeeded() {
+        if (RemoteKeepAliveService.isRunning()) {
+            return;
+        }
+        if (!RemoteKeepAliveService.shouldRun(this)) {
+            return;
+        }
+        Log.i(TAG, "keep-alive missing but requested before, starting foreground service again");
+        // start() 自己吞异常并在系统拒绝时返回 false，这里不需要再兜
+        RemoteKeepAliveService.start(getApplicationContext());
     }
 
     private void buildContentView() {

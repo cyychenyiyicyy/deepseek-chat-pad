@@ -45,7 +45,21 @@ import {
   type RemoteServer,
 } from './connection.js'
 import { createSecureLink, type SecureLink, type StreamEventPayload } from './core/index.js'
-import { closeAuthPage, pollProviderLogin as pollProviderLoginApi, startProviderLogin as startProviderLoginApi } from './oauth.js'
+import {
+  requestBatteryExemption as requestBatteryExemptionApi,
+  stopKeepAlive,
+  syncKeepAlive,
+  unsupportedKeepAlive,
+  type KeepAliveSnapshot,
+} from './keepAlive.js'
+import {
+  clearPendingLogin,
+  closeAuthPage,
+  pollProviderLogin as pollProviderLoginApi,
+  readPendingLogin,
+  resumePendingLogin as resumePendingLoginApi,
+  startProviderLogin as startProviderLoginApi,
+} from './oauth.js'
 import {
   RemoteApiError,
   isRemoteApiError,
@@ -141,7 +155,8 @@ export interface RemoteOAuthProviderSummary {
  * [契约之外的附加] 当前登录会话（浏览器授权 / 扫码共用同一份）。
  *
  * 两种入口都是「服务端建一个 QR 会话 → 本机轮询 → complete 时领一次性 token」，
- * 区别只在 `mode`：`browser` 把 `scanUrl` 交给原生容器打开，`qr` 把它画成二维码。
+ * 区别只在 `mode`：`browser` 把 `scanUrl` 交给原生容器打开（K2 起默认**系统浏览器**），
+ * `qr` 把它画成二维码。
  *
  * `status` 由数据层推进：`pending` → `complete` / `expired` / `cancelled` / `error`。
  * `expiresAt` 是**本地**算的（服务器仍是权威），可以用来画倒计时。
@@ -156,8 +171,27 @@ export interface RemoteProviderLoginState {
   status: 'pending' | 'complete' | 'expired' | 'cancelled' | 'error'
 }
 
+/**
+ * [契约之外的附加] 「有一次登录还没完成」的跨进程视图（= `dsp.remote.pending-login.v1` 的摘要）。
+ *
+ * **它不代表连接**，只代表「用户去浏览器里授权了，我们还在等他回来」。进程被杀再启动时
+ * 由 `resumeLogin()` 从 localStorage 恢复出来，所以 UI 只要看到非 null 就可以直接渲染
+ * 「等待授权…（剩余 mm:ss）」——用 `expiresAt` 自己算倒计时。
+ */
+export interface RemotePendingLogin {
+  providerId: string
+  mode: 'browser' | 'qr'
+  /** 会话过期时刻（本地时钟；服务器仍是权威） */
+  expiresAt: number
+}
+
 export interface RemoteState {
-  phase: 'idle' | 'authing' | 'connecting' | 'ready' | 'error'
+  /**
+   * `waiting-auth` 是 K2 新增的：用户在系统浏览器里授权，本机**没有连接**，只是在轮询
+   * `/api/v1/auth/oauth/qr/{qrId}`。它与 `authing`（正在换 token / 注册设备）的区别在于
+   * 用户什么都做不了，只能等或取消 —— UI 据此显示倒计时而不是「正在连接」。
+   */
+  phase: 'idle' | 'authing' | 'connecting' | 'ready' | 'error' | 'waiting-auth'
   capabilities: string[]
   transport: 'relay' | 'lan' | 'p2p' | 'turn' | null
   error: { code: string; message: string } | null
@@ -183,20 +217,48 @@ export interface RemoteState {
   oauthProviders: RemoteOAuthProviderSummary[]
   /** 当前登录会话（`null` = 没在登录）；浏览器授权与扫码共用 */
   qr: RemoteProviderLoginState | null
+  /** 待完成登录（跨进程可恢复；`null` = 没有）。UI 据此渲染「等待授权…（剩余 mm:ss）」 */
+  pendingLogin: RemotePendingLogin | null
+  /**
+   * 原生保活服务状态（K1）。`null` = 还没探测过；`supported:false` = 这个环境没有这套端点
+   * （普通浏览器 / 旧 APK）。UI 用它提示「通知权限没给」「没豁免电池优化」。
+   */
+  keepAlive: KeepAliveSnapshot | null
   /** 拉一次登录方式列表；不传 serverUrl 时用最近用过的服务器 */
   loadOAuthProviders(serverUrl?: string): Promise<void>
   /** 邮箱密码登录 + 连接（与 `connect()` 完全同一条路径，serverUrl 缺省取最近用过的） */
   loginWithPassword(email: string, password: string, serverUrl?: string): Promise<void>
   /**
    * 发起 provider 登录：`POST {qrStartUrl}` 建会话 →
-   *   `browser`：原生容器打开 `scanUrl`（Custom Tab / 外部浏览器）
+   *   `browser`：原生容器用**系统浏览器**打开 `scanUrl`
    *   `qr`：什么都不打开，`qr.scanUrl` 交给 UI 画二维码
    * 之后由 UI 每 2s 调一次 `pollProviderLogin()`。
    */
   startProviderLogin(providerId: string, mode: 'browser' | 'qr', serverUrl?: string): Promise<void>
   /** 登录轮询（单拍）：`pending` 不动；`complete` 自动换设备账号并建链；超时/过期望 UI 重开 */
   pollProviderLogin(): Promise<void>
-  /** 取消登录：关掉原生授权页，会话标成 `cancelled`（服务器侧会自己过期） */
+  /**
+   * 续上一次没完成的登录（App 启动 / 从浏览器切回前台时调用）。
+   *
+   * 幂等 + 并发安全：读 `dsp.remote.pending-login.v1`，没过期就继续轮询；`complete` 时
+   * 自动落账号 + 注册设备 + 建链。没有待完成会话时什么都不做（不会弹错误）。
+   */
+  resumeLogin(): Promise<void>
+  /**
+   * 回到前台（`visibilitychange → visible`）时的一次性补齐：
+   *   ① `resumeLogin()`；② 立刻补一拍登录轮询（后台定时器被系统节流，别等 2s）；
+   *   ③ 保活服务自检（系统可能在后台杀掉它，`shouldRun && !running` 就补一次 start）。
+   * 三件事都幂等 + 静默，重复触发不会多发请求，也不会抛。
+   */
+  onAppForeground(): Promise<void>
+  /** 重新探测原生保活状态（需要时顺手拉起来）；失败静默 —— 保活不该影响连接 */
+  refreshKeepAlive(): Promise<void>
+  /**
+   * 拉起「忽略电池优化」授权页。
+   * ⚠️ **只能在用户点击里调**（Android 10+ 禁止后台弹 Activity）。
+   */
+  requestBatteryExemption(): Promise<void>
+  /** 取消登录：停轮询、清持久化、关授权页，会话标成 `cancelled` */
   cancelProviderLogin(): Promise<void>
 }
 
@@ -259,6 +321,34 @@ let loginServerUrl: string | null = null
 /** 账号 token 只能领一次：拿到 `complete` 之后绝不允许再 poll（服务器不会再给第二个） */
 let loginTokenClaimed = false
 
+/**
+ * 登录轮询的单拍互斥（Promise 而不是布尔：调用方可以等它落地）。
+ *
+ * 为什么必须是 Promise：`resumeLogin()` 在启动时可能正好撞上一次 UI 定时器发起的单拍，
+ * 而 `complete` 的账号 token **只能领一次** —— 两个轮询同时在飞，后到者会拿到
+ * 「complete 但没有 token」，把一次成功的登录判成失败。所以恢复流程要先等这一拍结束。
+ */
+let pollInFlight: Promise<void> | null = null
+/** 恢复流程（`resumeLogin()`）：同一时刻只有一个，后到者拿同一个 Promise */
+let resumeInFlight: Promise<void> | null = null
+/** 恢复流程的取消开关（用户点「取消登录」/ 断开 / 重新发起时 abort） */
+let resumeAbort: AbortController | null = null
+/**
+ * 登录会话代际：取消 / 重新发起时自增。
+ *
+ * 异步流程收尾时如果代际已经变了，就**不许**再改 state —— 否则「上一代的超时/取消」会把
+ * 用户刚刚发起的新一轮登录覆盖成 cancelled。
+ */
+let loginGeneration = 0
+
+/** 停掉恢复流程（只发信号；真正的收尾在流程自己的 finally 里） */
+const abortResume = (): void => {
+  loginGeneration += 1
+  const controller = resumeAbort
+  resumeAbort = null
+  controller?.abort()
+}
+
 /** `$events` 等到 `ready` 的预算（超时即认为这条连接不可用：审批应答没有 clientId）。 */
 const EVENTS_READY_TIMEOUT_MS = 10_000
 /** 等 `session/follow` 首帧快照的预算（首帧可能很大，给足；参考 client-core 的 60 s）。 */
@@ -276,6 +366,8 @@ const INITIAL_STATE = {
   pendingApprovals: [] as { eventId: string; title: string; detail?: string }[],
   oauthProviders: [] as RemoteOAuthProviderSummary[],
   qr: null as RemoteProviderLoginState | null,
+  pendingLogin: null as RemotePendingLogin | null,
+  keepAlive: null as KeepAliveSnapshot | null,
 }
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -586,6 +678,49 @@ const shutdown = async (): Promise<void> => {
   }
 }
 
+/* ── 原生保活（K1）：连上就拉起，真断开就停 ─────────────────────────────
+ * 为什么必须在**页面**侧做：远程连接的心跳是页面定时器。用户切到系统浏览器授权时
+ * WebView 进后台、定时器被冻结，服务端 75 秒就把连接踢了 —— 原生前台服务在这段
+ * 时间替我们维持心跳。纪律：失败静默（保活不该影响连接）、绝不在 `pagehide` /
+ * `beforeunload` / `onPause` 里停（切后台正是需要它的时候）。 */
+
+/** 状态只在真的变了才写（前台自检会被高频调用，别每次都触发重渲染） */
+const sameKeepAlive = (a: KeepAliveSnapshot | null, b: KeepAliveSnapshot): boolean =>
+  a !== null &&
+  a.supported === b.supported &&
+  a.running === b.running &&
+  a.shouldRun === b.shouldRun &&
+  a.notificationsGranted === b.notificationsGranted &&
+  a.batteryExempt === b.batteryExempt &&
+  a.sdkInt === b.sdkInt
+
+const applyKeepAlive = (snapshot: KeepAliveSnapshot): void => {
+  if (sameKeepAlive(useRemoteStore.getState().keepAlive, snapshot)) return
+  useRemoteStore.setState({ keepAlive: snapshot })
+}
+
+/** 探测 +（需要时）拉起保活；非壳环境记成 `supported:false`，绝不抛 */
+const refreshKeepAliveFlow = async (): Promise<void> => {
+  try {
+    const snapshot = await syncKeepAlive()
+    applyKeepAlive(snapshot ?? unsupportedKeepAlive())
+  } catch {
+    // 原生端点抽风不该让连接流程背锅
+  }
+}
+
+/** 真断开 / 退出登录：停保活（幂等；不 await，断开这条路径不该被原生调用拖住） */
+const stopKeepAliveFlow = (): void => {
+  void stopKeepAlive()
+    .then((stopped) => {
+      // 取**此刻**的快照：断开路径可能已经把 state 清成 INITIAL_STATE（`keepAlive: null`），
+      // 那就不该再把旧快照写回去。
+      const latest = useRemoteStore.getState().keepAlive
+      if (stopped && latest !== null) applyKeepAlive({ ...latest, running: false })
+    })
+    .catch(() => undefined)
+}
+
 /* ── 动作实现 ─────────────────────────────────────────────────────────── */
 
 /**
@@ -623,6 +758,8 @@ const establishSession = async (client: RemoteClient, server: RemoteServer, devi
         // 建链成功后才算「意外断开」；建链期间的失败由 client.connect 自己抛。
         current.closing = true
         active = null
+        // 不会自动重连了：把原生保活停掉，别留一个「守护着死连接」的前台服务
+        stopKeepAliveFlow()
         failConnection(new RemoteApiError('TRANSPORT_CLOSED', '与远端主机的安全通道已断开'))
       },
     })
@@ -656,12 +793,17 @@ const establishSession = async (client: RemoteClient, server: RemoteServer, devi
       transport: toTransport(connected.transport),
       error: null,
     })
+    // 连上了就把原生保活拉起来：用户随时可能切到系统浏览器授权，页面定时器会被冻结。
+    // 不 await：保活失败不该拖住首屏（也不该影响连接结果）。
+    void refreshKeepAliveFlow()
 
     // 6. `$events` 必须先 ready（审批 / 目录增量都靠它）
     await openEventsStream(session)
     // 7. 首屏列表
     useRemoteStore.setState({ sessions: projectSessions(await listSessions(link)) })
   } catch (error) {
+    // 已经 ready 之后才失败的（`$events` / 首屏）：保活服务不该继续守护一条死连接
+    stopKeepAliveFlow()
     await shutdown()
     failConnection(error)
   }
@@ -743,9 +885,13 @@ const loginWithPasswordFlow = async (email: string, password: string, serverUrl?
  *
  * 顺序很关键：
  *   1. 先拿 provider 列表（要 `qrStartUrl`，state 里只留了 UI 需要的那三项）；
- *   2. 建会话 —— `browser` 模式会在这里让原生容器打开授权页，非壳环境**这一步就失败**
- *      （报「只能在 App 内使用」），不会留一个永远 pending 的登录；
- *   3. 把会话写进 state，之后由 UI 每 2s 调 `pollProviderLogin()`。
+ *   2. 建会话 —— `browser` 模式会在这里让原生容器用**系统浏览器**打开授权页，非壳环境
+ *      **这一步就失败**（报「只能在 App 内使用」），不会留一个永远 pending 的登录；
+ *   3. 把会话写进 state（同时 `oauth.js` 已经把它落盘，App 被杀也能续），之后由 UI 每 2s
+ *      调 `pollProviderLogin()`。
+ *
+ * 发起新登录前会先把「上一轮恢复流程」abort 掉：否则旧的轮询可能在后面收尾时把新会话
+ * 的状态覆盖掉（代际检查兜底，但不该指望它）。
  */
 const startProviderLoginFlow = async (
   providerId: string,
@@ -761,6 +907,7 @@ const startProviderLoginFlow = async (
       throw new RemoteApiError('OAUTH_PROVIDER_UNKNOWN', `这台服务器没有启用「${providerId}」登录方式`)
     }
     // 旧会话先收尾：同一时间只允许一个登录会话（旧 qrId 服务器侧会自己过期）
+    abortResume()
     if (useRemoteStore.getState().qr?.mode === 'browser') await closeAuthPage()
 
     const session = await startProviderLoginApi(url, provider, mode)
@@ -775,7 +922,10 @@ const startProviderLoginFlow = async (
         expiresAt: session.expiresAt,
         status: 'pending',
       },
-      error: null,
+      pendingLogin: { providerId: session.providerId, mode, expiresAt: session.expiresAt },
+      // 系统浏览器打不开时会回退应用内 WebView（`session.notice`）：把这句话带到界面上
+      ...(session.notice === undefined ? { error: null } : { error: { code: 'OAUTH_INLINE_FALLBACK', message: session.notice } }),
+      ...(useRemoteStore.getState().phase === 'ready' ? {} : { phase: 'waiting-auth' as const }),
     })
   } catch (error) {
     failSignIn(error)
@@ -811,11 +961,17 @@ const pollProviderLoginOnce = async (): Promise<void> => {
     result = await pollProviderLoginApi(serverUrl, login.qrId, { expiresAt: login.expiresAt })
   } catch (error) {
     // 网络抖动不该把「等待授权」变成「登录失败」：只记错误，UI 继续轮
-    if (isRemoteApiError(error) && error.retryable) {
+    // 但 401/404/410 例外：服务器已经不认这个 qrId 了，重试多少次都没用（与恢复流程同一套分类）
+    const stale =
+      isRemoteApiError(error) && (error.status === 401 || error.status === 404 || error.status === 410)
+    if (isRemoteApiError(error) && error.retryable && !stale) {
       noteSignInError(error)
       return
     }
-    useRemoteStore.setState({ qr: { ...login, status: 'error' } })
+    // qrId 已经作废（401/404）：盘上那份也没用了，留着只会在下次启动白跑一次
+    clearPendingLogin()
+    useRemoteStore.setState({ qr: { ...login, status: 'error' }, pendingLogin: null })
+    if (state.phase === 'waiting-auth') useRemoteStore.setState({ phase: 'idle' })
     failSignIn(error)
     return
   }
@@ -824,15 +980,21 @@ const pollProviderLoginOnce = async (): Promise<void> => {
   if (result.status === 'complete') {
     // token 只返回一次，从这里开始禁止再 poll（换设备失败也只能重新发起登录）
     loginTokenClaimed = true
+    clearPendingLogin()
     const claimed: RemoteProviderLoginState = { ...login, status: 'complete' }
-    useRemoteStore.setState({ qr: claimed })
+    useRemoteStore.setState({ qr: claimed, pendingLogin: null })
     if (login.mode === 'browser') await closeAuthPage()
     await connectWithProviderToken(serverUrl, result.token, claimed, login.mode === 'qr' ? 'qr' : 'oauth')
     return
   }
 
   // expired：服务器说过期了（或本地时钟先到），提示 UI 刷新二维码 / 重新发起
-  useRemoteStore.setState({ qr: { ...login, status: 'expired' } })
+  clearPendingLogin()
+  useRemoteStore.setState({
+    qr: { ...login, status: 'expired' },
+    pendingLogin: null,
+    ...(state.phase === 'waiting-auth' ? { phase: 'idle' as const } : {}),
+  })
   if (login.mode === 'browser') await closeAuthPage()
 }
 
@@ -841,17 +1003,156 @@ const pollProviderLoginOnce = async (): Promise<void> => {
  *
  * 为什么需要：UI 的 2s 定时器 + 一次慢请求会叠出两次并发 poll，而 `complete` 的 token
  * **只能领一次** —— 第二个请求会拿到「complete 但没有 token」，反而把登录判成失败。
+ *
+ * 恢复流程（`resumeLogin()`）在跑的时候，单拍一律让路：它自己会按同样的节奏轮询，
+ * 两边同时打服务器同样会抢 token。
  */
-let pollInFlight = false
-
 const pollProviderLoginFlow = async (): Promise<void> => {
-  if (pollInFlight) return
-  pollInFlight = true
-  try {
-    await pollProviderLoginOnce()
-  } finally {
-    pollInFlight = false
+  if (pollInFlight !== null || resumeInFlight !== null) return
+  const task = pollProviderLoginOnce().finally(() => {
+    if (pollInFlight === task) pollInFlight = null
+  })
+  pollInFlight = task
+  await task
+}
+
+/**
+ * 续上一次没完成的登录（K2 的核心）。
+ *
+ * 调用时机：面板挂载（App 启动 / 用户重新打开设置）、`visibilitychange → visible`
+ * （用户从系统浏览器切回来）、以及面板的立即补拍。三条路径可能同时触发，所以：
+ *
+ *   - **幂等单飞**：`resumeInFlight` 非空时直接返回同一个 Promise；
+ *   - **不和 UI 单拍抢**：起跑前若有一拍在飞，先等它落地（它会自己领走 token）；
+ *   - **代际守卫**：收尾时若 `loginGeneration` 变了（用户取消 / 重新发起），不许再改 state。
+ *
+ * 没有待完成会话时**什么都不做**（不写 error、不动 phase）—— 它会被高频调用，
+ * 不能因为「本来就没事」而弹提示。
+ */
+const runResumeLogin = async (): Promise<void> => {
+  // 起跑前先让 UI 那一拍落地：`complete` 的 token 只能被一个轮询领走
+  if (pollInFlight !== null) await pollInFlight.catch(() => undefined)
+
+  const record = readPendingLogin()
+  if (record === null) {
+    if (useRemoteStore.getState().pendingLogin !== null) useRemoteStore.setState({ pendingLogin: null })
+    return
   }
+
+  const current = useRemoteStore.getState()
+  if (current.phase === 'ready' || current.phase === 'authing' || current.phase === 'connecting') {
+    // 已经连上 / 另一条登录正在跑：这条旧会话没有意义了（服务器侧会自己过期）
+    clearPendingLogin()
+    if (current.pendingLogin !== null) useRemoteStore.setState({ pendingLogin: null })
+    return
+  }
+
+  const generation = loginGeneration
+  const controller = new AbortController()
+  resumeAbort = controller
+  const pending: RemotePendingLogin = {
+    providerId: record.providerId,
+    mode: record.mode,
+    expiresAt: record.expiresAt,
+  }
+  // 先把「等待授权」摆出来（同步段）：面板一挂载就能显示倒计时，不用等第一拍网络往返
+  useRemoteStore.setState({
+    phase: 'waiting-auth',
+    pendingLogin: pending,
+    error: null,
+    qr: {
+      providerId: record.providerId,
+      mode: record.mode,
+      qrId: record.qrId,
+      scanUrl: record.scanUrl,
+      expiresAt: record.expiresAt,
+      status: 'pending',
+    },
+  })
+
+  const outcome = await resumePendingLoginApi({
+    signal: controller.signal,
+    complete: async ({ record: hit, token }) => {
+      // 与「本进程内轮询到 complete」走**同一条**落地路径（落账号 + 注册设备 + 建链）
+      const claimed: RemoteProviderLoginState = {
+        providerId: hit.providerId,
+        mode: hit.mode,
+        qrId: hit.qrId,
+        scanUrl: hit.scanUrl,
+        expiresAt: hit.expiresAt,
+        status: 'complete',
+      }
+      await connectWithProviderToken(hit.serverUrl, token, claimed, hit.mode === 'qr' ? 'qr' : 'oauth')
+    },
+  })
+
+  // 旧一代会话的收尾不许动新会话的状态
+  if (generation !== loginGeneration) return
+
+  const latest = useRemoteStore.getState()
+  const mine = latest.qr?.qrId === record.qrId ? latest.qr : null
+  const backToIdle = latest.phase === 'waiting-auth' ? { phase: 'idle' as const } : {}
+
+  if (outcome.status === 'none' || outcome.status === 'complete') {
+    // complete 的 phase/qr 已经由 `connectWithProviderToken` 接管
+    if (latest.pendingLogin !== null) useRemoteStore.setState({ pendingLogin: null })
+    return
+  }
+
+  if (outcome.status === 'cancelled') {
+    useRemoteStore.setState({
+      pendingLogin: null,
+      ...(mine === null || mine.status !== 'pending' ? {} : { qr: { ...mine, status: 'cancelled' as const } }),
+      ...backToIdle,
+    })
+    return
+  }
+
+  // expired / timeout / failed：会话已经没了（或 qrId 失效），清理 + 给出原因
+  useRemoteStore.setState({
+    pendingLogin: null,
+    ...(mine === null ? {} : { qr: { ...mine, status: outcome.status === 'failed' ? ('error' as const) : ('expired' as const) } }),
+    ...backToIdle,
+  })
+  noteSignInError(
+    new RemoteApiError(outcome.code ?? 'QR_EXPIRED', outcome.message ?? '登录会话已失效，请重新发起登录'),
+  )
+}
+
+/** `resumeLogin()` 的外壳：单飞 + 兜底（这条路径永远不该把异常抛给界面） */
+const resumeLoginFlow = (): Promise<void> => {
+  if (resumeInFlight !== null) return resumeInFlight
+  const task: Promise<void> = runResumeLogin()
+    .catch((error: unknown) => {
+      noteSignInError(error)
+    })
+    .finally(() => {
+      if (resumeInFlight === task) {
+        resumeInFlight = null
+        resumeAbort = null
+      }
+    })
+  resumeInFlight = task
+  return task
+}
+
+/**
+ * 回到前台（`visibilitychange → visible`）时的一次性补齐。
+ *
+ * 为什么三件事都要做：
+ *   ① 用户可能刚从系统浏览器授权回来 → `resumeLogin()` 续上被杀进程前的那次登录；
+ *   ② 后台的 `setTimeout` 会被系统节流，2s 轮询定时器可能整段停摆 → 立刻补一拍
+ *      （恢复流程在跑时它自己会拍，这里会被单飞让路，不会多打）；
+ *   ③ 系统可能在后台把保活服务杀掉 → 探一次，`shouldRun && !running` 就补一次 start。
+ *
+ * 三件事都是幂等 + 静默：这条路径会被反复触发，不能因为「本来就没事」而弹提示。
+ */
+const foregroundFlow = async (): Promise<void> => {
+  await Promise.all([
+    resumeLoginFlow().catch(() => undefined),
+    pollProviderLoginFlow().catch(() => undefined),
+    refreshKeepAliveFlow(),
+  ])
 }
 
 /** 领到 token 之后：换设备账号（`loginWithAccountToken` 负责落盘）→ 建链。 */
@@ -891,13 +1192,28 @@ const connectWithProviderToken = async (
   }
 }
 
-/** 取消登录：关授权页 + 标记 `cancelled`（服务器侧的 qrId 会自己过期，不需要额外请求）。 */
+/**
+ * 取消登录（K2 语义：**必须清持久化 + 停轮询**，否则下次启动还会续上一次「已取消」的登录）。
+ *
+ * 服务器侧的 qrId 不需要显式作废端点，它会自己过期；这里只做本地收尾。
+ */
 const cancelProviderLoginFlow = async (): Promise<void> => {
   const login = useRemoteStore.getState().qr
+  const phase = useRemoteStore.getState().phase
   loginServerUrl = null
-  if (login === null) return
+  // 先停轮询（abort 会让恢复流程以 `cancelled` 收尾），再删盘上的记录
+  abortResume()
+  clearPendingLogin()
+  if (login === null) {
+    useRemoteStore.setState({ pendingLogin: null, ...(phase === 'waiting-auth' ? { phase: 'idle' as const } : {}) })
+    return
+  }
   if (login.mode === 'browser') await closeAuthPage()
-  useRemoteStore.setState({ qr: { ...login, status: 'cancelled' } })
+  useRemoteStore.setState({
+    pendingLogin: null,
+    qr: { ...login, status: 'cancelled' },
+    ...(phase === 'waiting-auth' ? { phase: 'idle' as const } : {}),
+  })
 }
 
 /** 建链互斥：连点两次不能并发建两条安全通道（第二条会覆盖 `active` 并泄漏第一条）。 */
@@ -1154,6 +1470,11 @@ export const useRemoteStore = create<RemoteState>(() => ({
     setPaging(false, false)
     // 登录会话也跟着作废：浏览器授权页还开着的话顺手关掉（不 await：断开不该被原生桥拖住）
     if (useRemoteStore.getState().qr?.mode === 'browser') void closeAuthPage()
+    abortResume()
+    // 断开 = 主动放弃这次登录：盘上的待完成会话必须清掉，否则下次启动会自己续上
+    clearPendingLogin()
+    // 主动断开 / 退出登录：保活服务必须停（它守护的连接已经没了）
+    stopKeepAliveFlow()
     loginServerUrl = null
     loginTokenClaimed = false
     useRemoteStore.setState({ ...INITIAL_STATE })
@@ -1197,6 +1518,24 @@ export const useRemoteStore = create<RemoteState>(() => ({
 
   pollProviderLogin: async (): Promise<void> => {
     await pollProviderLoginFlow()
+  },
+
+  resumeLogin: async (): Promise<void> => {
+    await resumeLoginFlow()
+  },
+
+  onAppForeground: async (): Promise<void> => {
+    await foregroundFlow()
+  },
+
+  refreshKeepAlive: async (): Promise<void> => {
+    await refreshKeepAliveFlow()
+  },
+
+  requestBatteryExemption: async (): Promise<void> => {
+    // 只能在用户点击里调（Android 10+ 禁止后台弹 Activity）：失败静默，返回后重新探一次
+    await requestBatteryExemptionApi().catch(() => false)
+    await refreshKeepAliveFlow()
   },
 
   cancelProviderLogin: async (): Promise<void> => {
