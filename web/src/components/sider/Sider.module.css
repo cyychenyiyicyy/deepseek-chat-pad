@@ -70,6 +70,28 @@
   }
 }
 
+/* 远程模式顶部那行：刷新会话（占满）+ 连接设置 */
+.remoteActions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+
+  .newChat {
+    flex: 1;
+    width: auto;
+  }
+}
+
+/* 远程会话列表：跟本地列表占同一个位置，只是数据源不同 */
+.remoteList {
+  margin-top: 12px;
+}
+
+.mobile .remoteList {
+  margin-top: 8px;
+}
+
 .newChat {
   position: relative;
   display: flex;
@@ -100,6 +122,12 @@
       0 4px 4px 0 rgba(72, 104, 178, 0.04),
       0 -3px 4px 0 rgba(72, 104, 178, 0.04),
       0 6px 6px 0 rgba(106, 111, 117, 0.1);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: default;
+    box-shadow: none;
   }
 
   [data-ds-dark-theme] & {
@@ -193,16 +221,6 @@
   width: 30px;
   height: 30px;
   color: var(--dsw-alias-label-primary);
-}
-
-/* 当前处于远程模式时，入口保持高亮，避免「点进来不知道自己在哪个模式」 */
-.settingsActive {
-  background-color: var(--dsw-specific-sidebar-nav-item-active-accent);
-
-  .settingsIcon,
-  .settingsLabel {
-    color: var(--dsw-alias-brand-primary-invert);
-  }
 }
 
 .settingsLabel {

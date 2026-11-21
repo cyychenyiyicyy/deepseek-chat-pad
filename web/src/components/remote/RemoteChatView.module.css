@@ -1,8 +1,8 @@
-/* 远程会话页：与 SessionView 同一套骨架（顶栏 + 时间线 + 吸底输入框） */
+/* 远程会话页：与 SessionView 完全相同的外框约定（绝对定位铺满内容区，顶栏 + 时间线 + 吸底输入框） */
 .view {
-  position: relative;
+  position: absolute;
+  inset: 0;
   display: flex;
-  flex: 1;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
@@ -359,51 +359,7 @@
   cursor: not-allowed;
 }
 
-/* ---------- 移动端会话抽屉 ---------- */
-
-.drawerLayer {
-  position: absolute;
-  inset: 0;
-  z-index: 800;
-  display: flex;
-}
-
-.drawerMask {
-  position: absolute;
-  inset: 0;
-  background-color: rgba(0, 0, 0, 0.36);
-}
-
-.drawer {
-  position: relative;
-  width: min(320px, 82vw);
-  height: 100%;
-  box-shadow: 0 0 32px rgba(0, 0, 0, 0.28);
-  animation: remote-drawer-in 0.24s cubic-bezier(0.32, 0.72, 0, 1);
-}
-
-/* 抽屉里铺满：列表自身的固定宽度与右边框在这里失效 */
-.drawerPanel {
-  width: 100%;
-  border-right: none;
-  background-color: var(--dsw-alias-bg-base);
-}
-
-@keyframes remote-drawer-in {
-  from {
-    transform: translateX(-100%);
-  }
-
-  to {
-    transform: translateX(0);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .drawer {
-    animation: none;
-  }
-}
+/* ---------- 移动端 ---------- */
 
 @media not all and (min-width: 768px) {
   .header {

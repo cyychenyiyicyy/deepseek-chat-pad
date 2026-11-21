@@ -45,7 +45,15 @@ import {
   type RemoteServer,
 } from './connection.js'
 import { createSecureLink, type SecureLink, type StreamEventPayload } from './core/index.js'
-import { RemoteApiError, normalizeServerUrl } from './serverApi.js'
+import { closeAuthPage, pollProviderLogin as pollProviderLoginApi, startProviderLogin as startProviderLoginApi } from './oauth.js'
+import {
+  RemoteApiError,
+  isRemoteApiError,
+  normalizeServerUrl,
+  oauthProviders as oauthProvidersApi,
+  type OAuthProvider,
+} from './serverApi.js'
+import { loadServers } from './storage.js'
 import {
   DEFAULT_HISTORY_PAGE_SIZE,
   cancelSession,
@@ -100,6 +108,9 @@ export type {
 } from './adapter.js'
 export { describeRemoteError, remoteErrorText } from './sessionsApi.js'
 export type { RemoteErrorInfo, RemotePromptAttachment } from './sessionsApi.js'
+/** 原生登录桥能力探测（UI 决定「显示第三方登录」还是「提示更新 App」时用；也可直接 import `oauth.js`） */
+export { probeAuthBridge } from './oauth.js'
+export type { AuthBridgeStatus, AuthPageState } from './oauth.js'
 
 /* ────────────────────────────────────────────────────────────────────────
  * 一、契约形状（U2 按这个写 UI，别改字段名）
@@ -112,6 +123,37 @@ export interface RemoteSessionSummary {
   workspaceId?: string
   updatedAt?: number
   pinned?: boolean
+}
+
+/**
+ * [契约之外的附加] 一种登录方式（UI 拿来渲染「用 xx 登录」按钮）。
+ *
+ * 只保留 UI 需要的三项：`id` 回传给 `startProviderLogin`，
+ * `canQr` 决定要不要显示扫码入口（服务器没给 `qrStartUrl` 就扫不了）。
+ */
+export interface RemoteOAuthProviderSummary {
+  id: string
+  displayName: string
+  canQr: boolean
+}
+
+/**
+ * [契约之外的附加] 当前登录会话（浏览器授权 / 扫码共用同一份）。
+ *
+ * 两种入口都是「服务端建一个 QR 会话 → 本机轮询 → complete 时领一次性 token」，
+ * 区别只在 `mode`：`browser` 把 `scanUrl` 交给原生容器打开，`qr` 把它画成二维码。
+ *
+ * `status` 由数据层推进：`pending` → `complete` / `expired` / `cancelled` / `error`。
+ * `expiresAt` 是**本地**算的（服务器仍是权威），可以用来画倒计时。
+ */
+export interface RemoteProviderLoginState {
+  providerId: string
+  mode: 'browser' | 'qr'
+  qrId: string
+  /** 授权页地址，同时也是二维码内容（服务器给的 `scanUrl`，已过同源校验） */
+  scanUrl: string
+  expiresAt: number
+  status: 'pending' | 'complete' | 'expired' | 'cancelled' | 'error'
 }
 
 export interface RemoteState {
@@ -132,6 +174,30 @@ export interface RemoteState {
   send(text: string): Promise<void>
   cancel(): Promise<void>
   respondApproval(eventId: string, decision: 'allow_once' | 'deny'): Promise<void>
+
+  /* ── [多方式登录] 契约之外的附加字段与动作 ───────────────────────────
+   * `connect()` 保持原样（邮箱密码 → 连接）；下面这组是另外两种入口。
+   * 三者最终都汇到同一条建链路径（establishSession），所以 UI 只需要盯 `phase`。 */
+
+  /** 这台服务器支持哪些登录方式（`loadOAuthProviders()` 拉取；空数组 = 只开邮箱密码） */
+  oauthProviders: RemoteOAuthProviderSummary[]
+  /** 当前登录会话（`null` = 没在登录）；浏览器授权与扫码共用 */
+  qr: RemoteProviderLoginState | null
+  /** 拉一次登录方式列表；不传 serverUrl 时用最近用过的服务器 */
+  loadOAuthProviders(serverUrl?: string): Promise<void>
+  /** 邮箱密码登录 + 连接（与 `connect()` 完全同一条路径，serverUrl 缺省取最近用过的） */
+  loginWithPassword(email: string, password: string, serverUrl?: string): Promise<void>
+  /**
+   * 发起 provider 登录：`POST {qrStartUrl}` 建会话 →
+   *   `browser`：原生容器打开 `scanUrl`（Custom Tab / 外部浏览器）
+   *   `qr`：什么都不打开，`qr.scanUrl` 交给 UI 画二维码
+   * 之后由 UI 每 2s 调一次 `pollProviderLogin()`。
+   */
+  startProviderLogin(providerId: string, mode: 'browser' | 'qr', serverUrl?: string): Promise<void>
+  /** 登录轮询（单拍）：`pending` 不动；`complete` 自动换设备账号并建链；超时/过期望 UI 重开 */
+  pollProviderLogin(): Promise<void>
+  /** 取消登录：关掉原生授权页，会话标成 `cancelled`（服务器侧会自己过期） */
+  cancelProviderLogin(): Promise<void>
 }
 
 /**
@@ -184,6 +250,15 @@ interface ActiveSession {
 /** 唯一的活动连接。 */
 let active: ActiveSession | null = null
 
+/* ── 多方式登录的模块级上下文（不进 zustand：不是渲染数据） ───────────── */
+
+/** 上一次拉到的登录方式（含 `startUrl` / `qrStartUrl`，这两项只在本模块用） */
+let providerCache: { serverUrl: string; items: OAuthProvider[] } | null = null
+/** 当前登录会话属于哪台服务器（qrId 只在那台 baseUrl 上有效，换服务器必须重新建） */
+let loginServerUrl: string | null = null
+/** 账号 token 只能领一次：拿到 `complete` 之后绝不允许再 poll（服务器不会再给第二个） */
+let loginTokenClaimed = false
+
 /** `$events` 等到 `ready` 的预算（超时即认为这条连接不可用：审批应答没有 clientId）。 */
 const EVENTS_READY_TIMEOUT_MS = 10_000
 /** 等 `session/follow` 首帧快照的预算（首帧可能很大，给足；参考 client-core 的 60 s）。 */
@@ -199,6 +274,8 @@ const INITIAL_STATE = {
   items: [] as ChatItem[],
   streaming: false,
   pendingApprovals: [] as { eventId: string; title: string; detail?: string }[],
+  oauthProviders: [] as RemoteOAuthProviderSummary[],
+  qr: null as RemoteProviderLoginState | null,
 }
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -253,6 +330,53 @@ const failConnection = (error: unknown): void => {
     transport: null,
     streaming: false,
   })
+}
+
+/* ── 多方式登录的错误文案 ─────────────────────────────────────────────
+ * `sessionsApi.ts` 的 `ERROR_TEXTS` 只收录远端协议码；OAuth / 扫码是**本地**流程，
+ * 码（`OAUTH_…` / `QR_…` / `NATIVE_BRIDGE_…`）在那边一律落到「未分类」。
+ * 这些码的中文 message 就是数据层自己写的，直接用它，别让 UI 显示成未分类错误。 */
+
+const SIGN_IN_ERROR_CODES = new Set([
+  'OAUTH_UNAVAILABLE',
+  'OAUTH_BRIDGE_UPDATE_REQUIRED',
+  'OAUTH_CANCELLED',
+  'OAUTH_TIMEOUT',
+  'OAUTH_FAILED',
+  'OAUTH_ABORTED',
+  'OAUTH_PROVIDER_UNKNOWN',
+  'NATIVE_BRIDGE_UNAVAILABLE',
+  'NATIVE_BRIDGE_ERROR',
+  'QR_UNSUPPORTED',
+  'QR_NOT_STARTED',
+  'QR_EXPIRED',
+  'QR_TIMEOUT',
+  'SERVER_NOT_CONFIGURED',
+  'CONNECT_BUSY',
+  // 这两个不是「本地发明」的码，但文案表里没有它们；serverApi 的 message 已经够清楚
+  'INVALID_ARGUMENT',
+  'CONNECTION_FAILED',
+  'NOT_FOUND',
+])
+
+const signInErrorInfo = (error: unknown): { code: string; message: string } => {
+  const info = describeRemoteError(error)
+  const own = error instanceof RemoteApiError ? error.message.trim() : ''
+  return {
+    code: info.code,
+    message: SIGN_IN_ERROR_CODES.has(info.code) && own.length > 0 ? own : info.text,
+  }
+}
+
+/** 失败即「没登上」：写错误并把 phase 打到 error（登录级错误）。 */
+const failSignIn = (error: unknown): void => {
+  const { code, message } = signInErrorInfo(error)
+  useRemoteStore.setState({ error: { code, message }, phase: 'error', transport: null, streaming: false })
+}
+
+/** 只记一笔、不动 phase：扫码轮询碰到网络抖动时用，别把用户的等待画面打断。 */
+const noteSignInError = (error: unknown): void => {
+  useRemoteStore.setState({ error: signInErrorInfo(error) })
 }
 
 const setPaging = (hasMore: boolean, loadingOlder: boolean): void => {
@@ -464,25 +588,16 @@ const shutdown = async (): Promise<void> => {
 
 /* ── 动作实现 ─────────────────────────────────────────────────────────── */
 
-const connectOnce = async (serverUrl: string, email: string, password: string): Promise<void> => {
-  await shutdown()
-  setPaging(false, false)
-  useRemoteStore.setState({ ...INITIAL_STATE, phase: 'authing' })
-
-  let server: RemoteServer
+/**
+ * 登录拿到**设备账号**之后的全部动作：列 Host → 建安全通道 → 握手 → `$events` → 首屏列表。
+ *
+ * 为什么抽出来：`connect()`（邮箱密码）、浏览器授权、扫码登录最终都换回**同一个**
+ * 设备账号，后面这段必须只有一份实现 —— 否则三条路会各自漂移（审批要 `clientId`、
+ * 首屏要约会话列表，漏一处就是「连上了但空白」）。
+ * `connect()` 的签名与对外行为一字未改，只是它的第 3-7 步搬进了这里。
+ */
+const establishSession = async (client: RemoteClient, server: RemoteServer, device: RemoteAccount): Promise<void> => {
   try {
-    server = { url: normalizeServerUrl(serverUrl) }
-  } catch (error) {
-    failConnection(error)
-    return
-  }
-
-  const client = createRemoteClient()
-  try {
-    // 1. 账号 token（只用来注册设备，没有 refresh）
-    const account = await client.login(server, email, password)
-    // 2. 换设备 token pair（设备身份来自 `identity.ts` 的 localStorage 单例）
-    const device = await client.registerDevice(server, account)
     // 3. 列 Host（内部已经补好 presence 与 identityKey pin）
     const host = pickHost(await client.listHosts(server, device))
 
@@ -550,6 +665,239 @@ const connectOnce = async (serverUrl: string, email: string, password: string): 
     await shutdown()
     failConnection(error)
   }
+}
+
+/** 邮箱密码登录 → 设备注册 → 建链（`connect()` 的完整实现，行为保持不变）。 */
+const connectOnce = async (serverUrl: string, email: string, password: string): Promise<void> => {
+  await shutdown()
+  setPaging(false, false)
+  useRemoteStore.setState({ ...INITIAL_STATE, phase: 'authing' })
+
+  let server: RemoteServer
+  try {
+    server = { url: normalizeServerUrl(serverUrl) }
+  } catch (error) {
+    failConnection(error)
+    return
+  }
+
+  const client = createRemoteClient()
+  try {
+    // 1. 账号 token（只用来注册设备，没有 refresh）
+    const account = await client.login(server, email, password)
+    // 2. 换设备 token pair（设备身份来自 `identity.ts` 的 localStorage 单例）
+    const device = await client.registerDevice(server, account)
+    // 3-7. 列 Host → 建链 → 握手 → `$events` → 首屏（与多方式登录共用）
+    await establishSession(client, server, device)
+  } catch (error) {
+    await shutdown()
+    failConnection(error)
+  }
+}
+
+/* ── 多方式登录：登录方式发现 / 发起 / 轮询 / 取消 ─────────────────────── */
+
+/** 最近用过的服务器地址（UI 没显式传 serverUrl 时的兜底）。 */
+const lastUsedServerUrl = (): string => {
+  const url = loadServers()[0]?.url
+  if (url === undefined || url.length === 0) {
+    throw new RemoteApiError('SERVER_NOT_CONFIGURED', '还没有服务器地址：先在设置里填写远程 DSH 服务器地址')
+  }
+  return url
+}
+
+/** 拉一次登录方式并同步到 state（同一台服务器只拉一次；换服务器自动失效）。 */
+const ensureOAuthProviders = async (server: RemoteServer): Promise<OAuthProvider[]> => {
+  const cached = providerCache
+  if (cached !== null && cached.serverUrl === server.url) return cached.items
+  const items = await oauthProvidersApi(server)
+  providerCache = { serverUrl: server.url, items }
+  useRemoteStore.setState({
+    oauthProviders: items.map((item) => ({ id: item.id, displayName: item.displayName, canQr: item.qrStartUrl !== undefined })),
+  })
+  return items
+}
+
+const loadOAuthProvidersFlow = async (serverUrl?: string): Promise<void> => {
+  try {
+    await ensureOAuthProviders({ url: normalizeServerUrl(serverUrl ?? lastUsedServerUrl()) })
+  } catch (error) {
+    failSignIn(error)
+  }
+}
+
+const loginWithPasswordFlow = async (email: string, password: string, serverUrl?: string): Promise<void> => {
+  let url: string
+  try {
+    url = normalizeServerUrl(serverUrl ?? lastUsedServerUrl())
+  } catch (error) {
+    failSignIn(error)
+    return
+  }
+  // 与 `connect()` 完全同一条路径：登录 → 注册设备 → 建链
+  await connectFlow(url, email, password)
+}
+
+/**
+ * 发起 provider 登录。
+ *
+ * 顺序很关键：
+ *   1. 先拿 provider 列表（要 `qrStartUrl`，state 里只留了 UI 需要的那三项）；
+ *   2. 建会话 —— `browser` 模式会在这里让原生容器打开授权页，非壳环境**这一步就失败**
+ *      （报「只能在 App 内使用」），不会留一个永远 pending 的登录；
+ *   3. 把会话写进 state，之后由 UI 每 2s 调 `pollProviderLogin()`。
+ */
+const startProviderLoginFlow = async (
+  providerId: string,
+  mode: 'browser' | 'qr',
+  serverUrl?: string,
+): Promise<void> => {
+  try {
+    const url = normalizeServerUrl(serverUrl ?? lastUsedServerUrl())
+    const server: RemoteServer = { url }
+    const providers = await ensureOAuthProviders(server)
+    const provider = providers.find((item) => item.id === providerId)
+    if (provider === undefined) {
+      throw new RemoteApiError('OAUTH_PROVIDER_UNKNOWN', `这台服务器没有启用「${providerId}」登录方式`)
+    }
+    // 旧会话先收尾：同一时间只允许一个登录会话（旧 qrId 服务器侧会自己过期）
+    if (useRemoteStore.getState().qr?.mode === 'browser') await closeAuthPage()
+
+    const session = await startProviderLoginApi(url, provider, mode)
+    loginServerUrl = url
+    loginTokenClaimed = false
+    useRemoteStore.setState({
+      qr: {
+        providerId: session.providerId,
+        mode,
+        qrId: session.qrId,
+        scanUrl: session.scanUrl,
+        expiresAt: session.expiresAt,
+        status: 'pending',
+      },
+      error: null,
+    })
+  } catch (error) {
+    failSignIn(error)
+  }
+}
+
+/**
+ * 登录轮询（单拍）。
+ *
+ * UI 自己排 2s 的节奏（与 dsh-Go / 上游 App 一致）：这样「用户切走页面」「权限弹窗」
+ * 这些情况都能自然停下来。规则：
+ *   - `pending`：什么都不改（瞬时网络错只记 `error`，不打断等待）；
+ *   - `expired`：会话标 `expired`，UI 提示刷新；
+ *   - `complete`：token **只领一次** → 立刻标记已领 → 换设备账号 → 建链；
+ *   - 确定性错误：标 `error`。
+ */
+const pollProviderLoginOnce = async (): Promise<void> => {
+  const state = useRemoteStore.getState()
+  const login = state.qr
+  if (login === null) {
+    failSignIn(new RemoteApiError('QR_NOT_STARTED', '还没有发起登录：先选一种登录方式'))
+    return
+  }
+  if (login.status !== 'pending' || loginTokenClaimed) return
+  const serverUrl = loginServerUrl
+  if (serverUrl === null) {
+    failSignIn(new RemoteApiError('QR_NOT_STARTED', '登录会话已失效，请重新发起登录'))
+    return
+  }
+
+  let result
+  try {
+    result = await pollProviderLoginApi(serverUrl, login.qrId, { expiresAt: login.expiresAt })
+  } catch (error) {
+    // 网络抖动不该把「等待授权」变成「登录失败」：只记错误，UI 继续轮
+    if (isRemoteApiError(error) && error.retryable) {
+      noteSignInError(error)
+      return
+    }
+    useRemoteStore.setState({ qr: { ...login, status: 'error' } })
+    failSignIn(error)
+    return
+  }
+
+  if (result.status === 'pending') return
+  if (result.status === 'complete') {
+    // token 只返回一次，从这里开始禁止再 poll（换设备失败也只能重新发起登录）
+    loginTokenClaimed = true
+    const claimed: RemoteProviderLoginState = { ...login, status: 'complete' }
+    useRemoteStore.setState({ qr: claimed })
+    if (login.mode === 'browser') await closeAuthPage()
+    await connectWithProviderToken(serverUrl, result.token, claimed, login.mode === 'qr' ? 'qr' : 'oauth')
+    return
+  }
+
+  // expired：服务器说过期了（或本地时钟先到），提示 UI 刷新二维码 / 重新发起
+  useRemoteStore.setState({ qr: { ...login, status: 'expired' } })
+  if (login.mode === 'browser') await closeAuthPage()
+}
+
+/**
+ * 轮询互斥：同一时刻只跑一次。
+ *
+ * 为什么需要：UI 的 2s 定时器 + 一次慢请求会叠出两次并发 poll，而 `complete` 的 token
+ * **只能领一次** —— 第二个请求会拿到「complete 但没有 token」，反而把登录判成失败。
+ */
+let pollInFlight = false
+
+const pollProviderLoginFlow = async (): Promise<void> => {
+  if (pollInFlight) return
+  pollInFlight = true
+  try {
+    await pollProviderLoginOnce()
+  } finally {
+    pollInFlight = false
+  }
+}
+
+/** 领到 token 之后：换设备账号（`loginWithAccountToken` 负责落盘）→ 建链。 */
+const connectWithProviderToken = async (
+  serverUrl: string,
+  accountToken: string,
+  login: RemoteProviderLoginState,
+  method: 'oauth' | 'qr',
+): Promise<void> => {
+  if (connecting) {
+    failSignIn(new RemoteApiError('CONNECT_BUSY', '正在建立另一条连接，请稍后重新发起登录'))
+    return
+  }
+  connecting = true
+  try {
+    await shutdown()
+    setPaging(false, false)
+    const providers = useRemoteStore.getState().oauthProviders
+    useRemoteStore.setState({
+      ...INITIAL_STATE,
+      phase: 'authing',
+      oauthProviders: providers,
+      // 登录态要留着：UI 需要显示「登录成功，正在连接…」
+      qr: login,
+    })
+    const server: RemoteServer = { url: serverUrl }
+    const client = createRemoteClient()
+    try {
+      const account = await client.loginWithAccountToken(server, accountToken, method)
+      await establishSession(client, server, account)
+    } catch (error) {
+      await shutdown()
+      failSignIn(error)
+    }
+  } finally {
+    connecting = false
+  }
+}
+
+/** 取消登录：关授权页 + 标记 `cancelled`（服务器侧的 qrId 会自己过期，不需要额外请求）。 */
+const cancelProviderLoginFlow = async (): Promise<void> => {
+  const login = useRemoteStore.getState().qr
+  loginServerUrl = null
+  if (login === null) return
+  if (login.mode === 'browser') await closeAuthPage()
+  useRemoteStore.setState({ qr: { ...login, status: 'cancelled' } })
 }
 
 /** 建链互斥：连点两次不能并发建两条安全通道（第二条会覆盖 `active` 并泄漏第一条）。 */
@@ -804,6 +1152,10 @@ export const useRemoteStore = create<RemoteState>(() => ({
   disconnect: (): void => {
     void shutdown()
     setPaging(false, false)
+    // 登录会话也跟着作废：浏览器授权页还开着的话顺手关掉（不 await：断开不该被原生桥拖住）
+    if (useRemoteStore.getState().qr?.mode === 'browser') void closeAuthPage()
+    loginServerUrl = null
+    loginTokenClaimed = false
     useRemoteStore.setState({ ...INITIAL_STATE })
   },
 
@@ -829,6 +1181,26 @@ export const useRemoteStore = create<RemoteState>(() => ({
 
   respondApproval: async (eventId: string, decision: 'allow_once' | 'deny'): Promise<void> => {
     await respondApprovalFlow(eventId, decision)
+  },
+
+  loadOAuthProviders: async (serverUrl?: string): Promise<void> => {
+    await loadOAuthProvidersFlow(serverUrl)
+  },
+
+  loginWithPassword: async (email: string, password: string, serverUrl?: string): Promise<void> => {
+    await loginWithPasswordFlow(email, password, serverUrl)
+  },
+
+  startProviderLogin: async (providerId: string, mode: 'browser' | 'qr', serverUrl?: string): Promise<void> => {
+    await startProviderLoginFlow(providerId, mode, serverUrl)
+  },
+
+  pollProviderLogin: async (): Promise<void> => {
+    await pollProviderLoginFlow()
+  },
+
+  cancelProviderLogin: async (): Promise<void> => {
+    await cancelProviderLoginFlow()
   },
 }))
 

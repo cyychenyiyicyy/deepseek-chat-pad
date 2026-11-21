@@ -1,17 +1,12 @@
-/* 本机 / 远程 双态切换：胶囊里两个等宽选项，与侧栏搜索框、发送按钮同一套圆角语言 */
-.wrapper {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
+/* 侧栏顶部的「本机 / 远程」胶囊：整行铺满，两段等宽，与搜索框同一套圆角语言 */
 .switch {
-  display: inline-flex;
+  display: flex;
   flex-shrink: 0;
   align-items: center;
   gap: 2px;
   box-sizing: border-box;
+  width: 100%;
+  margin-bottom: 12px;
   padding: 3px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 100px;
@@ -20,12 +15,13 @@
 
 .option {
   display: inline-flex;
+  flex: 1;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  min-width: 62px;
-  height: 28px;
-  padding: 0 12px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
   border: none;
   border-radius: 100px;
   background: none;
@@ -41,17 +37,12 @@
     background-color var(--ds-transition-duration) var(--ds-ease-in-out),
     color var(--ds-transition-duration) var(--ds-ease-in-out);
 
-  &:hover:not(:disabled) {
+  &:hover:not(.optionActive) {
     background-color: var(--dsw-alias-interactive-bg-hover);
   }
 
   &:focus-visible {
     box-shadow: 0 0 0 2px var(--dsw-alias-button-primary-fill);
-  }
-
-  &:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
   }
 }
 
@@ -60,38 +51,33 @@
   color: var(--dsw-alias-brand-text);
   font-weight: 500;
 
-  &:hover:not(:disabled) {
-    background-color: var(--dsw-alias-button-ghost-active-fill);
-  }
-}
-
-.hint {
-  max-width: 320px;
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.retry {
-  margin-left: 6px;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--dsw-alias-brand-text);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  cursor: pointer;
-
   &:hover {
-    text-decoration: underline;
+    background-color: var(--dsw-alias-button-ghost-active-hover);
   }
 }
 
 @media (min-width: 768px) {
   .option {
-    min-width: 68px;
     height: 32px;
     font-size: 14px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .option {
+    height: 34px;
+    font-size: 15px;
+  }
+}
+
+@media not all and (min-width: 768px) {
+  .switch {
+    margin-bottom: 10px;
+    padding: 4px;
+  }
+
+  .option {
+    height: 36px;
+    font-size: 15px;
   }
 }

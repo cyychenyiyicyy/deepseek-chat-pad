@@ -30,7 +30,9 @@ import okhttp3.OkHttpClient;
  *   <li>静态资源走 {@link AssetHandler}，/__ds_proxy 走 {@link ProxyHandler}，
  *       /__ds_update/* 走 {@link UpdateHandler}（分体式更新），
  *       /__ds_db/* 走 {@link DbHandler}（会话存储的原生 SQLite），
- *       /__ds_remote/* 走 {@link RemoteWsHandler}（远程 DSH 的原生 WebSocket 隧道桥）</li>
+ *       /__ds_remote/* 走 {@link RemoteWsHandler}（远程 DSH 的原生 WebSocket 隧道桥），
+ *       /__ds_auth/* 走 {@link RemoteAuthHandler}（应用内授权容器：全屏 Dialog + WebView，或交给
+ *       系统浏览器；第三方登录在窗口里完成，登录结果由页面按 qrId 轮询服务端拿）</li>
  *   <li>每个连接一个小循环支持 keep-alive，最多 256 个请求；/__ds_remote/ws 升级成 WebSocket 后
  *       整条连接交给 RemoteWsHandler 独占，隧道结束即关闭</li>
  *   <li>工作线程全部是 daemon，Activity 退出时不会把进程挂住</li>
@@ -55,6 +57,7 @@ public final class LocalServer {
     private final UpdateHandler updateHandler;
     private final DbHandler dbHandler;
     private final RemoteWsHandler remoteWsHandler;
+    private final RemoteAuthHandler remoteAuthHandler;
     private final ExecutorService workers;
     private final AtomicInteger threadCounter = new AtomicInteger();
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -75,6 +78,10 @@ public final class LocalServer {
         this.dbHandler = new DbHandler(base);
         // 远程桥自己建独立的 OkHttpClient（不能复用传入的那个：它挂着 HTTPS_ONLY_INTERCEPTOR）
         this.remoteWsHandler = new RemoteWsHandler();
+        // 应用内授权容器（/__ds_auth/*）不需要 HTTP 客户端（网页由 WebView 自己加载），但要能拿到
+        // Activity：MainActivity 传进来的是 Application context，所以它内部自己注册
+        // ActivityLifecycleCallbacks 跟踪当前 resumed 的 Activity 来弹全屏 Dialog
+        this.remoteAuthHandler = new RemoteAuthHandler(base);
         this.workers = Executors.newCachedThreadPool(runnable -> {
             Thread thread = new Thread(runnable, "ds-http-" + threadCounter.incrementAndGet());
             thread.setDaemon(true);
@@ -137,6 +144,8 @@ public final class LocalServer {
         updateHandler.cancelAll();
         // WebSocket 隧道是长连接：不主动拆，读线程会一直挂在 socket 上
         remoteWsHandler.cancelAll();
+        // 授权容器可能还开着一个全屏 Dialog：退出时一起关掉（内部走主线程 + 幂等）
+        remoteAuthHandler.cancelAll();
         workers.shutdownNow();
         port = -1;
     }
@@ -286,6 +295,14 @@ public final class LocalServer {
         // AssetHandler 当成页面路径去 assets 里找，见下面的静态资源分支）。
         if (path.startsWith(RemoteWsHandler.PATH_PREFIX)) {
             return remoteWsHandler.handle(method, path, headers, in, out, keepAlive);
+        }
+
+        // 应用内 OAuth 授权容器（/__ds_auth/*）：同样必须排在静态资源判断之前。
+        // 它不碰 socket 的字节流（响应是普通 JSON），但要读 POST 的 JSON 请求体（startUrl），
+        // 所以 in 要一起传进去；挂载顺序与上面两个一致：紧跟 /__ds_remote、在 /__ds_update 与
+        // 静态资源之前，否则 /__ds_auth/state 会被 AssetHandler 当成页面路径去 assets 里找。
+        if (path.startsWith(RemoteAuthHandler.PATH_PREFIX)) {
+            return remoteAuthHandler.handle(method, path, headers, in, out, keepAlive);
         }
 
         // 更新接口必须排在静态资源判断之前，否则会被当成页面路径去 assets 里找。

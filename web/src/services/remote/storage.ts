@@ -28,6 +28,15 @@ export interface RemoteServer {
   lastUsedAt?: number
 }
 
+/**
+ * 登录方式（多方式登录的唯一分类口径）：
+ *   `password` 邮箱密码 / `oauth` 浏览器跳转 OAuth / `qr` 手机扫码。
+ *
+ * 只用于展示与排障（设置页写「上次用的是哪种方式」）；凭据类型不随它变 ——
+ * 三种方式最终都换回同一种「设备 token pair」。
+ */
+export type LoginMethod = 'password' | 'oauth' | 'qr'
+
 export interface RemoteAccount {
   email: string
   /**
@@ -47,6 +56,11 @@ export interface RemoteAccount {
   refreshTokenExpiresAt?: number
   /** 注册时用的设备名，便于设置页显示 */
   deviceName?: string
+  /**
+   * [附加字段] 这条记录是怎么登进来的（`password` / `oauth` / `qr`）。
+   * 可选：老数据没有它，读出来照样可用；三类凭据本身没有区别。
+   */
+  loginMethod?: LoginMethod
   updatedAt?: number
 }
 

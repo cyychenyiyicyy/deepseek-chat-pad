@@ -121,6 +121,196 @@
   padding: 8px 0 2px;
 }
 
+/* ── 登录方式：分段标签行 ──────────────────────────────────────────────
+ * 与 RemoteModeSwitch 的胶囊同一套语言（圆角 100px、ghost-active 配色），
+ * 但它是「一组可换行的 tab」：provider 数量由服务器决定，可能三四个。 */
+.methodBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 0 8px;
+  box-shadow: inset 0 1px 0 0 var(--dsw-alias-border-l2-darkmode-thin);
+}
+
+.methods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.method {
+  box-sizing: border-box;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+  transition:
+    background-color var(--ds-transition-duration) var(--ds-ease-in-out),
+    color var(--ds-transition-duration) var(--ds-ease-in-out),
+    border-color var(--ds-transition-duration) var(--ds-ease-in-out);
+
+  &:hover:not(:disabled) {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  &:focus-visible {
+    box-shadow: 0 0 0 2px var(--dsw-alias-button-primary-fill);
+  }
+
+  &:disabled {
+    opacity: 0.55;
+    cursor: default;
+  }
+}
+
+.methodActive {
+  border-color: transparent;
+  background-color: var(--dsw-alias-button-ghost-active-fill);
+  color: var(--dsw-alias-brand-text);
+  font-weight: 500;
+
+  &:hover:not(:disabled) {
+    background-color: var(--dsw-alias-button-ghost-active-hover);
+  }
+}
+
+/* 某个 provider 的面板：说明 + 主按钮组 */
+.loginPane {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 0;
+}
+
+/* 「已打开登录页…」：一行提示 + 取消，视觉上比状态胶囊更靠前（它在等用户动作） */
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-sizing: border-box;
+  margin: 8px 0 2px;
+  padding: 8px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background-color: var(--dsw-alias-bg-layer-2);
+}
+
+.waitingText {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* ── 二维码：左图右文，窄屏自动改成上下 ─────────────────────────────── */
+.qrBlock {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  box-sizing: border-box;
+  margin: 8px 0 2px;
+  padding: 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  background-color: var(--dsw-alias-bg-layer-3);
+}
+
+.qrImageBox {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 176px;
+  height: 176px;
+  padding: 6px;
+  border-radius: 10px;
+  /* 二维码必须白底：深色主题下透明底会让扫码器识别不出来 */
+  background-color: #fff;
+}
+
+.qrImage {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* 1-bit 位图，放大时保持硬边（线性插值会把模块糊掉，扫不出来） */
+  image-rendering: pixelated;
+}
+
+.qrFallback {
+  padding: 8px;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.qrMeta {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.qrTitle {
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+
+.qrHint {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.qrCountdown {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.qrExpired {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.qrActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* 已连接：账号摘要与两个收尾按钮 */
+.accountCard {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-sizing: border-box;
+  margin: 10px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  background-color: var(--dsw-alias-bg-layer-2);
+}
+
 /* 状态胶囊行：标签 + 值合成一个小 pill，三项并排，放不下自动折行 */
 .status {
   display: flex;
@@ -206,6 +396,35 @@
 
   .actions > button {
     min-height: 44px;
+  }
+
+  /* 窄屏：二维码改成上下排（左右排会把文字挤成一条竖线） */
+  .qrBlock {
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .qrImageBox {
+    /* 窄屏（竖屏平板）二维码可以大一点：上下排之后竖向空间够 */
+    width: 208px;
+    height: 208px;
+  }
+
+  .qrMeta {
+    align-items: center;
+    width: 100%;
+    text-align: center;
+  }
+
+  .method {
+    min-height: 40px;
+    font-size: 15px;
+  }
+
+  .waiting {
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
   .modeRow {

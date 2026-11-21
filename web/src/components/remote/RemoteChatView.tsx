@@ -17,9 +17,9 @@ import { IconButton } from '../base/IconButton.js'
 import { IconMenuOutline20, IconSendOutline16, IconStopFill16 } from '../base/icons.js'
 import { Markdown } from '../markdown/Markdown.js'
 import { openSettings } from '../settings/settingsDialogState.js'
+import { openMobileSider } from '../sider/mobileSiderState.js'
 import { ApprovalCard } from './ApprovalCard.js'
-import { RemoteModeSwitch } from './RemoteModeSwitch.js'
-import { RemoteSessionList } from './RemoteSessionList.js'
+import { useRemoteAvailability } from './RemoteModeSwitch.js'
 import styles from './RemoteChatView.module.css'
 
 /**
@@ -66,9 +66,10 @@ export const RemoteChatView = () => {
   const streaming = useRemoteStore((state) => state.streaming)
   const approvals = useRemoteStore((state) => state.pendingApprovals)
   const error = useRemoteStore((state) => state.error)
+  // 原生桥探测：只在远程会话页挂载时发生（启动路径上没有任何探测）
+  const { availability, retry } = useRemoteAvailability()
 
   const [draft, setDraft] = useState('')
-  const [listOpen, setListOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const stickyRef = useRef(true)
@@ -77,6 +78,7 @@ export const RemoteChatView = () => {
   const itemCountRef = useRef(0)
 
   const ready = phase === 'ready'
+  const bridgeReady = availability === 'ready'
   const activeTitle =
     sessions.find((session) => session.id === activeSessionId)?.title ?? t('remoteSessionUntitled')
 
@@ -136,6 +138,10 @@ export const RemoteChatView = () => {
 
   return (
     <div className={styles.view}>
+      {/*
+        这一行不是「远程模式」的页面标题栏 —— 与 `SessionView` 的顶栏同高同位：
+        左侧标题 = 当前会话，右侧 = 数据面通道徽标。模式下不再额外套一层页面。
+      */}
       <div className={styles.header}>
         {isMobile ? (
           <IconButton
@@ -143,17 +149,28 @@ export const RemoteChatView = () => {
             tone="primary"
             icon={<IconMenuOutline20 />}
             aria-label={t('remoteListButton')}
-            onClick={() => setListOpen(true)}
+            onClick={openMobileSider}
           />
         ) : null}
-        <div className={styles.title}>{ready && activeSessionId !== null ? activeTitle : t('remoteModeRemote')}</div>
+        <div className={styles.title}>{ready && activeSessionId !== null ? activeTitle : ''}</div>
         <span className={clsx(styles.badge, ready ? styles.badgeLive : styles.badgeIdle)}>
           {transportLabel(t, transport, ready)}
         </span>
-        <RemoteModeSwitch hint={false} />
       </div>
 
-      {!ready ? (
+      {!bridgeReady ? (
+        // 浏览器预览 / 旧 APK：说明「只能在 App 内用」，并给一次重试（装完 APK 回来即生效）
+        <div className={styles.centerState}>
+          <div className={styles.centerTitle}>
+            {t(availability === 'outdated' ? 'remoteBridgeOutdated' : 'remoteRequiresApp')}
+          </div>
+          {availability === 'outdated' ? (
+            <Button variant="outlined" size="m" onClick={retry}>
+              {t('retry')}
+            </Button>
+          ) : null}
+        </div>
+      ) : !ready ? (
         <div className={styles.centerState}>
           <div className={styles.centerTitle}>
             {t(phase === 'error' ? 'remotePhaseError' : 'remoteNotConnected')}
@@ -167,11 +184,9 @@ export const RemoteChatView = () => {
         </div>
       ) : activeSessionId === null ? (
         <div className={styles.centerState}>
-          <div className={styles.centerTitle}>
-            {t(isMobile ? 'remotePickSessionShort' : 'remotePickSession')}
-          </div>
+          <div className={styles.centerTitle}>{t('remotePickSession')}</div>
           {isMobile ? (
-            <Button variant="outlined" size="m" onClick={() => setListOpen(true)}>
+            <Button variant="outlined" size="m" onClick={openMobileSider}>
               {t('remoteListButton')}
             </Button>
           ) : null}
@@ -257,15 +272,6 @@ export const RemoteChatView = () => {
           </div>
         </>
       )}
-
-      {isMobile && listOpen ? (
-        <div className={styles.drawerLayer}>
-          <div className={styles.drawerMask} onClick={() => setListOpen(false)} />
-          <div className={styles.drawer}>
-            <RemoteSessionList className={styles.drawerPanel} onSelect={() => setListOpen(false)} />
-          </div>
-        </div>
-      ) : null}
     </div>
   )
 }

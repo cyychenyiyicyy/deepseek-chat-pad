@@ -18,6 +18,7 @@ import { MAX_REMOTE_CAPABILITY_ENTRIES } from '../../vendor/dsh-remote/protocol/
 import { DEFAULT_PLATFORM, deviceDescriptor, loadOrCreateIdentity, type DeviceIdentity } from './identity.js'
 import {
   RemoteApiError,
+  accountMe,
   getDevice,
   getPresence,
   listDevices,
@@ -37,6 +38,7 @@ import {
   removeServer,
   upsertAccount,
   upsertServer,
+  type LoginMethod,
   type RemoteAccount,
   type RemoteServer,
 } from './storage.js'
@@ -45,7 +47,7 @@ import {
  * 契约 §4 的 `RemoteServer` / `RemoteAccount` 由 `storage.ts` 定义（它俩要落盘），
  * 这里按契约从 connection.ts 再导出一次，UI 只 import 这个文件即可。
  */
-export type { RemoteAccount, RemoteServer }
+export type { LoginMethod, RemoteAccount, RemoteServer }
 
 /* ── S2 接口副本（core/index.ts 就绪前的占位） ───────────────────────── */
 
@@ -124,6 +126,14 @@ export interface ConnectOptions {
 
 export interface RemoteClient {
   login(server: RemoteServer, email: string, password: string): Promise<RemoteAccount>
+  /**
+   * [多方式登录] 用「账号 token」换取设备账号并落盘：OAuth 回调 / 扫码拿到的都是这个 token。
+   *
+   * 与 `login()` + `registerDevice()` 走**同一条**设备注册与持久化路径：
+   * 先 `GET /api/v1/auth/me` 拿账号名（也是 token 可用性的第一道验证），再注册设备、
+   * 原子写入 `storage.ts`。返回的账号 `scope` 已经是 `device`，可以直接 `listHosts`。
+   */
+  loginWithAccountToken(server: RemoteServer, accountToken: string, method?: LoginMethod): Promise<RemoteAccount>
   /** 契约里 name 必填；这里放宽为可选（缺省 "Chat Pad"，仍满足契约调用方式） */
   registerDevice(server: RemoteServer, account: RemoteAccount, name?: string): Promise<RemoteAccount>
   listHosts(server: RemoteServer, account: RemoteAccount): Promise<RemoteHost[]>
@@ -340,6 +350,55 @@ export class RemoteClientImpl implements RemoteClient {
       this.failStatus(error)
       throw toRemoteApiError(error)
     }
+  }
+
+  /**
+   * [多方式登录] 账号 token（OAuth 回调 / 扫码）→ 设备账号。
+   *
+   * 为什么放在这一层：`login()` 之后必须紧接着 `registerDevice()` 才能连 Host
+   * （账号 token 只用于注册设备，没有 refresh，见 docs/plugin-integration.md:139-195）。
+   * 多方式登录拿到 token 后要做的事与密码登录**完全一样**，所以：
+   *
+   *   1. `GET /api/v1/auth/me` 先验 token、拿账号名（同一 token 在 `devices/register`
+   *      上失败会报 401 ACCOUNT_AUTH_REQUIRED，不好区分「token 坏了」还是「服务器抽风」）；
+   *   2. 按 `login()` 同一套落盘（`upsertServer` + `upsertAccount`，先留账号记录，
+   *      这样注册设备失败时下次还能重试，不用重新走一遍浏览器授权）；
+   *   3. 直接复用 `this.registerDevice()` —— 同一份 X25519 身份、同一条错误映射、
+   *      同一条 `upsertAccount` 落盘路径，避免出现「OAuth 注册的设备跟密码注册的不一样」。
+   *
+   * `method` 只写进 `RemoteAccount.loginMethod`（展示 / 排障用），不改变凭据类型。
+   */
+  async loginWithAccountToken(
+    server: RemoteServer,
+    accountToken: string,
+    method: LoginMethod = 'oauth',
+  ): Promise<RemoteAccount> {
+    const serverUrl = normalizeServerUrl(server.url)
+    const token = accountToken.trim()
+    if (token.length === 0) {
+      throw new RemoteApiError('AUTH_REQUIRED', '缺少账号 token：OAuth / 扫码登录没有返回凭据')
+    }
+    this.setStatus({ phase: 'authing' })
+    let pending: RemoteAccount
+    try {
+      const profile = await accountMe({ url: serverUrl }, token, this.deps)
+      pending = {
+        email: profile.account,
+        accessToken: token,
+        refreshToken: '',
+        deviceId: '',
+        scope: 'account',
+        serverUrl,
+        loginMethod: method,
+      }
+      upsertServer(serverUrl, { lastUsedAt: Date.now() })
+      upsertAccount(pending)
+    } catch (error) {
+      this.failStatus(error)
+      throw toRemoteApiError(error)
+    }
+    // registerDevice 自己会 failStatus + 抛带宽码的错误；这里不重复包一层
+    return this.registerDevice({ url: serverUrl }, pending)
   }
 
   /**
