@@ -19,7 +19,9 @@ import {
 } from '../../base/icons.js'
 import { DirectoryBrowser } from './DirectoryBrowser.js'
 import { SegmentedPill, effortText } from './chips.js'
-import styles from './NewSessionPanel.module.css'
+import { WorkspaceList } from '../workspace/WorkspaceList.js'
+import { buildWorkspaceItems } from '../workspace/workspaceItems.js'
+import styles from './NewSessionPage.module.css'
 
 /**
  * 新建会话页的**短列表**（照 dsh-Go：每个选项点开一个小 sheet，而不是页面上一排下拉框）。
@@ -117,12 +119,23 @@ const ChoiceRow = ({
 
 /* ────────────────────────────── 工作区 ────────────────────────────── */
 
+/**
+ * 工作区抽屉（S2）。
+ *
+ * 数据来自 `useNewSessionStore.workspaces`（= `workspace/follow` 权威 + 派生的补充合并），
+ * 所以**没有会话的工作区也在列表里**，Host 默认目录单独一行在最上面。
+ * 每一项都带「名字 + 路径（点一下复制）+ 会话数 + 是否当前」—— 那四件事由 `WorkspaceList` 统一画，
+ * 工作区文件抽屉的切换列表用的是同一个组件，两处的观感与判定不会分叉。
+ */
 const WorkspaceSheet = () => {
   const t = useTranslate()
   const workspaces = useNewSessionStore((state) => state.workspaces)
+  const hostWorkspaces = useNewSessionStore((state) => state.hostWorkspaces)
   const selectedWorkspaceId = useNewSessionStore((state) => state.selectedWorkspaceId)
   const workspaceSource = useNewSessionStore((state) => state.workspaceSource)
+  const canCreate = useNewSessionStore((state) => state.capabilities.workspaceCreate)
   const close = (): void => useNewSessionStore.getState().openSheet(null)
+  const items = buildWorkspaceItems({ workspaces, hostWorkspaces, currentWorkspaceId: selectedWorkspaceId })
 
   return (
     <SheetFrame title={t('newSessionWorkspace')} onClose={close} testId="workspace-sheet">
@@ -136,29 +149,29 @@ const WorkspaceSheet = () => {
           close()
         }}
       />
-      {workspaces.map((workspace) => (
-        <ChoiceRow
-          key={workspace.workspaceId}
-          icon={<IconBrowseOutline16 />}
-          title={workspace.title || workspace.path || workspace.workspaceId}
-          subtitle={workspace.path || undefined}
-          selected={workspace.workspaceId === selectedWorkspaceId}
-          onClick={() => {
-            useNewSessionStore.getState().selectWorkspace(workspace.workspaceId)
-            close()
-          }}
-        />
-      ))}
-      {workspaces.length === 0 ? <div className={styles.sheetHint}>{t('newSessionWorkspaceEmpty')}</div> : null}
+      <WorkspaceList
+        label={t('workspaces.title')}
+        items={items}
+        emptyHint={t('workspaces.empty')}
+        testId="workspace-list"
+        onSelect={(item) => {
+          useNewSessionStore.getState().selectWorkspace(item.workspaceId)
+          close()
+        }}
+      />
       {workspaceSource === 'derived' && workspaces.length > 0 ? (
         <div className={styles.sheetHint}>{t('newSessionWorkspaceDerivedHint')}</div>
       ) : null}
       <div className={styles.sheetDivider} />
-      <ChoiceRow
-        icon={<IconSettingsOutline16 />}
-        title={t('newSessionWorkspaceAdd')}
-        onClick={() => useNewSessionStore.getState().openSheet('newWorkspace')}
-      />
+      {canCreate ? (
+        <ChoiceRow
+          icon={<IconSettingsOutline16 />}
+          title={t('newSessionWorkspaceAdd')}
+          onClick={() => useNewSessionStore.getState().openSheet('newWorkspace')}
+        />
+      ) : (
+        <div className={styles.sheetHint}>{t('newSessionWorkspaceCreateUnsupported')}</div>
+      )}
     </SheetFrame>
   )
 }

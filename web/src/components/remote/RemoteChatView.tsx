@@ -9,7 +9,7 @@ import type {
   ChatMessage,
   ToolActivity,
 } from '../../services/remote/adapter.js'
-import { useRemoteStore, sendRemoteMessage } from '../../services/remote/store.js'
+import { useRemoteStore, sendRemoteMessage, hydrateCachedTimeline } from '../../services/remote/store.js'
 import {
   timelineHintState,
   timelineViewState,
@@ -22,6 +22,21 @@ import {
   useChatControls,
 } from '../../services/remote/sessionControls.js'
 import { useNewSessionStore } from '../../services/remote/newSessionStore.js'
+/*
+ * [S1 无感重载] 界面状态的存取（草稿 / 会话 / 滚动位置）。
+ * 两层：`sessionStorage`（页面内重载）> 原生中转箱 / 内存镜像（WebView 被就地换掉）。
+ */
+import {
+  flushUiState,
+  loadBootUiState,
+  patchActiveSession,
+  patchDraft,
+  patchMode,
+  patchTimelineScroll,
+  resolveActiveSession,
+  resolveDraftRestore,
+  resolveTimelineScroll,
+} from '../../services/remote/uiState.js'
 import { Button } from '../base/Button.js'
 import { IconButton } from '../base/IconButton.js'
 import {
@@ -33,8 +48,10 @@ import { Markdown } from '../markdown/Markdown.js'
 import { openSettings } from '../settings/settingsDialogState.js'
 import { openMobileSider } from '../sider/mobileSiderState.js'
 import { ApprovalCard } from './ApprovalCard.js'
-import { ArtifactsInline } from './artifacts/ArtifactsInline.js'
-import { SessionArtifactsEntry } from './artifacts/SessionArtifactsEntry.js'
+// 产物卡：官方 `present` 交付的文件，长在「这一轮最后一行」的下方（S5）。
+// 上一轮（R12）那套从写类工具参数里猜产物的组件（`./artifacts/**`）已按原生机制删除。
+import { ArtifactTurnTail } from './artifact/ArtifactCard.js'
+import { turnArtifactsOf } from '../../services/remote/artifacts.js'
 import { ChatControlsError, SessionControlsBar } from './chat-controls/SessionControlsBar.js'
 import { QuestionCard } from './chat-controls/QuestionCard.js'
 import { approvalAllowsOnce, approvalInsightOf } from './chat-controls/promptModel.js'
@@ -53,9 +70,9 @@ import {
 import { dispatchPrompt, supportsPromptMode } from './composer/promptMode.js'
 // [R14 多 Host] 顶栏的「当前电脑 + 切换下拉」（组件内部自己判显隐，这里只挂一个点）
 import { HostSwitcher } from './HostSwitcher.js'
-import { NewSessionPanel } from './new-session/NewSessionPanel.js'
+import { NewSessionPage } from './new-session/NewSessionPage.js'
 import { PlanProgressDock } from './plan/PlanProgressDock.js'
-import { useRemoteAvailability } from './RemoteModeSwitch.js'
+import { useRemoteAvailability, useRemoteMode } from './RemoteModeSwitch.js'
 import { ToolCard } from './tool/ToolCard.js'
 import { AttachmentButton } from './workspace/AttachmentButton.js'
 import { AttachmentTray } from './workspace/AttachmentTray.js'
@@ -83,6 +100,20 @@ type ApprovalDecision = Parameters<
 const STICKY_THRESHOLD = 40
 /** 距顶部小于该值时自动往前拉一屏历史 */
 const LOAD_OLDER_THRESHOLD = 80
+/**
+ * [S1] 滚动位置落盘的节流间隔（毫秒）。
+ *
+ * 滚动事件一秒能来几十次，每次都写一遍 `sessionStorage` 纯属浪费；而 400ms 的丢失窗口
+ * 在「切出去」这个场景里等于 0 —— 真正救命的是 `visibilitychange → hidden` 的那次 flush。
+ */
+const SCROLL_SAVE_INTERVAL_MS = 400
+/**
+ * [S1] 「等内容铺够再滚回去」的等待上限（毫秒）。
+ *
+ * 缓存是一批批来的：内容还没渲染出来时滚不到目标位置。等太久还不如别跳
+ * （否则用户正看着上面，一屏刚加载完突然把位置拽走）。
+ */
+const SCROLL_RESTORE_TIMEOUT_MS = 4_000
 /**
  * 停止请求的等待上限（与 dsh-Go 一致）：`session/cancel` 只回 `accepted`，
  * 真正的终态是 `turn/end.reason.kind='aborted'`；10 秒连回执都没有就把按钮还原，
@@ -117,13 +148,63 @@ export const RemoteChatView = () => {
   const reconnect = useRemoteStore((state) => state.reconnect)
   /** 新建会话能力（W1）：Host 没有 `session/create` 时入口整块隐藏 */
   const canCreateSession = useNewSessionStore((state) => state.capabilities.create)
+  /*
+   * ── 视图（W6）──────────────────────────────────────────────────────
+   * `view` 是**真实切换**，不是浮在上面的层：进出都由 `newSessionStore.open` 驱动
+   * （任何入口调 `openPanel()` 都算），所以列表 / 搜索 / 会话内控制那边一行都不用改，
+   * 也不会出现「面板背后还压着会话列表」的观感。
+   *
+   * 返回 = `closePanel()`：`activeSessionId` 与时间线都还在 store 里没动过，
+   * 所以回去就是原来那一个会话，不重新拉一次。
+   *
+   * 空态（这台 Host 一个会话都没有）直接进这一页（dsh-Go 的做法：新对话就是整屏空态）；
+   * `autoEnteredRef` 保证只有一次 —— 用户按「返回」退出来之后，看到的是带大按钮的空态，
+   * 不会立刻又被弹回去。
+   */
+  const newSessionOpen = useNewSessionStore((state) => state.open)
+  const view: 'chat' | 'new-session' = newSessionOpen ? 'new-session' : 'chat'
+  const autoEnteredRef = useRef(false)
   /** 工作区文件能力（W3）：Host 回过 `METHOD_NOT_FOUND` 后入口整块隐藏（`null` = 还没探过） */
   const filesSupported = useWorkspacePane((state) => state.filesSupported)
   const attachments = useWorkspacePane((state) => state.attachments)
   // 原生桥探测：只在远程会话页挂载时发生（启动路径上没有任何探测）
   const { availability, retry } = useRemoteAvailability()
 
-  const [draft, setDraft] = useState('')
+  /*
+   * ── [S1 无感重载] 启动快照 ───────────────────────────────────────────
+   * 页面重载 / WebView 被就地换掉之后，先把「上一次那一屏」取回来：
+   *   - 草稿层：`sessionStorage`（同一个 WebView 里重新加载时还在）；
+   *   - 缓存层：原生中转箱 / 内存镜像（换过 WebView 时浏览器已经把它清空了）。
+   * 两层怎么选见 `uiState.ts` 的 `resolveDraftRestore()`（草稿 > 缓存 > 空）。
+   *
+   * 只读、同步、微秒级：**不 await、不阻塞首屏、也不需要等连接** —— 这是「恢复得快」
+   * 的前提（等连接就绪再恢复，用户先看到的就是一屏空白）。
+   */
+  const bootUi = useMemo(() => loadBootUiState(), [])
+  const restoredSessionId = resolveActiveSession({ primary: bootUi.primary, fallback: bootUi.fallback })
+  const bootDraft = useMemo(
+    () =>
+      resolveDraftRestore({
+        primary: bootUi.primary,
+        fallback: bootUi.fallback,
+        sessionId: restoredSessionId,
+      }),
+    [bootUi, restoredSessionId],
+  )
+
+  const [draft, setDraft] = useState(bootDraft.text)
+  /** 时间线要滚回的位置（`null` = 没有要恢复的；用掉一次就清空） */
+  const pendingScrollRef = useRef<number | null>(
+    resolveTimelineScroll({
+      primary: bootUi.primary,
+      fallback: bootUi.fallback,
+      sessionId: restoredSessionId,
+    }),
+  )
+  /** 草稿 / 滚动位置该记在哪个会话名下（会话还没开起来时用恢复目标） */
+  const sessionKeyRef = useRef<string | null>(restoredSessionId)
+  const draftRef = useRef(draft)
+  const scrollSavedAtRef = useRef(0)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const stickyRef = useRef(true)
@@ -178,6 +259,14 @@ export const RemoteChatView = () => {
       : (sessionsTitle ?? t('remoteSessionUntitled'))
   /** 时间线汇总的用量（投影没给 `usage` 时给「会话信息」面板兜底） */
   const usage = useMemo(() => aggregateUsage(items), [items])
+  /**
+   * 产物卡的分组（每轮一份，`endIndex` = 该轮最后一行的下标）。
+   *
+   * 只认官方 `present` 交付（adapter 里的 `kind:'artifact'` 行），没产物时是空数组；
+   * 未结束的轮不返回（与官方 turn-tail、dsh-Go `deriveArtifacts` 一致）。
+   * `turnArtifactsOf` 自己按 `items` 引用记忆，这里再包一层 `useMemo` 只是让引用稳定。
+   */
+  const artifactGroups = useMemo(() => turnArtifactsOf(items), [items])
 
   // 新内容到达：仍贴着底部就继续跟随；条数变化时允许再拉一屏历史
   useLayoutEffect(() => {
@@ -201,6 +290,124 @@ export const RemoteChatView = () => {
   }, [activeSessionId])
 
   /*
+   * ── [S1 无感重载] 时间线滚回原处 ─────────────────────────────────────
+   *
+   * 必须排在上面那条「换会话就回到底部」**之后**（React 按声明顺序执行 effect），
+   * 否则每次挂载都会被拽到底部。滚动位置只认同一个会话记下的那份
+   * （`resolveTimelineScroll` 会检查 sessionId），换过会话就不用旧位置套新内容。
+   *
+   * 内容还没铺够（缓存是分批到的）就留着让下一次 `items` 变化再试；超过
+   * `SCROLL_RESTORE_TIMEOUT_MS` 就不跳了 —— 隔了几秒再把用户的位置拽走比不恢复更糟。
+   */
+  useEffect(() => {
+    const target = pendingScrollRef.current
+    if (target === null) return
+    if (activeSessionId === null || activeSessionId !== restoredSessionId) return
+    const el = scrollRef.current
+    if (!el) return
+    if (el.scrollHeight - el.clientHeight < target) return
+    el.scrollTop = target
+    // 恢复成功之后**不再**贴底跟随：用户看的是中间那一段
+    stickyRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < STICKY_THRESHOLD
+    pendingScrollRef.current = null
+  }, [items, activeSessionId, restoredSessionId])
+
+  useEffect(() => {
+    if (pendingScrollRef.current === null) return undefined
+    const timer = setTimeout(() => {
+      pendingScrollRef.current = null
+    }, SCROLL_RESTORE_TIMEOUT_MS)
+    return () => clearTimeout(timer)
+  }, [])
+
+  /*
+   * ── [S1 无感重载] 会话恢复：先铺缓存，连上再真正打开 ─────────────────
+   *
+   * ① 缓存直出（**不依赖连接**）：`hydrateCachedTimeline` 只读一次 localStorage，
+   *    把上一屏原样铺出来、顶部挂「正在同步…」。它内部是幂等 + 不抢的，可以放心调。
+   * ② 连上之后再把会话真正打开（`openSession` 才会挂 follow 流、落定快照）。
+   *    `restoreIntentRef` 只能用一次：之后用户点哪个会话就是哪个，绝不把他拽回旧会话。
+   */
+  const restoreIntentRef = useRef<string | null>(restoredSessionId)
+
+  useEffect(() => {
+    if (restoredSessionId === null) return
+    hydrateCachedTimeline(restoredSessionId)
+    patchActiveSession(restoredSessionId)
+  }, [restoredSessionId])
+
+  useEffect(() => {
+    if (!ready) return
+    const target = restoreIntentRef.current
+    if (target === null) return
+    if (activeSessionId !== null && activeSessionId !== target) {
+      // 用户自己开了别的会话：这次恢复意图作废
+      restoreIntentRef.current = null
+      return
+    }
+    // 列表还没到就等它（effect 依赖 sessions）；列表里没有这个会话就别去点它，
+    // 那只会换来一条「会话不存在」的报错 —— 而它大概真的已经被删了
+    if (sessions.length === 0) return
+    if (!sessions.some((session) => session.id === target)) {
+      restoreIntentRef.current = null
+      return
+    }
+    restoreIntentRef.current = null
+    fireAndForget(() => useRemoteStore.getState().openSession(target))
+  }, [ready, activeSessionId, sessions])
+
+  /*
+   * ── [S1 无感重载] 草稿 / 原生中转箱 ──────────────────────────────────
+   *
+   * 草稿**每次改动都写**（不 debounce）：正确性优先，一次几 KB 的同步写对平板毫无压力；
+   * 而丢掉一次按键就是用户又要重打一遍。
+   *
+   * 推给原生中转箱（换 WebView 也不丢的那一层）由 `uiState` 内部限流；
+   * 真正救命的是下面 `visibilitychange → hidden` 时的 `flushUiState()`：
+   * 系统回收渲染进程发生在**切走之后**，那是最后一次能写的机会。
+   */
+  const draftSessionKey = activeSessionId ?? restoredSessionId
+  useEffect(() => {
+    sessionKeyRef.current = draftSessionKey
+    draftRef.current = draft
+    patchDraft(draftSessionKey, draft)
+  }, [draft, draftSessionKey])
+
+  /*
+   * 「重载后回哪个会话」必须跟着**当前会话**走。
+   *
+   * 只在挂载时写一次是不够的：用户从 A 点到 B、然后被系统回收，快照里还是 A，
+   * 回来就跳到 A 去了 —— 那比不恢复更让人迷惑。`null`（断线 / 未选）不写：
+   * 保留上一次的选择，重新连上时仍然回到那里。
+   */
+  useEffect(() => {
+    if (activeSessionId !== null) patchActiveSession(activeSessionId)
+  }, [activeSessionId])
+
+  useEffect(() => {
+    // 本机 / 远程的镜像：盘上那份（`dsp.remote.mode.v1`，由 `RemoteModeSwitch` 写）仍是权威，
+    // 这里只让快照能自洽（诊断时一眼看出这一屏是在哪个模式下丢的）
+    patchMode(useRemoteMode.getState().mode)
+    const unsubscribe = useRemoteMode.subscribe((state) => patchMode(state.mode))
+    const flush = (): void => {
+      patchDraft(sessionKeyRef.current, draftRef.current)
+      patchTimelineScroll(sessionKeyRef.current, scrollTopRef.current)
+      flushUiState()
+    }
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'hidden') flush()
+    }
+    if (typeof document === 'undefined') return unsubscribe
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', flush)
+    return () => {
+      unsubscribe()
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', flush)
+    }
+  }, [])
+
+  /*
    * 工作区文件抽屉的作用域（W3）：跟着「当前会话」走，`workspaceFileScopeId` 就是它。
    *
    * 没连上（或还没选会话）时绑 `null`，面板里的目录缓存与预览一律清掉 ——
@@ -211,6 +418,34 @@ export const RemoteChatView = () => {
   useEffect(() => {
     void useWorkspacePane.getState().bind(ready ? activeSessionId : null)
   }, [ready, activeSessionId])
+
+  /*
+   * 能力探测（W1/W6）挂在这里，而不是挂在「新建会话」那一页里。
+   *
+   * 为什么：入口的可见性取决于 `capabilities.create`，而那个值只有 `refresh()` 会给 ——
+   * 旧版把它写在面板的 effect 里，于是「面板打开才探测、探测过才有入口」成了闭环，
+   * 真机上「新建对话」按钮永远不出现。远程页一就绪就问一次，成本是一次 `session/list`
+   * （`probeCapabilities` 自己单飞、且已有行时立刻返回）。
+   */
+  useEffect(() => {
+    if (!ready) return
+    fireAndForget(() => useNewSessionStore.getState().probeCapabilities())
+  }, [ready])
+
+  /*
+   * 空态直达新建页：这台 Host 一个会话都没有时，用户唯一的下一步就是建一个。
+   * 三个前提缺一不可，免得在「列表还没拉回来」「Host 不支持新建」时闪一下又消失：
+   *   `sessionsSynced` —— `session/list` 回来过（不是「还没拿到」）；
+   *   `sessions.length === 0` —— 确实没有；
+   *   `canCreateSession` —— 确实能建。
+   */
+  useEffect(() => {
+    if (!ready || newSessionOpen || autoEnteredRef.current) return
+    if (!canCreateSession || !cacheStatus.sessionsSynced) return
+    if (sessions.length > 0) return
+    autoEnteredRef.current = true
+    useNewSessionStore.getState().openPanel()
+  }, [ready, newSessionOpen, canCreateSession, cacheStatus.sessionsSynced, sessions.length])
 
   /*
    * 启动 / 回到前台：① 恢复上次连接（K4）；② 续上一次没完成的登录（K2）。
@@ -247,6 +482,12 @@ export const RemoteChatView = () => {
       stickyRef.current = false
     }
     scrollTopRef.current = el.scrollTop
+    // [S1] 滚动位置落盘（节流；切后台那一刻还有一次 `flushUiState()` 兜底）
+    const now = Date.now()
+    if (activeSessionId !== null && now - scrollSavedAtRef.current > SCROLL_SAVE_INTERVAL_MS) {
+      scrollSavedAtRef.current = now
+      patchTimelineScroll(activeSessionId, el.scrollTop)
+    }
     if (el.scrollTop < LOAD_OLDER_THRESHOLD && !olderPendingRef.current && items.length > 0) {
       olderPendingRef.current = true
       fireAndForget(() => useRemoteStore.getState().loadOlder())
@@ -465,6 +706,21 @@ export const RemoteChatView = () => {
   // 输入区胶囊组要自己探一次（顶栏那边的 `probe()` 也还在，幂等）
   useComposerProbe(ready ? activeSessionId : null)
 
+  /*
+   * ── 新建会话整页（W6）────────────────────────────────────────────
+   * 视图切换，不是叠层：这一支直接把「顶栏 + 时间线 + 输入框」整块换掉。
+   * 会话本身（`activeSessionId` / `items` / 草稿）都在上层与 store 里，所以「返回」
+   * 回来的是同一个会话，不需要重新 `openSession`。
+   * 工作区抽屉（`WorkspacePane`）不挂：它是当前会话的产物入口，在新会话页上没有输入框可用。
+   */
+  if (view === 'new-session') {
+    return (
+      <div className={styles.view}>
+        <NewSessionPage />
+      </div>
+    )
+  }
+
   return (
     <div className={styles.view}>
       {/*
@@ -494,15 +750,6 @@ export const RemoteChatView = () => {
             icon={<IconDataOutline16 />}
             onClick={() => void useWorkspacePane.getState().openPane()}
           />
-        ) : null}
-        {/*
-          交付文件（R12）：本次会话产出过的文件（写 / 改出来的）一个入口。
-          放在 `⋯` 左边、与它同尺寸（26px 圆形）—— 菜单本体在 `chat-controls/**`，
-          这一批不许碰那个目录，所以入口是顶栏的一个图标按钮（详见
-          `input-R12-交付文件.md`）。会话还没产出过文件时组件自己返回 null。
-        */}
-        {ready && activeSessionId !== null ? (
-          <SessionArtifactsEntry items={items} streaming={streaming} />
         ) : null}
         {/*
           会话内控制（W2）：模型胶囊 / 权限预设胶囊 / `⋯` 菜单。
@@ -593,8 +840,9 @@ export const RemoteChatView = () => {
         <div className={styles.centerState}>
           <div className={styles.centerTitle}>{t('remotePickSession')}</div>
           {/*
-            「新建会话」入口（W1）。为什么只挂在**空态**：顶栏与输入区归 W2（会话内控制），
+            「新建会话」入口（W1/W6）。为什么只挂在**空态**：顶栏与输入区归 W2（会话内控制），
             而空态正是「这台 Host 上一个会话都还没打开」的时候 —— 用户唯一的下一步就是新建一个。
+            `openPanel()` 现在切的是 `view`（整页），所以点下去是换页，不是弹一层面板。
             能力门禁：Host 不支持 `session/create` 时（`capabilities.create === false`）不渲染，
             不弹错误对话框。
           */}
@@ -689,13 +937,14 @@ export const RemoteChatView = () => {
               {timelinePhase !== 'skeleton'
                 ? items.map((item, index) => (
                   /*
-                   * 交付文件面板（R12）的**唯一挂载点**：每一行后面都问一句
-                   * 「这一轮结束在这一行吗」——`ArtifactsInline` 自己在 services 的分组里
-                   * 查 `endIndex`，查不到就返回 null（不产生空行）。抽不到产物时整块不渲染。
+                   * 产物卡的**唯一挂载点**：每一行后面都问一句「这一轮结束在这一行吗」——
+                   * `ArtifactTurnTail` 查 `turnArtifactsOf(items)` 里的 `endIndex`，
+                   * 查不到就返回 null（不产生空行）。这一轮没有 `present` 声明时整块不渲染。
+                   * 分组按 `items` 引用记忆过一次，所以这里每行调一次也只是一次查表。
                    */
                   <Fragment key={item.id}>
                     <RemoteRow item={item} items={items} live={streaming && index === lastIndex} />
-                    <ArtifactsInline items={items} index={index} streaming={streaming} />
+                    <ArtifactTurnTail index={index} groups={artifactGroups} />
                   </Fragment>
                 ))
                 : null}
@@ -816,9 +1065,7 @@ export const RemoteChatView = () => {
           </div>
         </>
       )}
-      {/* 新建会话面板（W1）：自己 portal 到 body，这里只是挂载点（不占布局） */}
-      <NewSessionPanel />
-      {/* 工作区文件抽屉（W3）：同样自己 portal；未展开 / 不支持时内部直接 return null */}
+      {/* 工作区文件抽屉（W3）：自己 portal；未展开 / 不支持时内部直接 return null */}
       <WorkspacePane />
     </div>
   )
@@ -831,6 +1078,9 @@ const RemoteRow = ({ item, items, live }: { item: ChatItem; items: ChatItem[]; l
   if (item.kind === 'tool') return <ToolRow item={item} />
   // 审批卡就长在时间线里（不折进工具卡、也不吸在输入区上方）：命令原文、风险与按钮同一处
   if (item.kind === 'approval') return <ApprovalRow item={item} items={items} />
+  // 产物行是**数据载体**：卡片由外层的 `ArtifactTurnTail` 挂在这一轮最后一行下面，
+  // 它自己不成行（否则时间线里会多出一条「空行」）。
+  if (item.kind === 'artifact') return null
   // 提问不再是一行只读摘要：选项 / 自由输入 / 倒计时 / 提交全在卡片里（`chat-controls/QuestionCard`）
   return <QuestionCard item={item} />
 }

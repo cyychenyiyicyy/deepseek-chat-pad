@@ -1,0 +1,244 @@
+/*
+ * 产物卡（`ArtifactCard`）：一轮结束后长在这一轮消息下方的那张「交付了 N 个文件」。
+ *
+ * 形态抄官方 Web 客户端 `dsh-client-ui-deliverables/src/client/Deliverables.module.css`
+ * 与 dsh-Go `artifact_card.dart`：浅底 + 细描边 + 圆角，标题一行、文件行若干、
+ * 超过 4 个时底部一行「全部 N 个文件」。
+ *
+ * 颜色一律走 `theme.css` 的 `--dsw-alias-*` 变量（暗色 / 亮色自动跟随）；
+ * 尺寸沿用本工程既有节奏：行高 18、12 号字、图标块 32（平板触控目标够大）。
+ * 卡片**不吸底、不跨轮汇总**，就挂在那一条消息下面。
+ */
+
+/* ────────────────────────────── 一、卡片外壳 ────────────────────────────── */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  /* 与时间线正文同宽：卡片不会比正文更宽，缩进留给外层 */
+  width: 100%;
+  margin: 2px 0 14px;
+  padding: 8px 10px 6px;
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 14px;
+  background-color: var(--dsw-alias-bg-base);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 2px 4px;
+}
+
+.glyph {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.title {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ────────────────────────────── 二、文件行 ────────────────────────────── */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 整行可点：命中面积 44px 起（平板 / 触屏都不难） */
+.rowButton {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 44px;
+  padding: 6px 6px 6px 4px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--dsw-alias-brand-text);
+    outline-offset: -2px;
+  }
+
+  &[data-busy='true'] {
+    cursor: progress;
+    opacity: 0.7;
+  }
+}
+
+/* 32×32 的类型图标块：浅底 + 细描边，和官方的文件块同一观感 */
+.rowIcon {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  overflow: hidden;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rowIcon > svg {
+  width: 20px;
+  height: 20px;
+}
+
+.rowBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.rowName {
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-primary);
+}
+
+.rowMeta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.rowMetaText {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 「预览 / 打开链接」：只在 hover 时露出来，不抢文件名 */
+.rowHint {
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+
+  .rowButton:hover &,
+  .rowButton:focus-visible & {
+    opacity: 1;
+  }
+}
+
+.rowExternal {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  padding-right: 2px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ─────────────────────── 三、底部「全部 N 个文件」 ─────────────────────── */
+
+.more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 32px;
+  margin-top: 2px;
+  padding: 4px 6px;
+  border: none;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 0 0 12px 12px;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+    color: var(--dsw-alias-label-secondary);
+  }
+}
+
+/* 一个小三角：朝下 = 还能展开，朝上 = 已展开（纯 CSS，不额外引图标） */
+.moreChevron {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-right: 4px solid transparent;
+  border-left: 4px solid transparent;
+  border-top: 5px solid currentColor;
+  transition: transform 0.15s ease;
+}
+
+.more[data-expanded='true'] .moreChevron {
+  transform: rotate(180deg);
+}
+
+/* ────────────────────────── 四、窄屏（手机） ────────────────────────── */
+
+@media (max-width: 640px) {
+  .card {
+    margin-bottom: 12px;
+    padding: 6px 8px 4px;
+    border-radius: 12px;
+  }
+
+  .rowButton {
+    min-height: 40px;
+    gap: 8px;
+  }
+
+  .rowIcon {
+    width: 28px;
+    height: 28px;
+    border-radius: 9px;
+  }
+}

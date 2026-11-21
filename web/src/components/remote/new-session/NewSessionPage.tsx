@@ -1,13 +1,10 @@
 import clsx from 'clsx'
 import { useEffect } from 'react'
-import { createPortal } from 'react-dom'
 import { useIsMobile } from '../../../app/viewport.js'
 import { useTranslate } from '../../../i18n/index.js'
 import { useNewSessionStore } from '../../../services/remote/newSessionStore.js'
-import { useRemoteStore } from '../../../services/remote/store.js'
 import {
   IconBrowseOutline16,
-  IconCloseOutline16,
   IconRefreshOutline16,
   IconSettingsOutline16,
   IconThinkOutline16,
@@ -15,38 +12,45 @@ import {
 } from '../../base/icons.js'
 import { OptionPill, PrimaryPill, QuietChip, TipLine } from './chips.js'
 import { ModelFailureNote, NewSessionSheets, modelItemLabel } from './NewSessionSheets.js'
-import styles from './NewSessionPanel.module.css'
+import styles from './NewSessionPage.module.css'
 
 /**
- * 新建会话面板（W1）。排版按 dsh-Go 的新对话空态（`chat/empty_state.dart` +
- * `chat/new_chat_options.dart` + `chat/model_sheet.dart`）的层级搬过来 —— **居中一列，不是表单卡片**：
+ * 新建会话**页**（W6）。
+ *
+ * 上一版（W1）是从右边滑出来的一列 420px 面板 + 遮罩，用户对着真机说「这个是侧边的，我要的不是侧边」。
+ * 现在它是一个**真实视图**（`RemoteChatView` 里 `view: 'chat' | 'new-session'` 的另一半）：
+ * 平板/桌面铺满右侧内容区（左侧会话列表照旧在），手机整屏覆盖。没有遮罩、没有滑入动画，
+ * 切换靠视图本身换掉，返回就回到原来那个会话。
+ *
+ * 层级照 dsh-Go（`chat/empty_state.dart` + `chat/new_chat_options.dart` + `chat/chat_screen.dart`
+ * 里 `sessionId == null` 的那一支 —— 新对话在那边就是**整屏**的空态，不是侧栏）：
  *
  * ```
- *                  ⌒)                       ← 40px 淡装饰（dsh-Go 的鲸尾）
- *                新建会话                   ← 大标题（22/28）
- *          选好工作区和模型，建完就能直接聊      ← 一句说明（14，tertiary）
+ *  ←  新建会话                             ← 顶部一行：返回 + 标题
  *
- *              准备在哪工作                   ← 小节标签
- *      ( ▣ 在「deepseek-tablet」中      ⌄ )   ← 大选择：工作区（36px 胶囊，点开是抽屉）
+ *                  ⌒)                     ← 40px 淡装饰（dsh-Go 的鲸尾）
+ *              开一段新对话                ← 大标题（22/28，displaySmall）
+ *         选好工作区和模型，建完就能直接聊      ← 一句说明（14，tertiary）
  *
- *   ( ◍ V4 Pro · 高 ⌄ ) ( ⚒ 工作模式 ⌄ )      ← 一排三个胶囊：模型(含思考强度) / 权限 / 预设
+ *               准备在哪工作                 ← 小节标签
+ *       ( ▣ 在「deepseek-tablet」中   ⌄ )    ← 工作区大胶囊（44px，这一页的主选择）
+ *
+ *   ( ◍ V4.1 Flash · 高 ⌄ ) ( ⚒ 工作模式 ⌄ )  ← 一排三个小胶囊：模型(含思考强度) / 权限 / 预设
  *   ( ⛨ 工作区可写 ⌄ )
  *
- *          💡 建好后可以直接发消息…             ← 提示行（12，tertiary）
- *
- *   ─────────────────────────────────────
- *      [ 取消 ]        [ 创建并开始 ]        ← 底部吸底：次要 + 主操作
+ *           💡 建好后可以直接发消息…          ← 提示行（12，tertiary）
+ *  ────────────────────────────────────
+ *        [ 取消 ]      [ 创建并开始 ]       ← 底部吸底：次要 + 主操作
  * ```
  *
- * 每个选项点开一个**短列表**（`NewSessionSheets`：工作区抽屉 / 模型网格 + 思考强度分段 /
- * 预设行 / 权限行），而不是页面上的下拉框 —— 这是 dsh-Go 的做法，也是「旧版看着不像它」的主因。
+ * 每个选项点开一个**短列表**（`NewSessionSheets`），而不是页面上的下拉框 —— 这是 dsh-Go 的做法。
  *
- * 形态：平板/桌面 = 右侧停靠一列；手机（<768px）= 整屏 sheet；两者同一套层级、按钮都吸底。
+ * 保留的既有能力：工作区可为空（继承 Host 默认 cwd）、模型 / 思考强度可选、权限预设、agent preset、
+ * 建完自动进会话、模型应用失败时「重试 / 跳过用默认模型」。
  */
-export const NewSessionPanel = () => {
+export const NewSessionPage = () => {
   const t = useTranslate()
   const isMobile = useIsMobile()
-  const open = useNewSessionStore((state) => state.open)
   const loading = useNewSessionStore((state) => state.loading)
   const creating = useNewSessionStore((state) => state.creating)
   const error = useNewSessionStore((state) => state.error)
@@ -64,19 +68,17 @@ export const NewSessionPanel = () => {
   const modelApply = useNewSessionStore((state) => state.modelApply)
   const createdSessionId = useNewSessionStore((state) => state.createdSessionId)
   const sheet = useNewSessionStore((state) => state.sheet)
-  const phase = useRemoteStore((state) => state.phase)
 
-  const close = (): void => useNewSessionStore.getState().closePanel()
+  /** 返回 = 关掉这个视图。会话本身在 store 里没动过，所以回去就是原来那一屏。 */
+  const back = (): void => useNewSessionStore.getState().closePanel()
 
-  // 连接就绪时补一次「能力 + 工作区」探测（空态按钮的可见性依赖它；自带等连接对象的重试）。
+  /*
+   * Esc：先收起短列表，再退回去。
+   * 能力探测（`probeCapabilities`）不在这里做了 —— 挂在 `RemoteChatView` 上，
+   * 远程页一就绪就问一次；挂在「打开面板」里的话，「新建对话」按钮的可见性
+   * 又依赖这次探测，入口就成了死结（见 `RemoteChatView` 里那段注释）。
+   */
   useEffect(() => {
-    if (phase !== 'ready') return
-    void Promise.resolve(useNewSessionStore.getState().probeCapabilities()).catch(() => undefined)
-  }, [phase])
-
-  // Esc：先关 sheet，再关面板
-  useEffect(() => {
-    if (!open) return undefined
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return
       if (useNewSessionStore.getState().sheet !== null) {
@@ -87,9 +89,7 @@ export const NewSessionPanel = () => {
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [open])
-
-  if (!open) return null
+  }, [])
 
   const workspace = workspaces.find((item) => item.workspaceId === selectedWorkspaceId)
   const workspaceLabel = workspace === undefined
@@ -106,25 +106,23 @@ export const NewSessionPanel = () => {
   const failure = modelApply.status === 'failed' ? modelApply.error ?? t('newSessionModelFailed') : null
   const canCreate = capabilities.create && !creating && createdSessionId === null
 
-  return createPortal(
-    <div
-      className={clsx(styles.overlay, isMobile && styles.overlayMobile)}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) close()
-      }}
+  return (
+    <section
+      className={clsx(styles.page, isMobile && styles.pageMobile)}
+      aria-label={t('newSession.pageTitle')}
+      data-testid="new-session-page"
     >
-      <aside
-        className={clsx(styles.panel, isMobile ? styles.panelMobile : styles.panelSide)}
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('newSessionTitle')}
-      >
-        <button type="button" className={styles.closeButton} aria-label={t('newSessionClose')} onClick={close}>
-          <IconCloseOutline16 />
+      {/* ── 顶部一行：返回 + 标题（与左栏 logo 行、会话页顶栏同高同位） ── */}
+      <div className={styles.topBar}>
+        <button type="button" className={styles.backButton} aria-label={t('newSession.pageBack')} onClick={back}>
+          <IconArrowLeftOutline20 />
         </button>
+        <div className={styles.topTitle}>{t('newSession.pageTitle')}</div>
+      </div>
 
+      {/* ── 中间：居中一列 ── */}
+      <div className={styles.body}>
         <div className={styles.column}>
-          {/* ── 顶部：标题 + 一句说明 ── */}
           <div className={styles.hero} aria-hidden>
             {/* 一条很淡的鲸尾（dsh-Go 空态的那个装饰）：一根尾柄分向两侧 */}
             <svg width={44} height={40} viewBox="0 0 44 40" fill="none">
@@ -134,13 +132,13 @@ export const NewSessionPanel = () => {
               />
             </svg>
           </div>
-          <div className={styles.heroTitle}>{t('newSessionTitle')}</div>
-          <div className={styles.heroSubtitle}>{t('newSessionSubtitle')}</div>
+          <h1 className={styles.headline}>{t('newSession.pageHeadline')}</h1>
+          <div className={styles.subtitle}>{t('newSession.pageSubtitle')}</div>
 
-          {/* ── 中间：准备在哪工作（大选择） ── */}
+          {/* ── 准备在哪工作（这一页的主选择） ── */}
           {capabilities.workspace ? (
             <div className={styles.workspaceSection}>
-              <div className={styles.sectionLabel}>{t('newSessionWhereToWork')}</div>
+              <div className={styles.workspaceLabel}>{t('newSession.pageWhereToWork')}</div>
               <QuietChip
                 className={styles.workspacePill}
                 icon={<IconBrowseOutline16 />}
@@ -153,7 +151,7 @@ export const NewSessionPanel = () => {
             <div className={styles.hint}>{t('newSessionWorkspaceUnsupported')}</div>
           )}
 
-          {/* ── 一排三个胶囊：模型(含思考强度) / 权限预设 / agent preset ── */}
+          {/* ── 一排三个小胶囊：模型(含思考强度) / 权限预设 / agent preset ── */}
           <div className={styles.pillRow}>
             {showModel ? (
               <OptionPill
@@ -186,16 +184,17 @@ export const NewSessionPanel = () => {
             </div>
           ) : null}
 
-          {/* ── 提示行 ── */}
-          <TipLine text={t('newSessionTip')} />
+          <TipLine text={t('newSession.pageTip')} />
 
           {notice !== null ? <div className={styles.notice}>{notice}</div> : null}
           {error !== null ? <div className={styles.error}>{error}</div> : null}
           {loading ? <div className={styles.hint}>{t('newSessionLoading')}</div> : null}
         </div>
+      </div>
 
-        {/* ── 底部吸底：失败时换成两条明确的出路，否则是「取消 / 创建并开始」 ── */}
-        <div className={styles.footer}>
+      {/* ── 底部吸底：失败时换成两条明确的出路，否则是「取消 / 创建并开始」 ── */}
+      <div className={styles.footer}>
+        <div className={styles.footerInner}>
           {failure !== null ? (
             <ModelFailureNote
               message={failure}
@@ -208,8 +207,8 @@ export const NewSessionPanel = () => {
             />
           ) : (
             <div className={styles.footerButtons}>
-              <button type="button" className={styles.secondaryPill} onClick={close}>
-                {t('cancel')}
+              <button type="button" className={styles.secondaryPill} onClick={back}>
+                {t('newSession.pageCancel')}
               </button>
               {createdSessionId === null ? null : (
                 <span className={styles.spinner} aria-hidden>
@@ -217,7 +216,7 @@ export const NewSessionPanel = () => {
                 </span>
               )}
               <PrimaryPill
-                label={creating ? t('newSessionCreating') : t('newSessionCreate')}
+                label={creating ? t('newSession.pageCreating') : t('newSession.pageCreate')}
                 disabled={!canCreate}
                 onClick={() => {
                   void useNewSessionStore.getState().createAndOpen()
@@ -225,12 +224,30 @@ export const NewSessionPanel = () => {
               />
             </div>
           )}
-          {!capabilities.create ? <div className={styles.hint}>{t('newSessionCreateUnsupported')}</div> : null}
         </div>
+        {!capabilities.create ? <div className={styles.hint}>{t('newSessionCreateUnsupported')}</div> : null}
+      </div>
 
-        {sheet !== null ? <NewSessionSheets /> : null}
-      </aside>
-    </div>,
-    document.body,
+      {sheet !== null ? <NewSessionSheets /> : null}
+    </section>
   )
 }
+
+/**
+ * 返回箭头（20px，描边）。
+ *
+ * 为什么自己在 `new-session/` 里画一个而不是加进 `base/icons.tsx`：这一批的可改范围只有
+ * `new-session/**`、`RemoteChatView.tsx`、`RemoteSessionList.tsx` 与 i18n，`base/` 归别的任务；
+ * 真到了要共用的那天，把它挪过去即可（其余 `base/icons.tsx` 的图标是填充路径，这个是描边）。
+ */
+const IconArrowLeftOutline20 = () => (
+  <svg width={20} height={20} viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path
+      d="M16.25 10H4M4 10L9.5 4.5M4 10L9.5 15.5"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+)

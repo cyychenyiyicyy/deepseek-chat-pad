@@ -103,6 +103,62 @@
   user-select: none;
 }
 
+/* ---------- 工作区切换（S2：列表型，不是下拉框） ---------- */
+
+.switchTrigger {
+  display: inline-flex;
+  flex-shrink: 1;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 60%;
+  padding: 3px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+
+  &:hover {
+    background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.switchLabel {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.switchArrow {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 浮层：与 `Select` 的菜单同一档观感（白底 + 投影 + 圆角），但里面是一个列表 */
+.switchMenu {
+  position: fixed;
+  z-index: 60;
+  box-sizing: border-box;
+  width: min(320px, calc(100vw - 16px));
+  max-height: 320px;
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+  background-color: var(--dsw-alias-bg-base);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 22%);
+  scrollbar-color: var(--scroll-color) transparent;
+}
+
 .dirLabel {
   flex: 1;
   min-width: 0;

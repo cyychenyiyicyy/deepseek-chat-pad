@@ -6,14 +6,14 @@
  * 写在 `RemoteChatView` 里就只能靠读 JSX 猜；抽成纯函数后
  * `__selftest__/composer.selftest.mts` 可以直接把每种组合摆一遍。
  *
- * 四条硬规则（来自用户真机反馈 + R1 调研结论，动之前先看这里）：
+ * 四条硬规则（来自用户真机反馈 + R1 调研结论 + S3 复核，动之前先看这里）：
  *
- *  1. **工作中同一个位置必须变「停止」** —— 主按钮只看 `streaming`，不看草稿有没有内容
- *     （`primary` 的判定顺序：`stopTimedOut ? 回到发送 : streaming ? 'stop' : knownCommand ? 'command' : 'send'`）。
- *  2. **工作中照样能发** —— 默认 `mode:'steer'`（插话，与 dsh-Go 一致），
+ *  1. **在跑时主按钮看输入框**（S3 改的就是这一条）—— 空输入是「停止」、有内容
+ *     「发送」；不在跑永远是发送。裁决只有一处：`resolveComposerView()`。
+ *  2. **在跑时照样能发** —— 默认 `mode:'steer'`（插话，与 dsh-Go 一致），
  *     切到「排队」就是 `mode:'queue'`。两条都走 `session/prompt` 的同一个端点，
- *     不另开接口（R1 §「运行中发送走 prompt 的 mode」）。因为主按钮被停止占了，
- *     运行中另给一个**次要发送键 + 插话/排队切换**。
+ *     不另开接口（R1 §「运行中发送走 prompt 的 mode」）。主位被停止占着时，
+ *     发送是第二颗钮；主位是发送时，第二颗钮换成停止。
  *  3. **停止要有超时出口** —— `session/cancel` 10 秒没有回执就把按钮还原成发送，
  *     否则用户会以为整页卡死（照 dsh-Go 的 10s 行为）。
  *  4. **排队条只表示「还在等」** —— `queueLength > 0` 也算「工作中」：
@@ -31,6 +31,9 @@ export type PromptMode = 'steer' | 'queue'
 
 /** 主按钮（输入区右下角那个圆钮）的形态 */
 export type ComposerPrimary = 'send' | 'stop' | 'command'
+
+/** 主位之外的第二颗钮（运行中才有）：主位是停止时给「照样能发」，主位是发送时给「照样能停」 */
+export type ComposerSecondary = 'send' | 'stop'
 
 /** 回车 / 点发送时**真正要做**的事 */
 export type ComposerIntent = 'send' | 'steer' | 'queue' | 'command' | 'none'
@@ -63,16 +66,27 @@ export interface ComposerSignals {
 export interface ComposerView {
   /** 「正在工作」：生成中，或队列里还有待发消息 */
   busy: boolean
+  /** 这次裁决用的「在跑」值（= `streaming`，或全局运行态校正后的值） */
+  running: boolean
   primary: ComposerPrimary
   /** 主按钮是否可点（停止永远可点：Host 空闲时 `session/cancel` 也回 accepted） */
   primaryEnabled: boolean
-  /** 生成中另给的次要发送键（主位被停止占着） */
-  secondarySendVisible: boolean
-  secondarySendEnabled: boolean
-  /** 生成中才出现的「插话 / 排队」切换 */
+  /** 主位之外的第二颗钮；`null` = 不渲染 */
+  secondaryAction: ComposerSecondary | null
+  /** 第二颗钮是否可点 */
+  secondaryEnabled: boolean
+  /** 运行中才出现的「插话 / 排队」切换 */
   modeToggleVisible: boolean
   hintKey: TranslationKey
   hintParams?: Record<string, number>
+  /**
+   * 这次裁决吃进去的原始信号。
+   *
+   * 为什么放在 view 里：`ComposerRow` 只拿到 view（截图脚本也直接喂假 view），
+   * 而它还要用**全局运行态**再裁一次（`composerLiveView`）—— 没有原始信号就重算不了。
+   * UI 一律读上面那些结论字段，**不要**自己拿 signals 判规则。
+   */
+  signals: ComposerSignals
 }
 
 /** 有没有可发的内容（纯文本或已完成上传的附件） */
@@ -104,33 +118,65 @@ export const composerIntent = (signals: ComposerSignals): ComposerIntent => {
   return 'send'
 }
 
-export const composerView = (signals: ComposerSignals): ComposerView => {
+export const composerView = (signals: ComposerSignals): ComposerView =>
+  resolveComposerView(signals, signals.streaming)
+
+/**
+ * 用**全局运行态**再裁一次（`ComposerRow` 里调）。
+ *
+ * 为什么需要它：`signals.streaming` 由当前会话的 `session/follow` 增量推导，
+ * 而「用户带着一个已经在跑的会话进 App」时 `turn/start` 早过去了 —— 只看它，
+ * 按钮就永远停在发送（用户反馈的第二条）。`liveSessions.ts` 把 `session/list` 的
+ * `running` 与 `$events` 的 `api-session/*` 汇总成全局运行态，这里把它并进来：
+ * **任一边说在跑就算在跑**（宁可多给一个停止键，也不能让人以为它没在干活）。
+ *
+ * 纯函数：同样的 (view, running) 一定得到同样的结果，`running` 没变时直接返回原对象
+ * （列表/输入区每帧都会调它，不能白白造新对象）。
+ */
+export const composerLiveView = (view: ComposerView, running: boolean): ComposerView =>
+  view.running === running ? view : resolveComposerView(view.signals, running)
+
+/**
+ * 按钮规则的唯一裁决处（其它地方**不要**再写一遍 if）。
+ *
+ * 规则（S3 用户明确要求，覆盖 R4 原来那条「工作中主位永远是停止」）：
+ *   1. 在跑 + **输入框为空** → 主位是**停止**（这是「它正在干活」的信号）；
+ *   2. 在跑 + **输入框有内容** → 主位是**发送**（走 steer / queue），停止改由第二颗钮承担；
+ *   3. 不在跑 → 主位永远是发送；
+ *   4. 斜杠命令不算「可发内容」：在跑时它发不出去（Host 会拒），所以主位仍是停止。
+ *
+ * 第 2 条为什么是「发送」而不是「停止」：用户的话是「我打完字了，就是想发出去」——
+ * 打了一半的字被一个停止键占着主位，等于每次插话都要多按一次。停止放在第二颗钮上，
+ * 位置固定、图标是 ■，不会找不到。
+ */
+const resolveComposerView = (signals: ComposerSignals, running: boolean): ComposerView => {
   const content = canSubmit(signals)
-  const busy = signals.streaming || signals.queueLength > 0
-  // 停止超时：把主按钮还给发送，用户不会卡在一个点了没反应的停止键上
-  const showStop = signals.streaming && !signals.stopTimedOut
-  const primary: ComposerPrimary = showStop
-    ? 'stop'
-    : signals.knownCommand
-      ? 'command'
-      : 'send'
-  const primaryEnabled = showStop
+  const hasContent = hasDraftContent(signals.draft, signals.attachments)
+  // 停止 10s 没回执就把主位还给发送：不让用户对着一个点了没反应的键
+  const stopWins = running && !signals.stopTimedOut && (!hasContent || signals.knownCommand)
+  const commandMode = signals.knownCommand && !running
+  const primary: ComposerPrimary = stopWins ? 'stop' : commandMode ? 'command' : 'send'
+  const primaryEnabled = stopWins
     ? true
-    : signals.knownCommand
+    : commandMode
       ? signals.ready && signals.sessionId !== null && signals.draft.trim().length > 0
       : content
-  // 生成中：主位是停止，所以另给一个发送键 + 插话/排队切换（命令例外）
-  const secondarySendVisible = signals.streaming && !signals.knownCommand
+  // 第二颗钮：主位被停止占着时给发送；主位是发送时把停止放这里（运行中总得能停）
+  const secondaryAction: ComposerSecondary | null =
+    running && !signals.knownCommand ? (stopWins ? 'send' : 'stop') : null
   const hint = composerHint(signals)
   return {
-    busy,
+    busy: running || signals.queueLength > 0,
+    running,
     primary,
     primaryEnabled,
-    secondarySendVisible,
-    secondarySendEnabled: secondarySendVisible && content,
-    modeToggleVisible: secondarySendVisible,
+    secondaryAction,
+    // 「照样能发」要真的有内容；「照样能停」永远可点
+    secondaryEnabled: secondaryAction === 'stop' ? true : content,
+    modeToggleVisible: running && !signals.knownCommand,
     hintKey: hint.key,
     ...(hint.params === undefined ? {} : { hintParams: hint.params }),
+    signals,
   }
 }
 

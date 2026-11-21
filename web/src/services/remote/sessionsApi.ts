@@ -982,6 +982,53 @@ export const openWorkspaceFollow = async (
   )
 }
 
+/* ────────────────────────────────────────────────────────────────────────
+ * 九·补、`workspace/follow` 的**增量帧**（S2）
+ *
+ * input-B §2.1 逐字取证过的只有首帧 `baseline`；增量帧的形状没有拿到官方实现原文，
+ * 所以这里**只识别语义明确的两类**（upsert / remove），其余一律 `ignore`：
+ *   - 忽略是安全的，因为 baseline 是权威全集，而流被关掉后 `workspaces.ts` 会重开并
+ *     重新拿一份 baseline —— 增量丢一两条只会晚一拍，不会留下错的数据。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/** 一帧 `workspace/follow` 的增量（认出多少算多少）。 */
+export type RemoteWorkspaceFrame =
+  | { kind: 'upsert'; workspace: RemoteWorkspace }
+  | { kind: 'remove'; workspaceId: string }
+  | { kind: 'ignore' }
+
+/** `workspace/removed` / `workspace/delete` / `deleted:true` 这些写法都认。 */
+const isRemovalFrame = (frame: Record<string, unknown>, type: string): boolean =>
+  /(remove|delete)d?$/iu.test(type) || frame.removed === true || frame.deleted === true
+
+/**
+ * 解析 `workspace/follow` 的增量帧。
+ *
+ * 认这三种形状（都是「一眼能看出是哪个工作区」的写法）：
+ *   1. `{type:'workspace/added'|'workspace/updated'|'workspace', workspace:{…WorkspaceView}}`
+ *   2. `{type:'workspace/…', value:{…WorkspaceView}}`
+ *   3. 帧本身就是一行 `WorkspaceView`（无 `type`）
+ * 删除：`{type:'workspace/removed', workspaceId}`（或 `removed:true` / `deleted:true`）。
+ */
+export const parseWorkspaceFrame = (frame: unknown): RemoteWorkspaceFrame => {
+  if (!isRecord(frame)) return { kind: 'ignore' }
+  const type = typeof frame.type === 'string' ? frame.type : ''
+  const removing = isRemovalFrame(frame, type)
+  const candidate = isRecord(frame.workspace)
+    ? frame.workspace
+    : isRecord(frame.value) ? frame.value : frame
+  const parsed = parseWorkspace(candidate)
+  if (!removing && parsed !== null) return { kind: 'upsert', workspace: parsed }
+  if (removing) {
+    const workspaceId = typeof frame.workspaceId === 'string'
+      ? frame.workspaceId
+      : typeof candidate.workspaceId === 'string' ? candidate.workspaceId : ''
+    if (workspaceId.length > 0) return { kind: 'remove', workspaceId }
+  }
+  return { kind: 'ignore' }
+}
+
+
 /** 把用户输入的工作区路径收敛成合法形态；不合法就抛 `WORKSPACE_PATH_INVALID`。 */
 export const normalizeWorkspacePath = (raw: string): string => {
   const path = raw.trim()

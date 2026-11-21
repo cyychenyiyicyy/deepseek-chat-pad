@@ -2,7 +2,7 @@ import clsx from 'clsx'
 import { useTranslate } from '../../../i18n/index.js'
 import type { RemoteDirectoryListing } from '../../../services/remote/sessionsApi.js'
 import { IconChevronRightOutline14 } from '../../base/icons.js'
-import styles from './NewSessionPanel.module.css'
+import styles from './NewSessionPage.module.css'
 
 /**
  * 目录浏览（`directoryPicker/list`）。

@@ -120,7 +120,70 @@
   overflow-wrap: anywhere;
 }
 
-/* ── 一行 = 主按钮 + 「⋯」 ── */
+/* ────────────────────────────────────────────────────────────────────────
+ * [S3] 列表重设计
+ *
+ * 用户反馈两件事：「刷新会话这个按钮太大了」「每一个会话的状态提示不够明显，
+ * 也看不出来他现在是在工作还是在干嘛」。所以：
+ *   - 刷新从「一整行 36px 大按钮」变成标题行右侧 28px 图标（`IconButton size=xs`）；
+ *   - 每行右侧给了**状态位**：运行中（品牌色脉冲点 + 文字）/ 待审批（红点 + 数字）；
+ *   - 运行中的行整体加一条左侧竖线 + 极轻底色，扫一眼就能挑出来；
+ *   - 顶部一句汇总（`2 个会话在跑`），只在真有在跑的会话时出现。
+ *
+ * 尺寸刻意沿用原行高（44/48/50px，见文件末尾的媒体查询）：标题行 20px + 状态行 16px
+ * 本来就够放，不再加第三行 —— 手机（390px）上「标题 + 状态」两行是最省的排版。
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/* 标题行：`会话` 左、刷新图标右 */
+.listHeader {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  margin: 0 2px 2px 4px;
+}
+
+.listTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0.02em;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.refreshButton {
+  flex-shrink: 0;
+}
+
+/* 顶部汇总：一句话说清后台有几件事在动 */
+.summary {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  margin: 0 2px 8px 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-tertiary));
+  user-select: none;
+}
+
+.summaryDot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--dsw-alias-brand-text);
+  animation: list-pulse 1.4s ease-in-out infinite;
+}
+
+/* 一行 = 主按钮 + 「⋯」 */
 .row {
   display: flex;
   align-items: center;
@@ -223,13 +286,14 @@
 }
 
 .item {
+  position: relative;
   display: flex;
   align-items: center;
   box-sizing: border-box;
   width: 100%;
   min-height: 44px;
   margin-bottom: 2px;
-  padding: 8px 10px;
+  padding: 8px 10px 8px 12px;
   border: none;
   border-radius: 12px;
   background: none;
@@ -252,6 +316,32 @@
   }
 }
 
+/*
+ * [S3] 运行中的行：左侧一条竖线 + 极轻底色。
+ *
+ * 为什么用伪元素而不是 border-left：圆角行（12/16px）上 border-left 会把左上、
+ * 左下两个角画成直角，看着像「灰条贴上去」；竖线自己带圆角、上下留一点呼吸，
+ * 既能扫读又不破坏行的形状。活动行（`.itemActive`）的底色优先于这里的淡底。
+ */
+.rowRunning .item::before {
+  content: '';
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  left: 3px;
+  width: 3px;
+  border-radius: 100px;
+  background-color: var(--dsw-alias-brand-text);
+}
+
+.rowRunning .item:not(.itemActive) {
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+.rowRunning .item:not(.itemActive):hover {
+  background-color: var(--dsw-specific-sidebar-nav-item-hover);
+}
+
 .itemActive {
   background-color: var(--dsw-specific-sidebar-nav-item-active-accent);
   color: var(--dsw-alias-brand-primary-invert);
@@ -267,6 +357,81 @@
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+}
+
+/* [S3] 第一行：标题 + 右侧状态位 */
+.itemTop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* [S3] 「运行中」：品牌色脉冲点 + 文字，贴行尾 */
+.statusRunning {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--dsw-alias-brand-text);
+  white-space: nowrap;
+}
+
+.itemActive .statusRunning {
+  color: inherit;
+  opacity: 0.9;
+}
+
+/* 脉冲点：2px 的圈，用 box-shadow 扩散 —— 不占布局，也不触发重排 */
+.pulseDot {
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: currentColor;
+  animation: list-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes list-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 currentColor;
+  }
+
+  50% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 3px transparent;
+  }
+}
+
+/* 减少动效：不打脉动，只留一个实心点 */
+@media (prefers-reduced-motion: reduce) {
+  .pulseDot,
+  .summaryDot {
+    animation: none;
+  }
+}
+
+/* [S3] 正在调用的工具名：一行，超出省略（用户要求「最多 1 行省略」） */
+.itemTool {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.itemActive .itemTool {
+  color: inherit;
+  opacity: 0.72;
 }
 
 .itemMeta {
@@ -301,6 +466,7 @@
 
 .itemTitle {
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   min-width: 0;
   overflow: hidden;
@@ -309,6 +475,8 @@
 }
 
 .itemTime {
+  flex-shrink: 0;
+  margin-left: auto;
   font-size: 11px;
   line-height: 16px;
   color: var(--dsw-alias-label-tertiary);

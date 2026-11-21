@@ -17,26 +17,27 @@
  * - 拿连接对象：`sessionsApi.lastRemoteTarget()`（调用观察者，见那边的注释）；
  * - 建完会话：`useRemoteStore.getState().openSession(id)` 真正进会话。
  *
- * ## 工作区列表从哪来（这批唯一的妥协，必须写清楚）
+ * ## 工作区列表从哪来（S2 起：`workspace/follow` 是权威）
  *
- * 官方拿工作区列表只有一条路：`workspace/follow` 是个 **stream**，读首帧 `baseline`。
- * 流的帧只从 `core/rpcMux.ts` 的**连接级** `onStreamEvent` 出来，而那个回调是 `store.ts`
- * 建链时固定的（它按 `streamId` 路由到自己私有的 `sinks` 表）。本批不许改 `store.ts` /
- * `core/**`，所以外部打不开第二条流的接收端 —— 这是本文件唯一的功能降级。
+ * ```
+ *  workspace/follow（常驻流，services/remote/workspaces.ts）──► hostWorkspaces ─┐
+ *                                                                              ├─► workspaces（合并）
+ *  session/list ──► deriveWorkspacesFromSessions() ──────────► derivedWorkspaces ┘
+ * ```
  *
- * 处理方式：
- *   1. `sessionsApi.openWorkspaceFollow` / `parseWorkspaceBaseline` 已按协议写好并自测覆盖，
- *      只等有人把帧递进来；
- *   2. `registerWorkspaceBaselineReader()` 是给那一步留的**扩展点**：谁来提供「读 baseline」的
- *      实现（W2 给 store.ts 加通用 sink，或 store.ts 加一行 additive export），注入即可，
- *      本文件其余部分一行都不用改；
- *   3. 没有 reader 时退回**派生列表**：用 `session/list` 每行的 `workspaceId` + `cwd` 归并出
- *      工作区（路径取最近一条会话的 `cwd`，标题取路径末段），外加本次 `workspace/create`
- *      刚建出来的那几个。代价：**没有任何会话的工作区不会出现在下拉里**。
+ * - **权威**：`workspace/follow` 首帧 `baseline` 给的 `items`（input-B §2.1）—— 它包含
+ *   **没有会话的工作区**，也能给出每个工作区的会话数与归档 / 置顶全集；
+ * - **补缺**：派生的那份只用来补 follow 行里缺的 `path` / 显示名；同工作区按
+ *   `workspaceId` 与路径两层去重（规则在 `mergeWorkspaceInventory`）；
+ * - **降级**：老 Host 回 `METHOD_NOT_FOUND` 时静默退回派生列表（`workspaceFollow:'unsupported'`），
+ *   **不**把工作区 UI 收起来 —— 用户反馈的那句「没有识别到我用过的工作区」就是旧版把
+ *   整个下拉藏掉造成的连带伤害。
  *
- * 「归档 / 置顶」的初值同理：全集只有 `workspace/follow` 给，所以初值取自 `session/list` 行上的
- * `pinned` 投影与本代连接里 RPC 的返回值；一旦某个 RPC 给过权威全集，就以它为准
- * （`workspace/archiveSession` 等返回的都是**整套 id 列表**）。
+ * 流的生命周期（开 / 关 / 重开 / 重试）全在 `workspaces.ts`；本文件只负责**收数据**：
+ * `applyWorkspaceBaseline()`（baseline）与 `applyWorkspaceFrame()`（增量）。
+ *
+ * 「归档 / 置顶」的初值也是同一套：baseline 给全集就标成权威（`pinnedAuthoritative`），
+ * 没给就在 `session/list` 的行上按 `pinned` 投影猜（老 Host）。
  *
  * ## 三条纪律
  *
@@ -70,7 +71,6 @@ import {
   listDirectory,
   listSessions,
   normalizeWorkspacePath,
-  openWorkspaceFollow,
   pinSession,
   renameSession,
   searchSessions,
@@ -86,9 +86,23 @@ import {
   type RemoteSearchHit,
   type RemoteSessionRow,
   type RemoteWorkspace,
+  type RemoteWorkspaceFrame,
   type RemoteWorkspaceList,
 } from './sessionsApi.js'
 import { useRemoteStore } from './store.js'
+import {
+  deriveWorkspacesFromSessions,
+  ensureWorkspaceStream,
+  installWorkspaceSync,
+  isMissingEndpointError,
+  mergeWorkspaceInventory,
+  type WorkspaceFollowStatus,
+  type WorkspaceSyncFailure,
+} from './workspaces.js'
+
+/* 工作区列表的纯函数住在 `workspaces.ts`（同步器那边也要用），这里按老名字再导出一次：
+ * `new-session.selftest.mts` 与个别 UI 都是从这个模块 import 的。 */
+export { deriveWorkspacesFromSessions, mergeWorkspaceInventory, workspaceTitleFromPath } from './workspaces.js'
 
 /* ────────────────────────────────────────────────────────────────────────
  * 一、对外形状
@@ -104,6 +118,13 @@ import { useRemoteStore } from './store.js'
 export interface NewSessionCapabilities {
   /** 工作区列表可用（下拉、归档、置顶都依赖它）。 */
   workspace: boolean
+  /**
+   * `workspace/create` 可用（「新建工作区」这一行）。
+   *
+   * 与 `workspace` 分开：老 Host 常常「有工作区表、没有 create」，那时列表照常显示，
+   * 只把「新建工作区」收起来 —— 不能因为少一个 create 就把整个选择器藏掉。
+   */
+  workspaceCreate: boolean
   /** `session/create` 可用。 */
   create: boolean
   /** `directoryPicker/list` 可用（「浏览目录」）。 */
@@ -122,6 +143,7 @@ export interface NewSessionCapabilities {
 
 const CAPABILITIES_OFF: NewSessionCapabilities = {
   workspace: false,
+  workspaceCreate: false,
   create: false,
   directory: false,
   permission: false,
@@ -133,6 +155,7 @@ const CAPABILITIES_OFF: NewSessionCapabilities = {
 
 const CAPABILITIES_ON: NewSessionCapabilities = {
   workspace: true,
+  workspaceCreate: true,
   create: true,
   directory: true,
   permission: true,
@@ -144,7 +167,6 @@ const CAPABILITIES_ON: NewSessionCapabilities = {
 
 /** 工作区列表的来源（`derived` 时「没有会话的工作区」列不出来，见文件头）。 */
 export type WorkspaceSource = 'follow' | 'derived'
-
 /**
  * 面板里会展开的「短列表」（照 dsh-Go 的做法：每个选项点开一个小 sheet）。
  *
@@ -214,8 +236,19 @@ export interface NewSessionState {
   notice: string | null
   capabilities: NewSessionCapabilities
 
+  /**
+   * 给 UI 用的工作区列表 = `mergeWorkspaceInventory(hostWorkspaces, derivedWorkspaces)`。
+   *
+   * 直接读它（新建会话页、工作区抽屉都读它）；两个来源各自存在下面两个字段里。
+   */
   workspaces: RemoteWorkspace[]
+  /** **权威**：`workspace/follow` 的 `baseline.items`（老 Host 没有这个端点 ⇒ 一直是空）。 */
+  hostWorkspaces: RemoteWorkspace[]
+  /** 从 `session/list` 派生的那份（只补 `path` / 显示名；没 baseline 时它就是全部）。 */
+  derivedWorkspaces: RemoteWorkspace[]
   workspaceSource: WorkspaceSource
+  /** `workspace/follow` 这条流的状态（`unsupported` = 老 Host，走派生列表且不收起 UI）。 */
+  workspaceFollow: WorkspaceFollowStatus
   /** 最近一次 `session/list` 的原始行（本地搜索与派生工作区都用它）。 */
   rows: RemoteSessionRow[]
   archivedSessionIds: string[]
@@ -276,6 +309,12 @@ export interface NewSessionState {
   refresh(): Promise<void>
   /** 只刷「会话清单 + 工作区/标记」，列表挂载时静默调用（不拉预设）。 */
   ensureWorkspaceFlags(): Promise<void>
+  /** 收到 `workspace/follow` 的 `baseline`（权威全量：items + 归档 / 置顶全集）。 */
+  applyWorkspaceBaseline(list: RemoteWorkspaceList): void
+  /** 收到一帧增量（upsert / remove）；认不出的帧不会走到这里。 */
+  applyWorkspaceFrame(frame: RemoteWorkspaceFrame): void
+  /** 流状态变了：`unsupported` ⇒ 老 Host，静默退回派生列表（**不收起 UI**）。 */
+  setWorkspaceFollowStatus(status: WorkspaceFollowStatus, failure?: WorkspaceSyncFailure): void
   /**
    * 连接就绪后**探测能力**：等第一帧业务调用把连接对象记下来（`lastRemoteTarget()`），
    * 再走一遍 `refresh()`。空态里的「新建会话」按钮要靠它才知道能不能显示。
@@ -325,25 +364,6 @@ export interface NewSessionState {
  * 二、内部工具
  * ──────────────────────────────────────────────────────────────────────── */
 
-/** 「这台 Host 没有这个端点」——能力门禁只看这几个码。 */
-const MISSING_ENDPOINT_CODES = new Set([
-  'METHOD_NOT_FOUND',
-  'METHOD_NOT_ALLOWED',
-  'CAPABILITY_NOT_SUPPORTED',
-  'UNSUPPORTED',
-  'FEATURE_NOT_SUPPORTED',
-])
-
-const codeOf = (error: unknown): string => {
-  if (typeof error === 'object' && error !== null) {
-    const code = (error as { code?: unknown }).code
-    if (typeof code === 'string' && code.length > 0) return code
-  }
-  return ''
-}
-
-const isMissingEndpoint = (error: unknown): boolean => MISSING_ENDPOINT_CODES.has(codeOf(error))
-
 const errorText = (error: unknown): string => describeRemoteError(error).text
 
 /**
@@ -368,78 +388,50 @@ let refreshInFlight: Promise<void> | null = null
 let searchSeq = 0
 /** 置顶全集是否已经由 RPC 给过（给过就不再从 `session/list` 猜）。 */
 let pinnedAuthoritative = false
+/** 这一代连接上 `workspace/follow` 的 baseline 是否已经到过（决定 `workspaceSource`）。 */
+let baselineReceived = false
 
 /**
- * `workspace/follow` 的读取器扩展点。
+ * `workspace/follow` 的**一次性**读取器扩展点（备用通道）。
  *
- * 谁能让某条流的帧落进自己的回调，谁就能把它注册进来（当前没人注册，所以走派生列表）。
- * 契约：读**首帧** `{type:'baseline', value}` 后立即关流；解析失败返回 `null`。
+ * 现在的主通道是 `workspaces.ts` 里的常驻流（`installWorkspaceSync` / `ensureWorkspaceStream`），
+ * 它会一路把 baseline 推给 `applyWorkspaceBaseline()`。这个扩展点是给「只想读一次」的场景
+ * 留的：谁注册了它，`loadInventory` 就优先用它（读首帧后自行关流），没有注册就走常驻流。
+ * 契约：解析失败返回 `null`（当作没读到，退回派生列表）。
  */
 export type WorkspaceBaselineReader = (target: RemoteCallTarget) => Promise<RemoteWorkspaceList | null>
 
 let workspaceBaselineReader: WorkspaceBaselineReader | null = null
 
-/** 注入 / 卸载「读 workspace/follow baseline」的实现（不传 = 退回派生列表）。 */
+/** 注入 / 卸载「一次性读 workspace/follow baseline」的实现（不传 = 走常驻流）。 */
 export const registerWorkspaceBaselineReader = (reader: WorkspaceBaselineReader | null): void => {
   workspaceBaselineReader = reader
 }
 
-/**
- * 读 `workspace/follow` 的 baseline。
- *
- * 没有注入 reader 时只做**能力探测**：开流成功后立刻关流（帧由 `store.ts` 的连接级回调
- * 消费，这里拿不到内容），并返回 `null` 让上层走派生列表。开流失败则原样抛出，
- * 由 `loadInventory` 判定是不是「没有这个端点」。
- */
-const probeWorkspaceStream = async (target: RemoteCallTarget): Promise<RemoteWorkspaceList | null> => {
-  if (workspaceBaselineReader !== null) return await workspaceBaselineReader(target)
-  const handle = await openWorkspaceFollow(target)
-  // 每连接最多 16 条 stream（input-B §2.0）：这里只是探测，别白占名额。
-  await Promise.resolve(handle.close()).catch(() => undefined)
-  return null
+/** 把 `workspace/follow` 的常驻流接到本 store 上（幂等；不装就用派生列表）。 */
+const installWorkspaceStream = (): void => {
+  installWorkspaceSync({
+    onBaseline: (list) => useNewSessionStore.getState().applyWorkspaceBaseline(list),
+    onDelta: (frame) => useNewSessionStore.getState().applyWorkspaceFrame(frame),
+    onStatus: (status, failure) => useNewSessionStore.getState().setWorkspaceFollowStatus(status, failure),
+  })
 }
 
-/** `path` → 显示标题（POSIX / Windows 都认），与 dsh-Go 的 `workspaceTitle()` 同一规则。 */
-export const workspaceTitleFromPath = (path: string): string => {
-  const parts = path.split(/[\\/]+/).filter((part) => part.length > 0)
-  if (parts.length === 0) return path
-  const last = parts[parts.length - 1]
-  return last === undefined || last.length === 0 ? path : last
-}
-
-/**
- * 从 `session/list` 的行**派生**工作区列表（没有 `workspace/follow` 时的退路）。
- *
- * 规则：
- *   - 按 `workspaceId` 归组，只认有 `workspaceId` 的行（子会话先剔掉）；
- *   - `path` 取组内 `updatedAt` 最新那一行的 `cwd`（Host 把工作区路径落在会话 cwd 上）；
- *   - `title` 取路径末段（官方也是「标题为空就显示文件夹名」，见 dsh-Go `workspaceTitle`）；
- *   - `sessionIds` 按 `updatedAt` 倒序。
- *
- * 已知代价：没有任何会话的工作区列不出来（文件头与报告里都写了）。
- */
-export const deriveWorkspacesFromSessions = (rows: readonly RemoteSessionRow[]): RemoteWorkspace[] => {
-  const groups = new Map<string, RemoteSessionRow[]>()
-  for (const row of rows) {
-    if (row.workspaceId === undefined || row.workspaceId.length === 0) continue
-    if (row.parentSessionId !== undefined || row.origin === 'subagent') continue
-    const list = groups.get(row.workspaceId)
-    if (list === undefined) groups.set(row.workspaceId, [row])
-    else list.push(row)
+/** 两份数据合并 + 「选中的工作区还在不在」这条一致性修补。 */
+const workspacePatch = (
+  state: NewSessionState,
+  host: readonly RemoteWorkspace[],
+  derived: readonly RemoteWorkspace[],
+): Partial<NewSessionState> => {
+  const workspaces = mergeWorkspaceInventory(host, derived)
+  const selected = state.selectedWorkspaceId
+  const keepSelected = selected === null || workspaces.some((item) => item.workspaceId === selected)
+  return {
+    hostWorkspaces: [...host],
+    derivedWorkspaces: [...derived],
+    workspaces,
+    ...(keepSelected ? {} : { selectedWorkspaceId: null }),
   }
-  const workspaces: RemoteWorkspace[] = []
-  for (const [workspaceId, group] of groups) {
-    const sorted = [...group].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
-    const latest = sorted[0]
-    const path = latest?.cwd ?? ''
-    workspaces.push({
-      workspaceId,
-      path,
-      title: path.length > 0 ? workspaceTitleFromPath(path) : workspaceId,
-      sessionIds: sorted.map((row) => row.sessionId),
-    })
-  }
-  return workspaces.sort((a, b) => a.title.localeCompare(b.title))
 }
 
 /** 把 API 的行折成列表用的最小投影（搜索 / 归档判断共用）。 */
@@ -537,7 +529,7 @@ const verifyAppliedModel = async (
  * 其它失败（网络、Host 拒绝）⇒ 只留一行 `actionError`，能力保持不变。
  */
 const manageFailed = (error: unknown): void => {
-  const missing = isMissingEndpoint(error)
+  const missing = isMissingEndpointError(error)
   useNewSessionStore.setState({
     busySessionId: null,
     actionError: errorText(error),
@@ -555,7 +547,10 @@ const INITIAL_STATE = {
   notice: null,
   capabilities: CAPABILITIES_OFF,
   workspaces: [] as RemoteWorkspace[],
+  hostWorkspaces: [] as RemoteWorkspace[],
+  derivedWorkspaces: [] as RemoteWorkspace[],
   workspaceSource: 'derived' as WorkspaceSource,
+  workspaceFollow: 'idle' as WorkspaceFollowStatus,
   rows: [] as RemoteSessionRow[],
   archivedSessionIds: [] as string[],
   pinnedSessionIds: [] as string[],
@@ -628,35 +623,24 @@ export const modelSelectionToApply = (pick: ModelPick | null): RemoteModelSelect
  * 三、加载（清单 / 工作区 / 预设）
  * ──────────────────────────────────────────────────────────────────────── */
 
-/** 合并：本次 `workspace/create` 建出来的工作区不能被派生结果覆盖掉。 */
-const mergeWorkspaces = (
-  current: readonly RemoteWorkspace[],
-  derived: readonly RemoteWorkspace[],
-): RemoteWorkspace[] => {
-  const byId = new Map<string, RemoteWorkspace>()
-  for (const workspace of derived) byId.set(workspace.workspaceId, workspace)
-  for (const workspace of current) {
-    const existing = byId.get(workspace.workspaceId)
-    // 已有的更完整（有 path / title）就用已有的：派生出来的可能只有 workspaceId。
-    if (existing === undefined) byId.set(workspace.workspaceId, workspace)
-    else if (existing.path.length === 0 && workspace.path.length > 0) byId.set(workspace.workspaceId, workspace)
-  }
-  return [...byId.values()].sort((a, b) => a.title.localeCompare(b.title))
-}
-
 /**
- * 拉会话清单，并据此刷新工作区（有 reader 就用 `workspace/follow`，没有就派生）。
+ * 拉会话清单，并据此刷新工作区 / 归档 / 置顶。
  *
- * 一次 `session/list` 顺带解决三件事：本地搜索的语料、派生工作区、置顶初值。
+ * 一次 `session/list` 顺带解决三件事：本地搜索的语料、派生工作区、置顶初值；
+ * 权威那份工作区由 `workspace/follow` 的常驻流推进来（没到 / 老 Host 就是派生的，见文件头）。
  */
 const loadInventory = async (target: RemoteCallTarget): Promise<void> => {
   if (inventoryTarget !== target) {
     inventoryTarget = target
     pinnedAuthoritative = false
+    baselineReceived = false
     useNewSessionStore.setState({
       capabilities: CAPABILITIES_ON,
       workspaces: [],
+      hostWorkspaces: [],
+      derivedWorkspaces: [],
       workspaceSource: 'derived',
+      workspaceFollow: 'idle',
       rows: [],
       archivedSessionIds: [],
       pinnedSessionIds: [],
@@ -674,43 +658,47 @@ const loadInventory = async (target: RemoteCallTarget): Promise<void> => {
 
   const rows = await listSessions(target)
   const state = useNewSessionStore.getState()
+  const derived = deriveWorkspacesFromSessions(rows)
+  let host = state.hostWorkspaces
   const patch: Partial<NewSessionState> = {
     rows,
+    derivedWorkspaces: derived,
     capabilities: { ...state.capabilities, workspace: true },
   }
   if (!pinnedAuthoritative) {
     patch.pinnedSessionIds = rows.filter((row) => row.pinned === true).map((row) => row.sessionId)
   }
 
-  // 工作区：优先 workspace/follow 的 baseline，拿不到就派生（见文件头）。
-  try {
-    const baseline = await probeWorkspaceStream(target)
-    if (baseline !== null) {
-      const next = patch.capabilities ?? state.capabilities
-      patch.capabilities = { ...next, workspace: true }
-      patch.workspaces = mergeWorkspaces(state.workspaces, baseline.items)
-      patch.workspaceSource = 'follow'
-      patch.archivedSessionIds = baseline.archivedSessionIds
-      if (baseline.pinnedSessionIds.length > 0) {
-        patch.pinnedSessionIds = baseline.pinnedSessionIds
-        pinnedAuthoritative = true
+  if (workspaceBaselineReader !== null) {
+    /*
+     * 备用通道：有人注册了一次性 reader 就用它（读首帧后自己关流）。
+     * 生产没人注册，走下面的常驻流。
+     */
+    try {
+      const baseline = await workspaceBaselineReader(target)
+      if (baseline !== null) {
+        host = baseline.items
+        baselineReceived = true
+        patch.archivedSessionIds = baseline.archivedSessionIds
+        if (baseline.pinnedSessionIds.length > 0) {
+          patch.pinnedSessionIds = baseline.pinnedSessionIds
+          pinnedAuthoritative = true
+        }
       }
-    } else {
-      patch.workspaces = mergeWorkspaces(state.workspaces, deriveWorkspacesFromSessions(rows))
-      patch.workspaceSource = 'derived'
+    } catch (error) {
+      if (isMissingEndpointError(error)) patch.workspaceFollow = 'unsupported'
+      else patch.error = errorText(error)
     }
-  } catch (error) {
-    if (isMissingEndpoint(error)) {
-      // 连 workspace/follow 都没有：工作区这套整块隐藏；新建会话（Host 默认 cwd）仍可用。
-      patch.capabilities = { ...(patch.capabilities ?? state.capabilities), workspace: false }
-      patch.workspaces = []
-    } else {
-      // 网络类错误：保留已派生的结果，只在面板里记一笔
-      patch.error = errorText(error)
-      patch.workspaces = mergeWorkspaces(state.workspaces, deriveWorkspacesFromSessions(rows))
-      patch.workspaceSource = 'derived'
-    }
+  } else {
+    installWorkspaceStream()
+    // `listSessions()` 刚刚把连接对象记进观察者：现在 ensure 一定拿得到 target
+    ensureWorkspaceStream()
   }
+
+  patch.hostWorkspaces = host
+  patch.workspaces = mergeWorkspaceInventory(host, derived)
+  patch.workspaceSource = baselineReceived ? 'follow' : 'derived'
+  patch.workspaceFollow = patch.workspaceFollow ?? useNewSessionStore.getState().workspaceFollow
   useNewSessionStore.setState(patch)
 
   // 只有一个工作区时顺手替用户选上；多个就保持「Host 默认」，不猜用户意图。
@@ -731,7 +719,7 @@ const loadPermissionCatalog = async (target: RemoteCallTarget): Promise<void> =>
       capabilities: { ...useNewSessionStore.getState().capabilities, permission: catalog.options.length > 0 },
     })
   } catch (error) {
-    if (isMissingEndpoint(error)) {
+    if (isMissingEndpointError(error)) {
       useNewSessionStore.setState({
         permissionOptions: [],
         permissionLoaded: true,
@@ -753,7 +741,7 @@ const loadAgentPresets = async (target: RemoteCallTarget): Promise<void> => {
       capabilities: { ...useNewSessionStore.getState().capabilities, agentPreset: presets.length > 0 },
     })
   } catch (error) {
-    if (isMissingEndpoint(error)) {
+    if (isMissingEndpointError(error)) {
       useNewSessionStore.setState({
         agentPresets: [],
         agentPresetsLoaded: true,
@@ -782,7 +770,7 @@ const loadModelCatalog = async (target: RemoteCallTarget): Promise<void> => {
       },
     })
   } catch (error) {
-    if (isMissingEndpoint(error)) {
+    if (isMissingEndpointError(error)) {
       useNewSessionStore.setState({
         modelCatalog: null,
         modelCatalogLoaded: true,
@@ -848,11 +836,17 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
           capabilities: { ...useNewSessionStore.getState().capabilities, create: true },
         })
       } catch (error) {
-        const missing = isMissingEndpoint(error)
+        const missing = isMissingEndpointError(error)
+        /*
+         * 注意**不要**动 `capabilities.workspace`：这里失败的是 `session/list`（清单）或
+         * `session/create`，跟工作区列表不是一件事。工作区那套的可用性只由
+         * `workspace/follow` 的结果（常驻流 → `workspaceFollow`）决定，
+         * 老 Host 缺端点也只是退回派生列表，**不**把 UI 收起来（S2 的硬要求）。
+         */
         useNewSessionStore.setState({
           error: errorText(error),
           ...(missing
-            ? { capabilities: { ...useNewSessionStore.getState().capabilities, create: false, workspace: false } }
+            ? { capabilities: { ...useNewSessionStore.getState().capabilities, create: false } }
             : {}),
         })
       }
@@ -881,6 +875,69 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
     } catch {
       // 列表挂载时的静默加载：失败就算了（下拉里没有工作区，列表照常显示）
     }
+  },
+
+  /**
+   * `workspace/follow` 的 `baseline`（权威全量）。
+   *
+   * 三件事一起做：items 落到 `hostWorkspaces`、归档 / 置顶换成 Host 的全集、
+   * 和派生那份合并成 UI 读的 `workspaces`。**不动** `error`（静默）—— 基线到了就说明
+   * 这条路是通的，之前那些网络错误不该继续挂在面板上；同时把工作区能力打开。
+   */
+  applyWorkspaceBaseline: (list: RemoteWorkspaceList): void => {
+    baselineReceived = true
+    const state = useNewSessionStore.getState()
+    const patch: Partial<NewSessionState> = {
+      ...workspacePatch(state, list.items, state.derivedWorkspaces),
+      workspaceSource: 'follow',
+      workspaceFollow: 'streaming',
+      archivedSessionIds: list.archivedSessionIds,
+      capabilities: { ...state.capabilities, workspace: true },
+      error: null,
+    }
+    if (list.pinnedSessionIds.length > 0) {
+      patch.pinnedSessionIds = list.pinnedSessionIds
+      pinnedAuthoritative = true
+    }
+    useNewSessionStore.setState(patch)
+  },
+
+  /**
+   * 一帧增量（upsert / remove）。
+   *
+   * 只改 `hostWorkspaces` 里对应那一行；解析不了形状的帧在 `workspaces.ts` 就被丢掉了，
+   * 不会走到这里（宁可晚一拍，也不要把错的工作区画上去）。
+   */
+  applyWorkspaceFrame: (frame: RemoteWorkspaceFrame): void => {
+    if (frame.kind === 'ignore') return
+    const state = useNewSessionStore.getState()
+    const host = frame.kind === 'remove'
+      ? state.hostWorkspaces.filter((item) => item.workspaceId !== frame.workspaceId)
+      : state.hostWorkspaces.some((item) => item.workspaceId === frame.workspace.workspaceId)
+        ? state.hostWorkspaces.map((item) => (item.workspaceId === frame.workspace.workspaceId ? frame.workspace : item))
+        : [...state.hostWorkspaces, frame.workspace]
+    useNewSessionStore.setState(workspacePatch(state, host, state.derivedWorkspaces))
+  },
+
+  /**
+   * 流状态变了。
+   *
+   * `unsupported` = 老 Host 没有 `workspace/follow`：**静默**退回派生列表，`capabilities.workspace`
+   * 保持 true（工作区选择器照常显示），不写 `error`。这不是降级提示，是兼容路径。
+   */
+  setWorkspaceFollowStatus: (status: WorkspaceFollowStatus): void => {
+    const state = useNewSessionStore.getState()
+    if (status === 'unsupported') {
+      useNewSessionStore.setState({
+        workspaceFollow: 'unsupported',
+        // 这条连接上没有 follow：权威来源就是派生的那份（哪怕上一代连接留下过 baseline）
+        workspaceSource: 'derived',
+        ...workspacePatch(state, [], state.derivedWorkspaces),
+      })
+      return
+    }
+    if (state.workspaceFollow === status) return
+    useNewSessionStore.setState({ workspaceFollow: status })
   },
 
   probeCapabilities: async (): Promise<void> => {
@@ -1009,7 +1066,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       const listing = await listDirectory(target, path)
       useNewSessionStore.setState({ directory: listing, directoryLoading: false })
     } catch (error) {
-      if (isMissingEndpoint(error)) {
+      if (isMissingEndpointError(error)) {
         // Host 没有这个端点：整块隐藏，表单还能手填路径
         useNewSessionStore.setState({
           directory: null,
@@ -1037,9 +1094,16 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
     try {
       const { workspace } = await createWorkspace(target, path)
       const state = useNewSessionStore.getState()
+      /*
+       * 新建出来的工作区进 `hostWorkspaces`（和 follow 的权威行放在一起）：
+       * 下一次 `loadInventory` / 增量帧合并时它不会被派生结果挤掉，选中状态也不会丢。
+       */
+      const host = state.hostWorkspaces.some((item) => item.workspaceId === workspace.workspaceId)
+        ? state.hostWorkspaces.map((item) => (item.workspaceId === workspace.workspaceId ? workspace : item))
+        : [...state.hostWorkspaces, workspace]
       useNewSessionStore.setState({
         creating: false,
-        workspaces: mergeWorkspaces(state.workspaces, [workspace]),
+        ...workspacePatch(state, host, state.derivedWorkspaces),
         selectedWorkspaceId: workspace.workspaceId,
         sheet: null,
         pathDraft: '',
@@ -1049,10 +1113,11 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       })
       return workspace
     } catch (error) {
-      if (isMissingEndpoint(error)) {
+      if (isMissingEndpointError(error)) {
+        // 没有 `workspace/create` ≠ 没有工作区列表：只收起「新建工作区」这一行（老 Host）
         useNewSessionStore.setState({
           creating: false,
-          capabilities: { ...useNewSessionStore.getState().capabilities, workspace: false },
+          capabilities: { ...useNewSessionStore.getState().capabilities, workspaceCreate: false },
         })
         return null
       }
@@ -1100,7 +1165,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
           await applyPermissionPreset(target, created.sessionId, wanted)
         } catch (error) {
           notice = `${describeRemoteError(error).text}（${translate('newSessionPermissionNotApplied')}）`
-          if (isMissingEndpoint(error)) {
+          if (isMissingEndpointError(error)) {
             useNewSessionStore.setState({
               capabilities: { ...useNewSessionStore.getState().capabilities, permission: false },
             })
@@ -1139,7 +1204,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
           return created.sessionId
         } catch (error) {
           // 失败**不静默**：面板停在错误态，给「重试」与「跳过，用默认模型」两条路。
-          if (isMissingEndpoint(error)) {
+          if (isMissingEndpointError(error)) {
             useNewSessionStore.setState({
               capabilities: { ...useNewSessionStore.getState().capabilities, model: false },
             })
@@ -1154,7 +1219,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       await finishOpen(created.sessionId, notice)
       return created.sessionId
     } catch (error) {
-      if (isMissingEndpoint(error)) {
+      if (isMissingEndpointError(error)) {
         useNewSessionStore.setState({
           creating: false,
           capabilities: { ...useNewSessionStore.getState().capabilities, create: false },
