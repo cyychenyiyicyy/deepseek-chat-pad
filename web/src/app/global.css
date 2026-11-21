@@ -5,6 +5,9 @@
    * evaluateJavascript 把真实高度写进 --ds-safe-top；浏览器里回退到 env()。
    */
   --ds-safe-top: env(safe-area-inset-top, 0px);
+  /* 在安全区之上再多让一点，避免贴着状态栏显得被压住 */
+  --ds-safe-top-extra: 8px;
+  --ds-top-offset: calc(var(--ds-safe-top, 0px) + var(--ds-safe-top-extra));
   --message-list-max-width: 840px;
   --message-list-padding-horizontal: 44px;
 }
