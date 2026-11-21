@@ -257,7 +257,9 @@ export const en = {
   settingsStorageBackendIndexedDb: 'IndexedDB',
   settingsStorageBackendPending: 'Detecting…',
   settingsSearchBackend: 'Web search',
-  settingsSearchBackendHint: 'Search runs on the selected service regardless of the chat model. Tavily needs your own API key.',
+  settingsSearchBackendHint:
+    'Search runs on the selected service regardless of the chat model. Exa is free and needs no key; Tavily needs your own API key.',
+  settingsSearchExa: 'Exa (free)',
   settingsTavilyKeyPlaceholder: 'tvly-...',
   modelSearchKeyMissing: 'No API key configured for the selected search service',
   updateTitle: 'Check for updates',

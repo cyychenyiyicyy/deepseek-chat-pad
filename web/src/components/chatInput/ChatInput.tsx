@@ -66,7 +66,12 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const searchBackend = useSettings((state) => state.searchBackend)
   const tavilyKey = useSettings((state) => state.tavilyKey)
   const deepseekKey = useSettings((state) => state.apiKey)
-  const hasSearchKey = searchBackend === 'tavily' ? Boolean(tavilyKey) : Boolean(deepseekKey)
+  const hasSearchKey =
+    searchBackend === 'exa'
+      ? true
+      : searchBackend === 'tavily'
+        ? Boolean(tavilyKey)
+        : Boolean(deepseekKey)
   // 自定义模型能不能收图，看它有没有声明 image 输入
   const [catalog, setCatalog] = useState<ProviderMeta[]>([])
   useEffect(() => {

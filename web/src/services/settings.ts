@@ -23,8 +23,8 @@ type Settings = {
   thinkingEffort: string
   /** 启动时是否自动检查更新 */
   autoCheckUpdate: boolean
-  /** 联网搜索后端：DeepSeek 官方接口 或 自己的 Tavily */
-  searchBackend: 'deepseek' | 'tavily'
+  /** 联网搜索后端：Exa 免费 MCP（默认）/ DeepSeek 官方接口 / 自己的 Tavily */
+  searchBackend: 'exa' | 'deepseek' | 'tavily'
   /** Tavily API Key */
   tavilyKey: string
 }
@@ -132,7 +132,7 @@ export const useSettings = create<Settings>(() => ({
   uiScale: initialUiScale(),
   thinkingEffort: initialThinkingEffort(),
   autoCheckUpdate: read(KEYS.autoCheckUpdate) !== 'false',
-  searchBackend: read(KEYS.searchBackend) === 'tavily' ? 'tavily' : 'deepseek',
+  searchBackend: readBackend(),
   tavilyKey: read(KEYS.tavilyKey) ?? '',
 }))
 
@@ -188,7 +188,16 @@ export const setUiScale = (uiScale: number) => {
   useSettings.setState({ uiScale: next })
 }
 
-export const setSearchBackend = (searchBackend: 'deepseek' | 'tavily') => {
+const readBackend = (): 'exa' | 'deepseek' | 'tavily' => {
+  const stored = read(KEYS.searchBackend)
+  if (stored === 'deepseek' || stored === 'tavily' || stored === 'exa') {
+    return stored
+  }
+  // 没设置过：默认用免费的 Exa MCP，不需要任何 Key
+  return 'exa'
+}
+
+export const setSearchBackend = (searchBackend: 'exa' | 'deepseek' | 'tavily') => {
   write(KEYS.searchBackend, searchBackend)
   useSettings.setState({ searchBackend })
 }

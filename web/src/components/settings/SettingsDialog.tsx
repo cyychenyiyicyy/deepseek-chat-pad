@@ -327,10 +327,11 @@ const SearchSetting = () => {
             ariaLabel={t('settingsSearchBackend')}
             value={backend}
             options={[
+              { value: 'exa', label: t('settingsSearchExa') },
               { value: 'deepseek', label: 'DeepSeek' },
               { value: 'tavily', label: 'Tavily' },
             ]}
-            onChange={(value) => setSearchBackend(value as 'deepseek' | 'tavily')}
+            onChange={(value) => setSearchBackend(value as 'exa' | 'deepseek' | 'tavily')}
           />
           {backend === 'tavily' ? (
             <input

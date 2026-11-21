@@ -247,7 +247,9 @@ export const zh = {
   settingsStorageBackendIndexedDb: 'IndexedDB',
   settingsStorageBackendPending: '检测中…',
   settingsSearchBackend: '联网搜索',
-  settingsSearchBackendHint: '搜索由所选服务执行，与对话模型无关。Tavily 需要填写自己的 API Key。',
+  settingsSearchBackendHint:
+    '搜索由所选服务执行，与对话模型无关。Exa 是免费的，不需要 Key；Tavily 需要填自己的 API Key。',
+  settingsSearchExa: 'Exa（免费）',
   settingsTavilyKeyPlaceholder: 'tvly-...',
   modelSearchKeyMissing: '当前搜索服务还没有配置 Key，请到设置里填写',
   updateTitle: '检查更新',
