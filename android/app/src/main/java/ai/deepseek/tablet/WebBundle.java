@@ -140,6 +140,16 @@ final class WebBundle {
         return 0;
     }
 
+    /**
+     * 丢弃已安装的网页包：页面在启动阶段就崩了（黑屏）时由看门狗调用。
+     * 删掉之后 installedRoot() 返回 null，下次启动自动回退 APK 内置资源。
+     */
+    void discard() {
+        deleteRecursively(webRoot);
+        clearVersion();
+        Log.w(TAG, "已丢弃安装的网页包，下次启动回退内置资源");
+    }
+
     /** "files" = 在用下载的包；"assets" = 在用 APK 内置的 */
     String source() {
         return installedRoot() != null ? SOURCE_FILES : SOURCE_ASSETS;

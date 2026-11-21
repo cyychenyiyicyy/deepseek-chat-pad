@@ -53,6 +53,11 @@ const SiderSlot = ({ collapsed }: { collapsed: boolean }) => (
 )
 
 export const App = () => {
+  // 报到：index.html 的看门狗据此判断这个网页包是不是坏包
+  useEffect(() => {
+    ;(window as unknown as { __dsBooted?: boolean }).__dsBooted = true
+  }, [])
+
   const t = useTranslate()
   const isMobile = useIsMobile()
   const locale = useSettings((state) => state.locale)

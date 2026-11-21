@@ -69,6 +69,9 @@ final class UpdateHandler {
     /** 网络状态：当前系统代理与是否走 VPN，用于排查「开了代理连不上」 */
     private static final String PATH_NET = "/__ds_update/net";
 
+    /** 网页包启动失败的上报口：由 index.html 里的看门狗调用 */
+    private static final String PATH_BOOT_FAILED = "/__ds_update/boot-failed";
+
     private static final String PATH_STATE = "/__ds_update/state";
     private static final String PATH_RELEASE = "/__ds_update/release";
     private static final String PATH_APPLY_WEB = "/__ds_update/apply-web";
@@ -155,6 +158,18 @@ final class UpdateHandler {
             OutputStream out, boolean keepAlive) throws IOException {
         // 请求体没消费掉就不能复用连接，否则残留字节会被当成下一个请求
         boolean canKeepAlive = keepAlive && !hasRequestBody(headers);
+
+        if (PATH_BOOT_FAILED.equals(path)) {
+            if (!"POST".equals(method)) {
+                HttpUtil.sendJson(out, 405, canKeepAlive, errorJson("method_not_allowed"));
+                return !canKeepAlive;
+            }
+            // 页面在启动阶段就崩了：这个包不能用，直接丢弃，下次启动回退内置资源
+            Log.w(TAG, "网页包启动失败，丢弃并回退内置资源");
+            webBundle.discard();
+            HttpUtil.sendJson(out, 200, canKeepAlive, "{\"ok\":true}");
+            return !canKeepAlive;
+        }
 
         if (PATH_NET.equals(path)) {
             if (!isReadOnly(method)) {

@@ -120,6 +120,21 @@ const initialThinkingEffort = (): string => {
   return read(KEYS.thinking) === 'true' ? 'high' : 'off'
 }
 
+/**
+ * 搜索后端。
+ * 注意：这个函数必须在 create() 之前定义 —— 初始化对象里会立即调用它，
+ * 放到后面会触发 TDZ（Cannot access 'readBackend' before initialization），
+ * 整个 bundle 在加载阶段就抛错，表现为**整页黑屏**（v1.8.6 的黑屏事故就是这么来的）。
+ */
+const readBackend = (): 'exa' | 'deepseek' | 'tavily' => {
+  const stored = read(KEYS.searchBackend)
+  if (stored === 'deepseek' || stored === 'tavily' || stored === 'exa') {
+    return stored
+  }
+  // 没设置过：默认用免费的 Exa MCP，不需要任何 Key
+  return 'exa'
+}
+
 export const useSettings = create<Settings>(() => ({
   apiKey: read(KEYS.apiKey),
   locale: initialLocale(),
@@ -186,15 +201,6 @@ export const setUiScale = (uiScale: number) => {
   const next = clampScale(uiScale)
   write(KEYS.uiScale, String(next))
   useSettings.setState({ uiScale: next })
-}
-
-const readBackend = (): 'exa' | 'deepseek' | 'tavily' => {
-  const stored = read(KEYS.searchBackend)
-  if (stored === 'deepseek' || stored === 'tavily' || stored === 'exa') {
-    return stored
-  }
-  // 没设置过：默认用免费的 Exa MCP，不需要任何 Key
-  return 'exa'
 }
 
 export const setSearchBackend = (searchBackend: 'exa' | 'deepseek' | 'tavily') => {

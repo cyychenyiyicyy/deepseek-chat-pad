@@ -30,5 +30,35 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // 启动看门狗。
+      //
+      // 网页包一旦在加载阶段抛错（例如 TDZ 之类的初始化顺序问题），React 根本没机会挂载，
+      // 用户看到的就是一片黑屏，而且重启应用也没用 —— 因为壳还是会优先加载这个坏包。
+      // 这里在页面最早期埋一个计时器：到时间 App 还没报到，就通知原生壳丢弃这个包，
+      // 下次启动自动回退到 APK 内置的网页。这段必须是普通脚本、不能依赖 bundle 加载成功。
+      ;(function () {
+        var BOOT_TIMEOUT = 8000
+        var reported = false
+        function report(reason) {
+          if (reported || window.__dsBooted) return
+          reported = true
+          try {
+            fetch('/__ds_update/boot-failed?reason=' + encodeURIComponent(reason), {
+              method: 'POST',
+              cache: 'no-store',
+            })
+          } catch (error) {
+            /* 上报失败也没关系，下次启动还会再判 */
+          }
+        }
+        window.addEventListener('error', function (event) {
+          if (!window.__dsBooted) report(String((event && event.message) || 'error'))
+        })
+        setTimeout(function () {
+          report('timeout')
+        }, BOOT_TIMEOUT)
+      })()
+    </script>
   </body>
 </html>
