@@ -705,6 +705,10 @@ export const zh = {
   remoteSubagentOpen: '查看这个子代理的对话',
   remoteSubagentBack: '上级对话',
   remoteSubagentUntitled: '子代理会话',
+  // ── R17：断线时点列表要说人话；新对话页的附件草稿 ──
+  remoteDrawerNotConnected: '还没连上电脑，连上后再点',
+  newSessionDraftRemove: '移除附件',
+  newSessionAttachmentFailed: '附件「{name}」没传上去：{reason}。会话已经建好，重试不会重复建。',
   // ── 工作区文件面板 / 会话附件上传（W3；只追加 workspacePane 前缀，别动别的段） ──
   workspacePaneTitle: '工作区',
   workspacePaneOpen: '工作区文件',

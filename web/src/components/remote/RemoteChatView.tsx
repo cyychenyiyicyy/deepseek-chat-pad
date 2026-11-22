@@ -43,6 +43,7 @@ import { IconButton } from '../base/IconButton.js'
 import { showToast } from '../base/toastState.js'
 import {
   IconDataOutline16,
+  IconCloseOutline16,
   IconMenuOutline20,
   IconNewChatOutline20,
 } from '../base/icons.js'
@@ -152,6 +153,8 @@ export const RemoteChatView = () => {
   const canCreateSession = useNewSessionStore((state) => state.capabilities.create)
   /** [R15] 新对话「发送即建会话」进行中：输入框灰住、顶栏给角标 */
   const creatingSession = useNewSessionStore((state) => state.creating)
+  /** [R17] 新对话页的附件草稿（未上传；`createAndSend` 建完会话才传） */
+  const newDraftFiles = useNewSessionStore((state) => state.draftFiles)
   /*
    * ── 视图（W6）──────────────────────────────────────────────────────
    * `view` 是**真实切换**，不是浮在上面的层：进出都由 `newSessionStore.open` 驱动
@@ -682,7 +685,8 @@ export const RemoteChatView = () => {
       stopTimedOut,
       queueLength: view === 'new-session' ? 0 : queueLength,
       draft,
-      attachments: view === 'new-session' ? 0 : readyReceipts(attachments).length,
+      // [R17] 新对话页把「草稿附件数」当可发内容（空文本 + 有附件也是合法消息）
+      attachments: view === 'new-session' ? newDraftFiles.length : readyReceipts(attachments).length,
       attachmentsBusy: view === 'new-session' ? false : hasUploadingAttachment(attachments),
       knownCommand: view === 'new-session' ? false : knownCommand,
       slashTyping: view === 'new-session' ? false : slashQuery(draft) !== null,
@@ -700,6 +704,7 @@ export const RemoteChatView = () => {
       knownCommand,
       view,
       creatingSession,
+      newDraftFiles,
     ],
   )
   const composer = useMemo(() => composerView(signals), [signals])
@@ -722,7 +727,10 @@ export const RemoteChatView = () => {
      */
     if (view === 'new-session') {
       const text = draft.trim()
-      if (text.length === 0 || !ready || !canCreateSession || creatingSession) return
+      // [R17] 空文本 + 有附件草稿也是合法的首条消息（与聊天页同口径）
+      if ((text.length === 0 && newDraftFiles.length === 0) || !ready || !canCreateSession || creatingSession) {
+        return
+      }
       setDraft('')
       void Promise.resolve(useNewSessionStore.getState().createAndSend(text)).then((sent) => {
         if (!sent) {
@@ -741,7 +749,7 @@ export const RemoteChatView = () => {
       return
     }
     send(intent === 'steer' ? 'steer' : 'queue')
-  }, [draft, ready, view, canCreateSession, creatingSession, runCommand, send, signals])
+  }, [draft, ready, view, canCreateSession, creatingSession, newDraftFiles, runCommand, send, signals])
 
   /**
    * 生成中：主按钮变停止（`session/cancel`）。
@@ -789,6 +797,8 @@ export const RemoteChatView = () => {
         <NewSessionPage
           footer={
             <div className={styles.footer}>
+              {/* [R17] 附件草稿条：新对话页的文件只入草稿，建完会话才上传 */}
+              <NewSessionDrafts />
               <div className={styles.inputWrapper}>
                 <textarea
                   ref={textareaRef}
@@ -810,6 +820,16 @@ export const RemoteChatView = () => {
                   hint={hint}
                   sendMode={sendMode}
                   modeSupported={modeSupported}
+                  leading={
+                    /*
+                     * [R17] 附件入口：上传通道是会话级的，这里还没有会话 ——
+                     * 选中的文件只进草稿，`createAndSend` 建完会话再传。
+                     */
+                    <AttachmentButton
+                      disabled={!ready || !canCreateSession}
+                      onFiles={(files) => useNewSessionStore.getState().addDraftFiles(files)}
+                    />
+                  }
                   onSubmit={submit}
                   onStop={stop}
                   onSecondarySend={submit}
@@ -1205,6 +1225,40 @@ export const RemoteChatView = () => {
 }
 
 /* ────────────────────────────── 时间线的一行 ────────────────────────────── */
+
+/**
+ * [R17] 新对话页的附件草稿条：名字 + 大小 + 移除。
+ *
+ * 与聊天页的 `AttachmentTray` 不是一回事：那边是「正在上传的进度」，这边只是
+ * 「用户选了什么」——上传要等 `createAndSend` 建完会话才开始（两条通道都是会话级的）。
+ */
+const NewSessionDrafts = () => {
+  const t = useTranslate()
+  const drafts = useNewSessionStore((state) => state.draftFiles)
+  if (drafts.length === 0) return null
+  const sizeText = (size: number): string =>
+    size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${Math.round(size / 1024)} KB` : `${(size / (1024 * 1024)).toFixed(1)} MB`
+  return (
+    <div className={styles.draftTray}>
+      {drafts.map((item) => (
+        <div key={item.id} className={styles.draftRow}>
+          <span className={styles.draftName} title={item.name}>
+            {item.name}
+          </span>
+          <span className={styles.draftSize}>{sizeText(item.size)}</span>
+          <button
+            type="button"
+            className={styles.draftRemove}
+            aria-label={`${t('newSessionDraftRemove')}: ${item.name}`}
+            onClick={() => useNewSessionStore.getState().removeDraftFile(item.id)}
+          >
+            <IconCloseOutline16 />
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+}
 
 const RemoteRow = ({ item, items, live }: { item: ChatItem; items: ChatItem[]; live: boolean }) => {
   if (item.kind === 'message') return <MessageRow item={item} live={live} />

@@ -265,6 +265,7 @@ const resetNewSession = (): void => {
     sheet: null,
     creating: false,
     lastCreatedSessionId: null,
+    draftFiles: [],
     pathDraft: '',
     pathError: null,
     directory: null,
@@ -971,6 +972,79 @@ check('E23：继承 Host 默认（modelPick=null）→ 一个模型端点都不�
   useNewSessionStore.setState({ modelPick: null })
   useNewSessionStore.getState().pickEffort('low')
   assertEqual(useNewSessionStore.getState().modelPick, { provider: 'deepseek', model: 'deepseek-v4', effort: 'low' }, '点档位 = 显式选模型')
+})
+
+/* ────────────────────────────────────────────────────────────────────────
+ * F. [R17] 新对话页的附件草稿：本地草稿 → 建完会话才上传 → 收据随首条消息
+ * ──────────────────────────────────────────────────────────────────────── */
+
+const fileOf = (name: string, text: string, type = 'text/plain'): File =>
+  new File([text], name, { type })
+
+check('E24：草稿附件 → 建会话后走 fileUploads/upload（会话级），成功后草稿清空', async () => {
+  resetNewSession()
+  const fake = fakeTarget({
+    ...FULL_REPLIES,
+    'fileUploads/upload': { ok: true, value: { receiptId: 'rcpt-1', name: 'note.txt' } },
+  })
+  const observed = connectFake(fake)
+  await useNewSessionStore.getState().refresh()
+
+  useNewSessionStore.getState().addDraftFiles([fileOf('note.txt', 'hello attachment')])
+  assertEqual(useNewSessionStore.getState().draftFiles.length, 1, '草稿入列（不上传）')
+  assertEqual(endpointCount(fake, 'fileUploads/upload'), 0, '选完文件时一个上传请求都不发')
+
+  assertEqual(await useNewSessionStore.getState().createAndSend('看下这个文件'), true, '建会话 + 上传 + 发送')
+  assertEqual(observed.opened, ['s-new'], '进了会话')
+  assertEqual(endpointCount(fake, 'session/create'), 1, '建了一个会话')
+  const uploadCall = callAt(fake, fake.calls.findIndex((call) => (call.params as { endpoint?: string }).endpoint === 'fileUploads/upload'))
+  assertEqual(uploadCall.args.agentId, 's-new', '上传带的是刚建出来的会话 id（args.agentId）')
+  assertEqual((uploadCall.args.request as { name?: unknown }).name, 'note.txt', '文件名')
+  assertEqual(useNewSessionStore.getState().draftFiles, [], '成功后草稿清空')
+})
+
+check('E25：附件传失败 → 停在新对话页、草稿保留；重试复用已建的会话（不重复建）', async () => {
+  resetNewSession()
+  let uploadOk = false
+  const fake = fakeTarget({
+    ...FULL_REPLIES,
+    'fileUploads/upload': () => (uploadOk
+      ? { ok: true, value: { receiptId: 'rcpt-1', name: 'note.txt' } }
+      : { ok: false, code: 'UPLOAD_INCOMPLETE', message: '没传完' }),
+  })
+  const observed = connectFake(fake)
+  await useNewSessionStore.getState().refresh()
+  useNewSessionStore.getState().addDraftFiles([fileOf('note.txt', 'hello attachment')])
+
+  // 第一次：上传失败
+  assertEqual(await useNewSessionStore.getState().createAndSend('看下这个文件'), false, '附件失败 → 没发出去')
+  const failed = useNewSessionStore.getState()
+  assertEqual(failed.creating, false, '按钮恢复')
+  assertTrue((failed.error ?? '').includes('note.txt'), `红字点名附件：${failed.error}`)
+  assertEqual(failed.draftFiles.length, 1, '草稿保留（重试还要用）')
+  assertEqual(observed.opened, [], '还没进会话（finishOpen 没跑）')
+
+  // 重试：通道好了 —— 必须复用刚才建好的会话
+  uploadOk = true
+  assertEqual(await useNewSessionStore.getState().createAndSend('看下这个文件'), true, '重试成功')
+  assertEqual(endpointCount(fake, 'session/create'), 1, '重试不重复建会话（复用 pendingSendSession）')
+  assertEqual(observed.opened, ['s-new'], '这时才进会话')
+  assertEqual(useNewSessionStore.getState().draftFiles, [], '草稿清空')
+})
+
+check('E26：空文本 + 有草稿也是合法首条消息；两个草稿都传', async () => {
+  resetNewSession()
+  const fake = fakeTarget({
+    ...FULL_REPLIES,
+    'fileUploads/upload': { ok: true, value: { receiptId: 'rcpt-1', name: 'a.txt' } },
+  })
+  const observed = connectFake(fake)
+  await useNewSessionStore.getState().refresh()
+  useNewSessionStore.getState().addDraftFiles([fileOf('a.txt', '111'), fileOf('b.txt', '222')])
+
+  assertEqual(await useNewSessionStore.getState().createAndSend('   '), true, '纯空白文本 + 附件可发')
+  assertEqual(endpointCount(fake, 'fileUploads/upload'), 2, '两个草稿都传了')
+  assertEqual(observed.opened, ['s-new'], '进会话')
 })
 
 /* ── 跑 ───────────────────────────────────────────────────────────────── */

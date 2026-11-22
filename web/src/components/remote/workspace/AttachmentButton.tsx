@@ -16,6 +16,10 @@ type PickerBridge = { reset?: () => void }
 /**
  * 输入框旁的「+」：选文件 → 上传（带进度）→ 凭据进附件条。
  *
+ * [R17] `onFiles` 给**还没会话**的宿主用（新对话页）：文件只进它的草稿列表，
+ * 不走 `workspacePaneStore` 的上传（那两条通道都是会话级的，没会话传不了）。
+ * 不传 `onFiles` 时行为与原来完全一致（选中即上传）。
+ *
  * ## 能力门禁（R15 改过，别再退回两态）
  *
  * `uploadSupported` 是三态的：
@@ -35,7 +39,14 @@ type PickerBridge = { reset?: () => void }
  * 长按这里会调 `window.DSNativePicker.reset()` 清掉记忆，于是下一次点「+」重新弹来源面板。
  * 桥本身是可选的（`typeof` 守卫），没有它也只是「换不了来源」，不影响选文件。
  */
-export const AttachmentButton = ({ disabled = false }: { disabled?: boolean }) => {
+export const AttachmentButton = ({
+  disabled = false,
+  onFiles,
+}: {
+  disabled?: boolean
+  /** [R17] 自管草稿的宿主（新对话页）：选中只入草稿，不上传 */
+  onFiles?: (files: File[]) => void
+}) => {
   const t = useTranslate()
   const supported = useWorkspacePane((state) => state.uploadSupported)
   const unavailableReason = useWorkspacePane((state) => state.uploadUnavailableReason)
@@ -107,6 +118,10 @@ export const AttachmentButton = ({ disabled = false }: { disabled?: boolean }) =
           // 清空 value：同一个文件改了内容再选一次也要能触发 change
           event.target.value = ''
           if (files.length === 0) return
+          if (onFiles !== undefined) {
+            onFiles(files)
+            return
+          }
           void useWorkspacePane.getState().pickFiles(files)
         }}
       />

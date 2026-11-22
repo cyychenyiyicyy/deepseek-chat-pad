@@ -17,6 +17,7 @@ import {
   IconSearchOutline16,
 } from '../base/icons.js'
 import { Modal } from '../base/Modal.js'
+import { showToast } from '../base/toastState.js'
 import { closeMobileSider } from '../sider/mobileSiderState.js'
 // [S3] 全局运行态：不打开会话也要知道谁在跑（`session/list` + `$events` 汇总而来）
 import { useLiveSessions } from '../../services/remote/liveSessions.js'
@@ -315,8 +316,17 @@ export const RemoteSessionList = ({
              * `openSession` 只换 `activeSessionId`，内容区还被新对话页占着 ——
              * 用户看到的就是「点了没反应」。所以这里必须顺手把那页关掉。
              * `closePanel` 幂等、也不动 notice / 草稿，多关一次没有副作用。
+             *
+             * [R17] 没连上时（列表此时多半是缓存直出）：`openSession` 只会静默失败，
+             * 错误写在右侧那一屏里，看起来还是「点了没反应」—— 先说一句人话再走。
+             * 「假 ready」（链路悄悄断开、phase 撒谎）由 `requireSession` 纠正，
+             * 不归这里管。
              */
             useNewSessionStore.getState().closePanel()
+            if (useRemoteStore.getState().phase !== 'ready') {
+              showToast(t('remoteDrawerNotConnected'))
+              return
+            }
             fireAndForget(() => useRemoteStore.getState().openSession(row.id))
             onSelect?.(row.id)
           }}

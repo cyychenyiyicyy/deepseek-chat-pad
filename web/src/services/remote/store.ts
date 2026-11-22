@@ -890,6 +890,16 @@ const commitTranscript = (
 
 const requireSession = (): ActiveSession => {
   if (active === null) {
+    /*
+     * [R17 假 ready] phase 说 ready 但连接对象已经没了 —— 链路悄悄断开时留下的假象
+     * （`handleLinkClosed` 的「自愈已在跑」分支曾直接 return、不动 phase；`shutdown`
+     * 本身也不碰 phase）。不在这里纠正，界面就一切如常：列表照旧、右侧停在
+     * 「选择一个会话」，而每个动作都只往**那一屏不显示的** `state.error` 里静默写错
+     * —— 真机表现就是「点哪个会话都进不去」。
+     */
+    if (useRemoteStore.getState().phase === 'ready') {
+      useRemoteStore.setState({ phase: 'error', streaming: false })
+    }
     throw new RemoteApiError('NOT_CONNECTED', '先在设置里填写服务器与账号并连接')
   }
   return active
@@ -2570,7 +2580,17 @@ const handleLinkClosed = (detail?: string): void => {
     return
   }
   // 已经有一轮自愈在跑：这一轮的结果交给那个循环去分诊（别在这里再起一条）
-  if (reconnectInFlight !== null) return
+  if (reconnectInFlight !== null) {
+    /*
+     * [R17 假 ready] `active` 已经被 onState 清掉了，phase 不能继续谎报 ready：
+     * 在跑的那轮自愈会用自己的结果覆盖 phase；它回来之前界面必须按「未连接」讲实话，
+     * 否则「点哪个会话都进不去、错误还看不见」就从这里开始。
+     */
+    if (useRemoteStore.getState().phase === 'ready') {
+      useRemoteStore.setState({ phase: 'connecting', streaming: false })
+    }
+    return
+  }
   if (!verdict.auto) {
     // 真需要人处理（设备撤销 / 身份不符 / 版本不兼容）：立刻落定成明确文案
     presentRecoveryStop({
@@ -2643,7 +2663,13 @@ const runAutoConnect = async (force: boolean): Promise<void> => {
   if (connecting) return
   // 掉线自愈已经在跑：让它自己跑完（它比「启动只试一次」更有耐心）
   if (reconnectInFlight !== null) return
-  if (active !== null || current.phase === 'ready') return
+  /*
+   * [R17] 原来这里是 `if (active !== null || current.phase === 'ready') return` ——
+   * 「phase==='ready」这半句会把**假 ready**（断链把 active 清了、phase 没人纠正）锁死：
+   * 自动恢复永远跳过，界面照常假装已连接。建链进行中的窗口由上面的 `connecting` 挡，
+   * 那半句删掉是安全的，且是「假 ready」唯一的自愈出口之一。
+   */
+  if (active !== null) return
   if (current.phase === 'authing' || current.phase === 'waiting-auth') return
   // 普通浏览器没有 `/__ds_proxy`：连也连不上，还会把「上次连接失败」的提示摆出来。
   // 那边本来就有「只能在 App 内使用」的降级文案，这里直接不做。

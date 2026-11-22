@@ -738,6 +738,48 @@ check('F1 refresh token 过期：红字「请重新登录」，但 last-session 
   }
 })
 
+/* ══════════════════════════════════════════════════════════════════════
+ * G. [R17 假 ready]：链路悄悄断开留下 phase='ready' + active=null ——
+ *    真机症状就是「点哪个会话都进不去，右侧永远停在『选择一个会话』」。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+check('G1 假 ready 下点会话：requireSession 当场把 phase 纠正成 error（错误不再隐形）', async () => {
+  resetStorage()
+  resetStore()
+  // 假 ready 的现场：phase 撒谎说连着（active 在自测里本来就是 null）
+  useRemoteStore.setState({ phase: 'ready', activeSessionId: null })
+  await useRemoteStore.getState().openSession('s-any')
+  const state = useRemoteStore.getState()
+  assertEqual(state.phase, 'error', '第一下点击就把假 ready 纠正掉')
+  assertTrue(state.error !== null, '错误要写出来（右侧空态会显示它）')
+  assertContains(state.error?.message ?? '', '连接', '错误说人话')
+  assertEqual(state.activeSessionId, null, '会话当然没开成')
+})
+
+check('G2 假 ready 不再锁死自动恢复：autoConnect 会真的去试', async () => {
+  resetStorage()
+  resetStore()
+  seedAccount()
+  seedSession()
+  enterShell()
+  useRemoteStore.setState({ phase: 'ready', lastSession: readLastSession() })
+  // fetch 全部失败 → 中性「连不上」：断言重点是「真的去试了」，不是失败长相
+  const stub = stubFetch(() => null)
+  try {
+    // 旧版这里 `phase === 'ready'` 直接 return（一个请求都不打）—— 假 ready 被永久锁死
+    await useRemoteStore.getState().retryAutoConnect()
+    const state = useRemoteStore.getState()
+    assertTrue(stub.calls > 0, `假 ready 也要真的去恢复（实际打了 ${stub.calls} 个请求）`)
+    assertEqual(state.autoConnect.state, 'failed', '恢复按真实结果落定，而不是被跳过')
+    assertEqual(state.reconnect.status, 'failed', '中性失败：暂时连不上')
+    assertTrue(state.phase !== 'ready', `相位被真实结果接管（实际 ${state.phase}，绝不能继续假 ready）`)
+  } finally {
+    useRemoteStore.getState().disconnect()
+    stub.restore()
+    leaveShell()
+  }
+})
+
 /* ── 跑 ───────────────────────────────────────────────────────────────── */
 
 const describeDuration = (startedAt: number): string => `  (${Date.now() - startedAt}ms)`

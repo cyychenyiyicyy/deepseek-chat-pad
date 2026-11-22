@@ -721,6 +721,10 @@ export const en = {
   remoteSubagentOpen: 'Open this subagent conversation',
   remoteSubagentBack: 'Parent conversation',
   remoteSubagentUntitled: 'Subagent conversation',
+  // ── R17: tapping a cached row while disconnected speaks up; new-chat attachment drafts ──
+  remoteDrawerNotConnected: 'Not connected to your computer yet — try again once it reconnects',
+  newSessionDraftRemove: 'Remove attachment',
+  newSessionAttachmentFailed: 'Attachment "{name}" failed: {reason}. The session was created; retrying reuses it.',
   // ── Workspace files panel / session attachments (W3) ──
   workspacePaneTitle: 'Workspace',
   workspacePaneOpen: 'Workspace files',

@@ -54,7 +54,9 @@
 
 import { create } from 'zustand'
 
+import { createId } from '../../utils/id.js'
 import { translate } from '../../i18n/index.js'
+import { outcomeToken, uploadAttachment } from './upload.js'
 import {
   applyPermissionPreset,
   applySessionModel,
@@ -83,13 +85,14 @@ import {
   type RemoteModelEntry,
   type RemoteModelSelection,
   type RemotePermissionOption,
+  type RemotePromptAttachment,
   type RemoteSearchHit,
   type RemoteSessionRow,
   type RemoteWorkspace,
   type RemoteWorkspaceFrame,
   type RemoteWorkspaceList,
 } from './sessionsApi.js'
-import { useRemoteStore } from './store.js'
+import { sendRemoteMessage, useRemoteStore } from './store.js'
 import {
   deriveWorkspacesFromSessions,
   ensureWorkspaceStream,
@@ -213,6 +216,25 @@ export interface RenameTarget {
   title: string
 }
 
+/**
+ * [R17] 新对话页的**本地附件草稿**（还没上传，只是记着用户选了什么）。
+ *
+ * 为什么不立刻上传：两条上传通道（`fileUploads/upload` / `workspace.upload.*`）
+ * 都是**会话级**的（`uploadAttachment(target, sessionId, …)`），而这一页还没有会话。
+ * 所以照 dsh-Go 的做法（`ChatScreen._drafts`）：先存本地草稿，`createAndSend`
+ * 建完会话之后再逐个上传、拿收据、随第一条消息发出去。
+ */
+export interface NewSessionDraftFile {
+  id: string
+  /** 展示名（Host 会做同样的消毒，这里只用于界面） */
+  name: string
+  size: number
+  /** `File.type`；空串的存 undefined（与 workspacePaneStore 同一口径） */
+  mediaType?: string
+  /** 原始文件对象，发送时才读字节 */
+  file: File
+}
+
 /** 会话列表一行的最小投影（`session/list` 的行都能折成它）。 */
 export interface SessionListRow {
   id: string
@@ -307,6 +329,9 @@ export interface NewSessionState {
 
   search: NewSessionSearchState
 
+  /* ── [R17] 新对话页的本地附件草稿（见 NewSessionDraftFile 的注释） ── */
+  draftFiles: NewSessionDraftFile[]
+
   /* ── 动作 ── */
   openPanel(): void
   closePanel(): void
@@ -353,6 +378,10 @@ export interface NewSessionState {
    * 返回 `false` = 会话没建出来（原因已写进 `error`，界面把草稿还给用户）。
    */
   createAndSend(text: string): Promise<boolean>
+  /** [R17] 新对话页选了文件 → 本地草稿（不上传；`createAndSend` 建完会话才传）。 */
+  addDraftFiles(files: readonly File[]): void
+  /** [R17] 从草稿里移除一个附件。 */
+  removeDraftFile(id: string): void
   /** 搜会话：先试远端 `session/search`，不可用就本地按标题过滤。 */
   runSearch(query: string): Promise<void>
   clearSearch(): void
@@ -398,6 +427,11 @@ let searchSeq = 0
 let pinnedAuthoritative = false
 /** 这一代连接上 `workspace/follow` 的 baseline 是否已经到过（决定 `workspaceSource`）。 */
 let baselineReceived = false
+/**
+ * [R17] 附件传失败时停在新对话页，已建出来的会话记在这里；`createAndSend` 重试时
+ * 复用（不重复建）。`target` 对象不同（换过连接）就作废。成功发出后清空。
+ */
+let pendingSendSession: { target: RemoteCallTarget; sessionId: string } | null = null
 
 /**
  * `workspace/follow` 的**一次性**读取器扩展点（备用通道）。
@@ -587,6 +621,7 @@ const INITIAL_STATE = {
   busySessionId: null,
   actionError: null,
   search: initialSearch,
+  draftFiles: [] as NewSessionDraftFile[],
 }
 
 /* ── 模型选择的派生值（界面与「建后应用」共用同一套判断） ─────────────── */
@@ -1114,7 +1149,9 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
 
   createAndSend: async (text: string): Promise<boolean> => {
     const trimmed = text.trim()
-    if (trimmed.length === 0) return false
+    const drafts = useNewSessionStore.getState().draftFiles
+    // [R17] 附件也可以单独发（与聊天页同口径：空文本 + 有附件是合法消息）
+    if (trimmed.length === 0 && drafts.length === 0) return false
     const target = targetFor()
     if (target === null) {
       useNewSessionStore.setState({
@@ -1130,80 +1167,129 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       return false
     }
 
+    /*
+     * [R17] 重试复用：附件传失败时停在新对话页，会话其实已经建出来了 —— 记在
+     * `pendingSendSession`，重试直接接着这个会话传（不重复建）。换过连接（target
+     * 对象不同）就作废重建。成功发出后清掉。
+     */
+    const reuseTarget = pendingSendSession !== null && pendingSendSession.target === target
+      ? pendingSendSession
+      : null
+    let sessionId: string | null = reuseTarget !== null ? reuseTarget.sessionId : null
+
     useNewSessionStore.setState({
       creating: true,
       error: null,
       notice: null,
-      modelApply: initialModelApply,
+      ...(reuseTarget !== null ? {} : { modelApply: initialModelApply }),
       sheet: null,
     })
     try {
-      const created = await createSession(target, {
-        ...(state.selectedWorkspaceId === null ? {} : { workspaceId: state.selectedWorkspaceId }),
-        ...(state.selectedAgentPreset.length === 0 ? {} : { agentPreset: state.selectedAgentPreset }),
-      })
-
-      // ── ① 权限预设：只能通过 `/permission <preset>` 生效（input-B §2.10），必须在进会话前设好，
-      //      免得第一轮就跑在错的权限下。失败不该让「新建」失败 —— 记成 notice。
-      const wanted = state.selectedPermission
       let notice: string | null = null
-      if (wanted.length > 0 && wanted !== state.permissionDefault) {
-        try {
-          await applyPermissionPreset(target, created.sessionId, wanted)
-        } catch (error) {
-          notice = `${describeRemoteError(error).text}（${translate('newSessionPermissionNotApplied')}）`
-          if (isMissingEndpointError(error)) {
-            useNewSessionStore.setState({
-              capabilities: { ...useNewSessionStore.getState().capabilities, permission: false },
-            })
+      if (sessionId === null) {
+        const created = await createSession(target, {
+          ...(state.selectedWorkspaceId === null ? {} : { workspaceId: state.selectedWorkspaceId }),
+          ...(state.selectedAgentPreset.length === 0 ? {} : { agentPreset: state.selectedAgentPreset }),
+        })
+
+        // ── ① 权限预设：只能通过 `/permission <preset>` 生效（input-B §2.10），必须在进会话前设好，
+        //      免得第一轮就跑在错的权限下。失败不该让「新建」失败 —— 记成 notice。
+        const wanted = state.selectedPermission
+        if (wanted.length > 0 && wanted !== state.permissionDefault) {
+          try {
+            await applyPermissionPreset(target, created.sessionId, wanted)
+          } catch (error) {
+            notice = `${describeRemoteError(error).text}（${translate('newSessionPermissionNotApplied')}）`
+            if (isMissingEndpointError(error)) {
+              useNewSessionStore.setState({
+                capabilities: { ...useNewSessionStore.getState().capabilities, permission: false },
+              })
+            }
           }
         }
-      }
-      if (state.selectedAgentPreset.length > 0 && created.agentPreset !== state.selectedAgentPreset) {
-        notice = translate('newSessionPresetNotApplied')
+        if (state.selectedAgentPreset.length > 0 && created.agentPreset !== state.selectedAgentPreset) {
+          notice = translate('newSessionPresetNotApplied')
+        }
+
+        // ── ② 模型 + 思考强度：`session/create` 没有这两个字段，只能建完后设
+        //      （`session/selectModel` → 退回 `session/initializeDefaultModel`，见 sessionsApi）。
+        //      失败**不再拦住消息**：记一句 notice 继续发，Host 用默认模型接住 ——
+        //      会话已经建出来了，把用户拦回「选设置」那一步比用默认模型更糟。
+        const selection = modelSelectionToApply(state.modelPick)
+        if (selection !== null) {
+          useNewSessionStore.setState({ modelApply: { status: 'applying' } })
+          try {
+            const applied = await applySessionModel(target, created.sessionId, selection)
+            const mismatch = await verifyAppliedModel(target, created.sessionId, applied.selection)
+            // `defaultSave` 失败 ≠ 会话模型没切：只是「新对话默认」没存上，单独提示一句。
+            const defaultSaveFailed = applied.defaultSave?.status === 'failed'
+            useNewSessionStore.setState({
+              modelApply: {
+                status: 'idle',
+                via: applied.via,
+                ...(defaultSaveFailed ? { defaultSave: 'failed' } : {}),
+              },
+            })
+            notice = mismatch ?? notice ?? (defaultSaveFailed ? translate('newSessionDefaultSaveFailed') : null)
+          } catch (error) {
+            if (isMissingEndpointError(error)) {
+              useNewSessionStore.setState({
+                capabilities: { ...useNewSessionStore.getState().capabilities, model: false },
+              })
+            }
+            useNewSessionStore.setState({ modelApply: { status: 'idle' } })
+            notice = `${errorText(error)}（${translate('newSessionModelFallback')}）`
+          }
+        }
+        pendingSendSession = { target, sessionId: created.sessionId }
+        sessionId = created.sessionId
       }
 
-      // ── ② 模型 + 思考强度：`session/create` 没有这两个字段，只能建完后设
-      //      （`session/selectModel` → 退回 `session/initializeDefaultModel`，见 sessionsApi）。
-      //      失败**不再拦住消息**：记一句 notice 继续发，Host 用默认模型接住 ——
-      //      会话已经建出来了，把用户拦回「选设置」那一步比用默认模型更糟。
-      const selection = modelSelectionToApply(state.modelPick)
-      if (selection !== null) {
-        useNewSessionStore.setState({ modelApply: { status: 'applying' } })
+      /*
+       * ── ②b 附件（R17）：两条上传通道都是**会话级**的（`uploadAttachment(target,
+       *      sessionId, …)`），所以只能在这一刻传 —— dsh-Go 也是建完会话才把 `_drafts`
+       *      落上去的。失败停在新对话页：红字 + 草稿都在、文本由调用方还回去，
+       *      `pendingSendSession` 已记下会话，重试不重复建。
+       */
+      const blocks: RemotePromptAttachment[] = []
+      for (const draft of drafts) {
         try {
-          const applied = await applySessionModel(target, created.sessionId, selection)
-          const mismatch = await verifyAppliedModel(target, created.sessionId, applied.selection)
-          // `defaultSave` 失败 ≠ 会话模型没切：只是「新对话默认」没存上，单独提示一句。
-          const defaultSaveFailed = applied.defaultSave?.status === 'failed'
-          useNewSessionStore.setState({
-            modelApply: {
-              status: 'idle',
-              via: applied.via,
-              ...(defaultSaveFailed ? { defaultSave: 'failed' } : {}),
-            },
+          const bytes = new Uint8Array(await draft.file.arrayBuffer())
+          const outcome = await uploadAttachment(target, sessionId!, {
+            name: draft.name,
+            bytes,
+            ...(draft.mediaType === undefined ? {} : { mediaType: draft.mediaType }),
           })
-          notice = mismatch ?? notice ?? (defaultSaveFailed ? translate('newSessionDefaultSaveFailed') : null)
+          blocks.push({ type: 'file', receiptId: outcomeToken(outcome) })
         } catch (error) {
-          if (isMissingEndpointError(error)) {
-            useNewSessionStore.setState({
-              capabilities: { ...useNewSessionStore.getState().capabilities, model: false },
-            })
-          }
-          useNewSessionStore.setState({ modelApply: { status: 'idle' } })
-          notice = `${errorText(error)}（${translate('newSessionModelFallback')}）`
+          useNewSessionStore.setState({
+            creating: false,
+            error: translate('newSessionAttachmentFailed', {
+              name: draft.name,
+              reason: errorText(error),
+            }),
+          })
+          return false
         }
       }
 
       // ── ③ 刷列表 → 进会话 → 关新建页（`finishOpen` 一手包，notice 随它带出去）。
-      await finishOpen(created.sessionId, notice)
+      await finishOpen(sessionId!, notice)
 
       // ── ④ 把第一条消息发出去。`finishOpen` 已经 `await openSession`（follow 快照到手），
       //      所以这里发是安全的；失败不回滚会话 —— 错误写在时间线那一行上，会话是真实存在的。
       try {
-        await useRemoteStore.getState().send(trimmed)
+        if (blocks.length > 0) {
+          // 与聊天页的附件路径同一条：`sendRemoteMessage` = store.sendFlow（收据随消息发）
+          await sendRemoteMessage(trimmed, blocks)
+        } else {
+          await useRemoteStore.getState().send(trimmed)
+        }
       } catch {
         // `sendFlow` 自己把失败写进时间线与 `store.error`，这里不再重复提示
       }
+      pendingSendSession = null
+      useNewSessionStore.setState({ draftFiles: [] })
       return true
     } catch (error) {
       if (isMissingEndpointError(error)) {
@@ -1216,6 +1302,28 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       useNewSessionStore.setState({ creating: false, error: errorText(error) })
       return false
     }
+  },
+
+  addDraftFiles: (files: readonly File[]): void => {
+    const current = useNewSessionStore.getState().draftFiles
+    const added = files
+      .filter((file) => file.size > 0 || file.name.length > 0)
+      .map((file) => ({
+        id: createId(),
+        name: file.name.length > 0 ? file.name : 'file',
+        size: file.size,
+        ...(file.type.length === 0 ? {} : { mediaType: file.type }),
+        file,
+      }))
+    if (added.length === 0) return
+    useNewSessionStore.setState({
+      draftFiles: [...current, ...added],
+      error: null,
+    })
+  },
+
+  removeDraftFile: (id: string): void => {
+    useNewSessionStore.setState((current) => ({ draftFiles: current.draftFiles.filter((item) => item.id !== id) }))
   },
 
   runSearch: async (query: string): Promise<void> => {

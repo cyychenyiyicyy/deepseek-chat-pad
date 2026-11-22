@@ -328,6 +328,62 @@
   overflow-y: auto;
 }
 
+/*
+ * [R17] 新对话页的附件草稿条：与聊天页 AttachmentTray 同一节奏（输入框上方、
+ * 一行一个、小字），但没有进度 —— 上传要等 createAndSend 建完会话才开始。
+ */
+.draftTray {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 6px;
+}
+
+.draftRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background-color: var(--dsw-alias-button-ghost-active-fill);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.draftName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.draftSize {
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.draftRemove {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 100px;
+  background: none;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.draftRemove:hover {
+  background-color: var(--dsw-specific-sidebar-nav-item-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
 .inputWrapper {
   display: flex;
   flex-direction: column;
