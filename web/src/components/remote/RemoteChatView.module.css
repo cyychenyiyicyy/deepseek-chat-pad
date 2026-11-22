@@ -36,6 +36,46 @@
   color: var(--dsw-alias-label-primary);
 }
 
+/*
+ * [R16] 子代理会话顶栏的「‹ 上级对话」（dsh-Go header_agents.dart 的回链）：
+ * 一枚安静的文字键，指向派它出来的那个会话；hover 才亮。
+ */
+.subagentBack {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 2px;
+  max-width: 220px;
+  height: 28px;
+  margin-left: -6px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 100px;
+  background: none;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+}
+
+.subagentBack:hover {
+  background-color: var(--dsw-specific-sidebar-nav-item-hover);
+  color: var(--dsw-alias-brand-text);
+}
+
+.subagentBackGlyph {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.subagentBackText {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 /* transport 徽标：小胶囊，一眼看出走的是中继还是局域网 */
 .badge {
   flex-shrink: 0;

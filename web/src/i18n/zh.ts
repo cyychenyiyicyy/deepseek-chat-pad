@@ -687,6 +687,24 @@ export const zh = {
   // [R15] 底部输入框（与会话页同一个 composer）：发送 = 建会话 + 发首条消息
   newSessionComposerPlaceholder: '给 DeepSeek 发消息，发出即创建会话',
   newSessionComposerHint: '回车发送；发出后会自动创建会话',
+  // ── 会话列表重设计（R16，照 dsh-Go 的抽屉：状态筛选 + 置顶/日期分组） ──
+  remoteDrawerFilterAll: '全部',
+  remoteDrawerFilterRunning: '运行中',
+  remoteDrawerFilterPending: '待确认',
+  remoteDrawerNoRunning: '没有在跑的会话',
+  remoteDrawerNoPending: '没有待确认的会话',
+  remoteDrawerPinned: '置顶',
+  remoteDrawerToday: '今天',
+  remoteDrawerYesterday: '昨天',
+  remoteDrawerWeek: '近 7 天',
+  remoteDrawerEarlier: '更早',
+  // ── 子代理会话（R16，照 dsh-Go：会话详情里看子代理，点进去读记录） ──
+  remoteSubagentsTitle: '子代理',
+  remoteSubagentsEmpty: '没有派出子代理',
+  remoteSubagentsCount: '{count} 个子代理',
+  remoteSubagentOpen: '查看这个子代理的对话',
+  remoteSubagentBack: '上级对话',
+  remoteSubagentUntitled: '子代理会话',
   // ── 工作区文件面板 / 会话附件上传（W3；只追加 workspacePane 前缀，别动别的段） ──
   workspacePaneTitle: '工作区',
   workspacePaneOpen: '工作区文件',

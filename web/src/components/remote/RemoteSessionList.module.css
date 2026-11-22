@@ -121,17 +121,19 @@
 }
 
 /* ────────────────────────────────────────────────────────────────────────
- * [S3] 列表重设计
+ * [D] 抽屉重设计（照 dsh-Go 的 session_tile.dart / drawer_list.dart /
+ * drawer_filter_bar.dart）：
  *
- * 用户反馈两件事：「刷新会话这个按钮太大了」「每一个会话的状态提示不够明显，
- * 也看不出来他现在是在工作还是在干嘛」。所以：
- *   - 刷新从「一整行 36px 大按钮」变成标题行右侧 28px 图标（`IconButton size=xs`）；
- *   - 每行右侧给了**状态位**：运行中（品牌色脉冲点 + 文字）/ 待审批（红点 + 数字）；
- *   - 运行中的行整体加一条左侧竖线 + 极轻底色，扫一眼就能挑出来；
- *   - 顶部一句汇总（`2 个会话在跑`），只在真有在跑的会话时出现。
+ *   - 一行只有两块：标题（15px / 行高 21 / 单行省略）+ 行尾**至多一个**标记
+ *     （待确认文字 > 运行中呼吸圆点；时间 / 工具名那行 meta 按原稿删掉）；
+ *   - 行高 44、圆角 12（squircle 观感）、左右 padding 10（session_tile.dart:51/116）；
+ *   - 当前行：字重 600 + 淡填充底，背景色过渡淡入（session_tile.dart:104-134）；
+ *   - 列表分块：置顶 → 今天 / 昨天 / 近 7 天 / 更早 → 已归档沉底，
+ *     小节标题用 eyebrow（session_tile.dart:229-243）；
+ *   - 状态筛选胶囊行替代了原顶部那句「N 个会话在跑」汇总。
  *
- * 尺寸刻意沿用原行高（44/48/50px，见文件末尾的媒体查询）：标题行 20px + 状态行 16px
- * 本来就够放，不再加第三行 —— 手机（390px）上「标题 + 状态」两行是最省的排版。
+ * 尺寸在手机上也不再变（原 44→46/50 的响应式行高是为双行 meta 设的，
+ * 单行布局不需要）；判定逻辑全在 drawerBlocks.ts。
  * ──────────────────────────────────────────────────────────────────────── */
 
 /* 标题行：`会话` 左、刷新图标右 */
@@ -159,28 +161,6 @@
 
 .refreshButton {
   flex-shrink: 0;
-}
-
-/* 顶部汇总：一句话说清后台有几件事在动 */
-.summary {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 6px;
-  margin: 0 2px 8px 4px;
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-tertiary));
-  user-select: none;
-}
-
-.summaryDot {
-  flex-shrink: 0;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background-color: var(--dsw-alias-brand-text);
-  animation: list-pulse 1.4s ease-in-out infinite;
 }
 
 /* 一行 = 主按钮 + 「⋯」 */
@@ -308,6 +288,156 @@
   text-align: left;
 }
 
+/* ── [D] 状态筛选胶囊行（drawer_filter_bar.dart:15-70） ────────────────────
+   全部 / 运行中 / 待确认，水平排列、可横向滚动（大字号放不下就横滑，不出滚动条）。
+   胶囊本体复用上面的 .filterChip（30px 高、选中品牌色淡底描边）。 */
+.filterBar {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+  margin: 0 0 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.filterBar::-webkit-scrollbar {
+  display: none;
+}
+
+/* 状态胶囊是纯文字（工作区那粒带 icon/chevron）：左右 padding 对称，间距交给容器 */
+.statusChip {
+  margin: 0;
+  padding: 0 12px;
+}
+
+/* ── [D] 一行（session_tile.dart:44-155） ──────────────────────────────────
+   高 44、圆角 12、左右 padding 10；两块内容：标题 + 行尾至多一个标记。 */
+.item {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  height: 44px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 12px;
+  background: none;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 15px;
+  line-height: 21px;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+  /* dsh-Go 的当前行填充是 alpha 渐入（session_tile.dart:104-118 的
+     TweenAnimationBuilder），CSS 这边用背景色过渡近似，别生硬切换 */
+  transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
+
+  &:hover {
+    background-color: var(--dsw-specific-sidebar-nav-item-hover);
+  }
+
+  &:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--dsw-alias-button-primary-fill);
+  }
+}
+
+/* 当前行（session_tile.dart:132-133）：字重 600 + 淡填充底（原稿用的是
+   selection 色的半透明 alpha，等价于这枚 hover 别名变量的淡底） */
+.itemActive {
+  font-weight: 600;
+  background-color: var(--dsw-specific-sidebar-nav-item-hover);
+
+  &:hover {
+    background-color: var(--dsw-specific-sidebar-nav-item-hover);
+  }
+}
+
+/* 标题：单行省略，把行尾留给标记位 */
+.itemTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* [D] 小节标题（session_tile.dart:229-243 的 DrawerEyebrow：
+   12px、tertiary 色、上下 padding 16/6、左右 10） */
+.eyebrow {
+  padding: 16px 10px 6px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  user-select: none;
+}
+
+/* [D] 行尾「待确认」文字标签（session_tile.dart:72-76：warning 色、12px、500）。
+   ChatPad 主题没有 warning 色 —— 仓库先例（BackgroundPermissions.module.css /
+   RemoteSettingsPanel.module.css 的注释）：「需要处理就用错误色」。 */
+.markerPending {
+  flex-shrink: 0;
+  margin-left: 10px;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--dsw-alias-state-error-primary);
+  white-space: nowrap;
+}
+
+/* [D] 行尾「运行中」呼吸圆点（session_tile.dart:77 的 StatusDot busy，7px）；
+     视觉只有一颗点，语义塞进 aria-label（tsx 里给了） */
+.markerRunning {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  margin-left: 10px;
+}
+
+/* 脉冲点：box-shadow 扩散呼吸 —— 不占布局，也不触发重排 */
+.pulseDot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: var(--dsw-alias-brand-text);
+  animation: list-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes list-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 currentColor;
+  }
+
+  50% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 3px transparent;
+  }
+}
+
+/* 减少动效：不打脉动，只留一颗实心点 */
+@media (prefers-reduced-motion: reduce) {
+  .pulseDot {
+    animation: none;
+  }
+}
+
+/* 行尾小标（「已归档」/「已不存在」）：描边胶囊，不抢待确认/运行中的位 */
+.archivedTag {
+  flex-shrink: 0;
+  margin-left: 10px;
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
 /* ── 重命名弹窗 ── */
 .renameInput {
   box-sizing: border-box;
@@ -316,7 +446,7 @@
   padding: 0 10px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 10px;
-  background-color: transparent;
+  background: transparent;
   font: inherit;
   font-size: 14px;
   color: var(--dsw-alias-label-primary);
@@ -349,249 +479,12 @@
   cursor: default;
 }
 
-.item {
-  position: relative;
-  display: flex;
-  align-items: center;
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 44px;
-  margin-bottom: 2px;
-  padding: 8px 10px 8px 12px;
-  border: none;
-  border-radius: 12px;
-  background: none;
-  color: var(--dsw-alias-label-primary);
-  font: inherit;
-  font-size: 14px;
-  line-height: 20px;
-  text-align: left;
-  cursor: pointer;
-  user-select: none;
-  outline: none;
-  transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
-
-  &:hover {
-    background-color: var(--dsw-specific-sidebar-nav-item-hover);
-  }
-
-  &:focus-visible {
-    box-shadow: inset 0 0 0 2px var(--dsw-alias-button-primary-fill);
-  }
-}
-
-/*
- * [S3] 运行中的行：左侧一条竖线 + 极轻底色。
- *
- * 为什么用伪元素而不是 border-left：圆角行（12/16px）上 border-left 会把左上、
- * 左下两个角画成直角，看着像「灰条贴上去」；竖线自己带圆角、上下留一点呼吸，
- * 既能扫读又不破坏行的形状。活动行（`.itemActive`）的底色优先于这里的淡底。
- */
-.rowRunning .item::before {
-  content: '';
-  position: absolute;
-  top: 9px;
-  bottom: 9px;
-  left: 3px;
-  width: 3px;
-  border-radius: 100px;
-  background-color: var(--dsw-alias-brand-text);
-}
-
-.rowRunning .item:not(.itemActive) {
-  background-color: var(--dsw-alias-interactive-bg-hover);
-}
-
-.rowRunning .item:not(.itemActive):hover {
-  background-color: var(--dsw-specific-sidebar-nav-item-hover);
-}
-
-.itemActive {
-  background-color: var(--dsw-specific-sidebar-nav-item-active-accent);
-  color: var(--dsw-alias-brand-primary-invert);
-
-  &:hover {
-    background-color: var(--dsw-specific-sidebar-nav-item-active-accent);
-  }
-}
-
-.itemMain {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-/* [S3] 第一行：标题 + 右侧状态位 */
-.itemTop {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-/* [S3] 「运行中」：品牌色脉冲点 + 文字，贴行尾 */
-.statusRunning {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 4px;
-  margin-left: auto;
-  font-size: 11px;
-  line-height: 16px;
-  font-weight: 500;
-  color: var(--dsw-alias-brand-text);
-  white-space: nowrap;
-}
-
-.itemActive .statusRunning {
-  color: inherit;
-  opacity: 0.9;
-}
-
-/* 脉冲点：2px 的圈，用 box-shadow 扩散 —— 不占布局，也不触发重排 */
-.pulseDot {
-  flex-shrink: 0;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background-color: currentColor;
-  animation: list-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes list-pulse {
-  0%,
-  100% {
-    opacity: 1;
-    box-shadow: 0 0 0 0 currentColor;
-  }
-
-  50% {
-    opacity: 0.55;
-    box-shadow: 0 0 0 3px transparent;
-  }
-}
-
-/* 减少动效：不打脉动，只留一个实心点 */
-@media (prefers-reduced-motion: reduce) {
-  .pulseDot,
-  .summaryDot {
-    animation: none;
-  }
-}
-
-/* [S3] 正在调用的工具名：一行，超出省略（用户要求「最多 1 行省略」） */
-.itemTool {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--dsw-alias-label-tertiary);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.itemActive .itemTool {
-  color: inherit;
-  opacity: 0.72;
-}
-
-.itemMeta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.archivedTag {
-  flex-shrink: 0;
-  padding: 0 6px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 100px;
-  font-size: 10px;
-  line-height: 14px;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.itemBusy {
-  display: inline-flex;
-  flex-shrink: 0;
-  color: var(--dsw-alias-label-tertiary);
-  animation: list-spin 1s linear infinite;
-}
-
-@keyframes list-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.itemTitle {
-  display: flex;
-  flex: 1 1 auto;
-  align-items: center;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.itemTime {
-  flex-shrink: 0;
-  margin-left: auto;
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--dsw-alias-label-tertiary);
-}
-
-.itemActive .itemTime {
-  color: inherit;
-  opacity: 0.7;
-}
-
-.pinMark {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  margin-right: 4px;
-  opacity: 0.6;
-
-  svg {
-    width: 12px;
-    height: 12px;
-  }
-}
-
 .empty {
   padding: 16px 10px;
   font-size: 12px;
   line-height: 18px;
   color: var(--dsw-alias-label-tertiary);
   text-align: center;
-}
-
-@media (min-width: 768px) {
-  .item {
-    min-height: 46px;
-    font-size: 15px;
-  }
-}
-
-@media (min-width: 1024px) {
-  .item {
-    min-height: 50px;
-    font-size: 16px;
-  }
-}
-
-@media not all and (min-width: 768px) {
-  .item {
-    min-height: 48px;
-    border-radius: 16px;
-    font-size: 16px;
-  }
 }
 
 /* ── [R8 缓存] 列表骨架 ──────────────────────────────────────────────────
@@ -647,23 +540,4 @@
   .skeletonRow {
     animation: none;
   }
-}
-
-/* [R9] 待处理红点：圆点 + 数字，错误色；靠右挨着时间戳，不挤标题行 */
-.pendingDot {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  box-sizing: border-box;
-  min-width: 16px;
-  height: 16px;
-  margin-left: auto;
-  padding: 0 5px;
-  border-radius: 100px;
-  background-color: var(--dsw-alias-state-error-primary);
-  color: #fff;
-  font-size: 10px;
-  font-weight: 500;
-  line-height: 16px;
 }

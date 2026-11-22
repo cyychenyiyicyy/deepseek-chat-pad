@@ -703,6 +703,24 @@ export const en = {
   // [R15] The composer at the bottom (same one as the chat page): send = create + first message
   newSessionComposerPlaceholder: 'Message DeepSeek — sending creates the session',
   newSessionComposerHint: 'Enter to send; the session is created on send',
+  // ── Session list redesign (R16, after dsh-Go's drawer: status filters + pinned/day groups) ──
+  remoteDrawerFilterAll: 'All',
+  remoteDrawerFilterRunning: 'Running',
+  remoteDrawerFilterPending: 'To confirm',
+  remoteDrawerNoRunning: 'No running conversations',
+  remoteDrawerNoPending: 'Nothing waiting for confirmation',
+  remoteDrawerPinned: 'Pinned',
+  remoteDrawerToday: 'Today',
+  remoteDrawerYesterday: 'Yesterday',
+  remoteDrawerWeek: 'Last 7 days',
+  remoteDrawerEarlier: 'Earlier',
+  // ── Subagent conversations (R16, after dsh-Go: see them from session details, open to read) ──
+  remoteSubagentsTitle: 'Subagents',
+  remoteSubagentsEmpty: 'No subagents sent',
+  remoteSubagentsCount: '{count} subagents',
+  remoteSubagentOpen: 'Open this subagent conversation',
+  remoteSubagentBack: 'Parent conversation',
+  remoteSubagentUntitled: 'Subagent conversation',
   // ── Workspace files panel / session attachments (W3) ──
   workspacePaneTitle: 'Workspace',
   workspacePaneOpen: 'Workspace files',

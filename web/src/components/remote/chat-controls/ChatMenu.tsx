@@ -101,7 +101,8 @@ export const ChatMenu = ({
               <span className={styles.rowName}>{t('chatControlsMenuInfo')}</span>
             </button>
             <div className={styles.divider} />
-            <SessionInfoPanel sessionId={sessionId} title={title} usage={usage} />
+            {/* onNavigate=close：面板里点子代理行跳会话时，菜单跟着收起（不留一扇开着的窗） */}
+            <SessionInfoPanel sessionId={sessionId} title={title} usage={usage} onNavigate={close} />
           </>
         ) : view === 'commands' ? (
           <>

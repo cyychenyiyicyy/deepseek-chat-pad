@@ -2,6 +2,7 @@ import clsx from 'clsx'
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useIsMobile } from '../../app/viewport.js'
 import { useTranslate } from '../../i18n/index.js'
+import { setSiderCollapsed, useSettings } from '../../services/settings.js'
 import { stripDsml } from '../../services/api/dsml.js'
 import type {
   ApprovalActivity,
@@ -255,6 +256,25 @@ export const RemoteChatView = () => {
 
   const bridgeReady = availability === 'ready'
   const sessionsTitle = sessions.find((session) => session.id === activeSessionId)?.title
+  /*
+   * [R16] 侧栏开合 + 子代理的来路。
+   *
+   * 开关：本机模式的侧栏开关在 `TabletHeader`；远程模式的顶栏原来没有这枚键，
+   * 侧栏一收起就再也没有入口展开（真机反馈「收起了展不开」）。这里补同一枚。
+   *
+   * 来路：活动会话若是子代理（`session/list` 行上带 parentSessionId），顶栏给一条
+   * 「‹ 上级对话」回去的路 —— dsh-Go `header_agents.dart:92` 的做法。rows 是快照，
+   * 列表刷新时会更新；查不到就当普通会话，不画。
+   */
+  const siderCollapsed = useSettings((state) => state.siderCollapsed)
+  const sessionRows = useNewSessionStore((state) => state.rows)
+  const subagentParentId = activeSessionId === null
+    ? null
+    : sessionRows.find((row) => row.sessionId === activeSessionId)?.parentSessionId ?? null
+  const subagentParentTitle =
+    subagentParentId === null
+      ? ''
+      : sessionRows.find((row) => row.sessionId === subagentParentId)?.title ?? ''
   // 标题以 `session/control` 投影为最新（Host 会自动起名 / 用户可以改名），列表里的那份兜底
   const activeTitle =
     controlTitle !== null && controlTitle.length > 0
@@ -818,6 +838,37 @@ export const RemoteChatView = () => {
             aria-label={t('remoteListButton')}
             onClick={openMobileSider}
           />
+        ) : (
+          /*
+           * [R16] 平板/桌面：与本机模式 `TabletHeader` 完全同一枚开关（图标/尺寸/文案），
+           * 远程模式原来没有它 —— 侧栏收起后再也没有展开入口。
+           */
+          <IconButton
+            size="xl"
+            tone="primary"
+            icon={<IconMenuOutline20 />}
+            tooltip={siderCollapsed ? t('expandSiderbarButton') : t('collapseSiderbarButton')}
+            aria-label={siderCollapsed ? t('expandSiderbarButton') : t('collapseSiderbarButton')}
+            onClick={() => setSiderCollapsed(!siderCollapsed)}
+          />
+        )}
+        {ready && subagentParentId !== null ? (
+          /* [R16] 子代理会话的来路（dsh-Go `header_agents.dart` 的「‹ 上级对话」） */
+          <button
+            type="button"
+            className={styles.subagentBack}
+            onClick={() => {
+              if (subagentParentId === null) return
+              fireAndForget(() => useRemoteStore.getState().openSession(subagentParentId))
+            }}
+          >
+            <span className={styles.subagentBackGlyph} aria-hidden>
+              ‹
+            </span>
+            <span className={styles.subagentBackText}>
+              {subagentParentTitle.length > 0 ? subagentParentTitle : t('remoteSubagentBack')}
+            </span>
+          </button>
         ) : null}
         <div className={styles.title}>{ready && activeSessionId !== null ? activeTitle : ''}</div>
         {/*
