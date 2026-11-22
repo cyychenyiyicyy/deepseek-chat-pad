@@ -113,6 +113,8 @@ import {
   CONTROL_STREAM_ENDPOINT,
   ingestEventsItem,
   noteControlUnavailable,
+  noteSessionPermissionPreset,
+  noteSnapshotProjections,
   selectControlSession,
   unbindSessionControls,
 } from './sessionControls.js'
@@ -160,6 +162,7 @@ import {
   markSendState,
   oldestSeqOfItems,
   parseSnapshot,
+  permissionPresetOfFollowItem,
   pendingApprovals as pendingApprovalsOf,
   prependHistory,
   reduceEventsItem,
@@ -2641,6 +2644,16 @@ export const installForegroundSelfHeal = (): void => {
   }
   if (typeof window !== 'undefined') {
     window.addEventListener('focus', kick)
+    /*
+     * 网络恢复就立刻重连（dsh-Go `network_watch.dart` 的 `networkKicks()` 同款）：
+     * Wi-Fi ↔ 蜂窝、VPN 起落之后，旧 socket 绑的还是上一块网卡，等退避到点太慢，
+     * 用户看到的是「明明有网了却还连不上」。`startReconnect()` 自带单飞与相位守卫，
+     * 连接还好好的时候这一下不会多打网络。
+     *
+     * 只挂 `online`：`offline` 不该伪造失败 —— 链路自己会 close，然后由
+     * `handleLinkClosed()` 分诊成中性的「网络断开」。
+     */
+    window.addEventListener('online', kick)
   }
 }
 
@@ -3070,6 +3083,14 @@ const openSessionFlow = async (id: string): Promise<void> => {
         }
         // R8：快照是权威窗口，但**不丢**本地已经画出来的东西 —— 同 id 服务端覆盖、
         // 乐观行按 requestRpcId 对齐、更早的历史页留在头部（`cache.mergeTimelineItems`）。
+        /*
+         * 权限预设：快照里的 `projections` 是权威种子（dsh-Go 的 `SessionProjections.permissionPreset`
+         * 同一个来源）。老 Host 的 `session/control` 流可能根本打不开，只有这一份 ——
+         * 不在这里收，界面就永远显示「默认」，与实际用的不一致。
+         */
+        noteSnapshotProjections(id, snapshot.projections)
+        const followedPreset = permissionPresetOfFollowItem(value)
+        if (followedPreset !== undefined) noteSessionPermissionPreset(id, followedPreset)
         const fresh = reduceSnapshot(snapshot, id)
         const next = { ...fresh, items: mergeTimelineItems(current.items, fresh.items) }
         session.hasMore = snapshot.hasMore
@@ -3085,6 +3106,9 @@ const openSessionFlow = async (id: string): Promise<void> => {
       const next = reduceFollowItem(current, value, id)
       const running = runningForFollowItem(value)
       if (running !== undefined) useRemoteStore.setState({ streaming: running })
+      // 会话进行中改权限只有一条 `permission/preset` 事件：跟上它，界面的胶囊才不会停在旧值
+      const preset = permissionPresetOfFollowItem(value)
+      if (preset !== undefined) noteSessionPermissionPreset(id, preset)
       commitTranscript(session, id, next)
       scheduleTimelinePersist(session, id)
     },

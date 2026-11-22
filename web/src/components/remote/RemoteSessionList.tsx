@@ -34,6 +34,7 @@ import {
   type RowMarker,
 } from './drawerBlocks.js'
 import { useNewSessionStore, workspaceTitleFromPath } from '../../services/remote/newSessionStore.js'
+import { sessionBelongsToWorkspace } from './workspace/workspaceItems.js'
 import styles from './RemoteSessionList.module.css'
 /**
  * 远程会话列表 —— 侧栏里那份列表的远程版，外加**会话管理**（W1）：
@@ -223,7 +224,21 @@ export const RemoteSessionList = ({
    * 判定口径与改造前逐条一致（running 看 liveById；待确认两条记账取大、活动会话不计）。
    */
   const drawerInput = {
-    sessions: sessions.filter((session) => workspaceFilter === null || session.workspaceId === workspaceFilter),
+    /*
+     * 工作区筛选的归属判定：`workspaceId` 与 `workspace.sessionIds` **两边都认**
+     * （判定在 `sessionBelongsToWorkspace`，自测见 workspaces.selftest 的 E 组）。
+     * 只认前者时，Host 没把 workspaceId 投影到会话行上 → 一筛就是空列表，
+     * 真机症状：「筛某个工作区，它说这儿没有会话，可实际上有」。
+     */
+    sessions: sessions.filter(
+      (session) =>
+        workspaceFilter === null
+        || sessionBelongsToWorkspace(
+          session,
+          workspaceFilter,
+          workspaces.find((workspace) => workspace.workspaceId === workspaceFilter)?.sessionIds,
+        ),
+    ),
     pinnedIds,
     archivedIds,
     // [R8] 服务端这次没给、缓存里还有的行：标「已不存在」而不是闪一下消失
@@ -279,6 +294,13 @@ export const RemoteSessionList = ({
   const syncingNow =
     cacheStatus.sessionsSyncing || phase === 'authing' || phase === 'connecting' || phase === 'ready'
   const menuRow = menuSessionId === null ? undefined : rows.find((row) => row.id === menuSessionId)
+  /**
+   * [R20 排版] 两排胶囊合成一行后各自的出现条件（判据不变，只改位置）：
+   *   - 工作区：多于一个工作区才有筛选的意义；
+   *   - 状态：列表为空且停在「全部」时不出现；筛选还开着时**保留**（否则用户被空态困住）。
+   */
+  const showWorkspaceChip = workspaceOptions.length > 1
+  const showStatusBar = drawerInput.sessions.length > 0 || statusFilter !== 'all'
 
   /** [D] 一行（session_tile.dart 的两块）：标题 + 行尾「至多一个」标记；判定都在纯函数里 */
   const renderRow = (row: DrawerRow) => {
@@ -360,6 +382,28 @@ export const RemoteSessionList = ({
       {ready ? (
         <div className={styles.listHeader}>
           <span className={styles.listTitle}>{t('liveListTitle')}</span>
+          {/*
+            「新建对话」（R4）：真机反馈「新建对话没有按钮」。dsh-Go 把它放在**品牌行右侧**
+            （`sessions_drawer.dart` 的 `NewChatButton`），不占一整行 —— 原来这里是一整行
+            36px 的主按钮，加上标题行 / 搜索 / 两行胶囊，列表被顶掉 5 行。
+            [W6] 点它换的是**视图**（整页），手机上顺手把抽屉关掉。
+          */}
+          {capabilities.create ? (
+            <button
+              type="button"
+              className={styles.newChat}
+              aria-label={t('composerNewChat')}
+              onClick={() => {
+                closeMobileSider()
+                useNewSessionStore.getState().openPanel()
+              }}
+            >
+              <span className={styles.newChatIcon} aria-hidden>
+                <IconNewChatOutline20 />
+              </span>
+              <span className={styles.newChatText}>{t('composerNewChat')}</span>
+            </button>
+          ) : null}
           <IconButton
             size="xs"
             tone="tertiary"
@@ -370,31 +414,6 @@ export const RemoteSessionList = ({
             onClick={() => fireAndForget(() => useRemoteStore.getState().refreshSessions())}
           />
         </div>
-      ) : null}
-      {/*
-        「新建对话」入口（R4）：用户真机反馈「新建对话没有按钮」——
-        之前它只挂在时间线空态里，一旦有会话就再也找不到。这里是**会话列表顶部**，
-        与搜索框同一列、视觉权重更高，任何时刻都在。
-        能力门禁：Host 没有 `session/create`（`capabilities.create === false`）时不渲染。
-
-        [W6] 点它换的是**视图**（`RemoteChatView` 的 `view: 'new-session'`，整页），不是弹面板；
-        手机上左栏是抽屉，所以顺手把抽屉关掉 —— 否则它会在新页面背后慢慢缩回去。
-      */}
-      {ready && capabilities.create ? (
-        <button
-          type="button"
-          className={styles.newChat}
-          aria-label={t('composerNewChat')}
-          onClick={() => {
-            closeMobileSider()
-            useNewSessionStore.getState().openPanel()
-          }}
-        >
-          <span className={styles.newChatIcon} aria-hidden>
-            <IconNewChatOutline20 />
-          </span>
-          <span className={styles.newChatText}>{t('composerNewChat')}</span>
-        </button>
       ) : null}
 
       {ready ? (
@@ -433,61 +452,59 @@ export const RemoteSessionList = ({
       ) : null}
 
       {/*
-        [R15] 工作区筛选（dsh-Go 的 `WorkspaceSwitcher`）：搜索行下面一粒胶囊，
-        点开与「⋯」同款的锚定菜单。只在**多于一个**工作区时出现 —— 只有一个时筛选没有意义。
-        选项点中即筛（`listWorkspaceFilter`），`null` = 全部。
+        [R20 排版] 工作区筛选 + 状态筛选**挤进同一行**。
+        dsh-Go 是上下两行（`WorkspaceSwitcher` 一行、`DrawerFilterBar` 一行），但它的行高
+        与留白比我们松、抽屉也更宽；在手机抽屉里两行胶囊会把列表顶端顶掉 60px。
+        整行横向可滚，大字号也放得下；两层筛选仍然同时生效（状态在 `buildDrawerBlocks` 里做）。
+        搜索中两排都不出现：命中列表本身就是一层筛选。
       */}
-      {ready && workspaceOptions.length > 1 ? (
-        <button
-          type="button"
-          className={clsx(styles.filterChip, workspaceFilter !== null && styles.filterChipActive)}
-          aria-label={t('newSessionWorkspaceFilterLabel')}
-          aria-expanded={filterOpen}
-          onClick={(event) => {
-            setFilterAnchor(event.currentTarget)
-            setFilterOpen(!filterOpen)
-          }}
-        >
-          <span className={styles.filterIcon} aria-hidden>
-            <IconBrowseOutline16 />
-          </span>
-          <span className={styles.filterLabel}>{workspaceFilterLabel}</span>
-          <span className={styles.filterChevron} aria-hidden>
-            <IconChevronDownOutline14 />
-          </span>
-        </button>
-      ) : null}
+      {ready && !searching && (showWorkspaceChip || showStatusBar) ? (
+        <div className={styles.filterRow}>
+          {showWorkspaceChip ? (
+            <button
+              type="button"
+              className={clsx(styles.filterChip, workspaceFilter !== null && styles.filterChipActive)}
+              aria-label={t('newSessionWorkspaceFilterLabel')}
+              aria-expanded={filterOpen}
+              onClick={(event) => {
+                setFilterAnchor(event.currentTarget)
+                setFilterOpen(!filterOpen)
+              }}
+            >
+              <span className={styles.filterIcon} aria-hidden>
+                <IconBrowseOutline16 />
+              </span>
+              <span className={styles.filterLabel}>{workspaceFilterLabel}</span>
+              <span className={styles.filterChevron} aria-hidden>
+                <IconChevronDownOutline14 />
+              </span>
+            </button>
+          ) : null}
 
-      {/*
-        [D] 状态筛选胶囊行（drawer_filter_bar.dart）：全部 / 运行中 / 待确认，
-        水平排列、可横向滚动（大字号时也放得下）。与工作区筛选**同时生效**。
-        出现条件照原稿：列表为空且停在「全部」时不出现；列表空了但筛选还开着时
-        **保留**（否则用户会被一句空态困住，点不回「全部」）。搜索中不出现
-        （命中列表本身就是一层筛选，dsh-Go 的搜索也在抽屉外）。
-        筛选生效时把计数拼在标签后（「运行中 2」「待确认 1」）。
-      */}
-      {ready && !searching && (drawerInput.sessions.length > 0 || statusFilter !== 'all') ? (
-        <div className={styles.filterBar}>
-          {FILTER_OPTIONS.map(({ id, labelKey }) => {
-            const selected = statusFilter === id
-            const count = id === 'running' ? filterCounts.running : id === 'pending' ? filterCounts.pending : 0
-            return (
-              <button
-                key={id}
-                type="button"
-                className={clsx(
-                  styles.filterChip,
-                  styles.statusChip,
-                  selected && styles.filterChipActive,
-                )}
-                aria-pressed={selected}
-                onClick={() => setStatusFilter(id)}
-              >
-                {t(labelKey)}
-                {selected && id !== 'all' ? ` ${count}` : ''}
-              </button>
-            )
-          })}
+          {showStatusBar ? (
+            <div className={styles.filterBar}>
+              {FILTER_OPTIONS.map(({ id, labelKey }) => {
+                const selected = statusFilter === id
+                const count = id === 'running' ? filterCounts.running : id === 'pending' ? filterCounts.pending : 0
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    className={clsx(
+                      styles.filterChip,
+                      styles.statusChip,
+                      selected && styles.filterChipActive,
+                    )}
+                    aria-pressed={selected}
+                    onClick={() => setStatusFilter(id)}
+                  >
+                    {t(labelKey)}
+                    {selected && id !== 'all' ? ` ${count}` : ''}
+                  </button>
+                )
+              })}
+            </div>
+          ) : null}
         </div>
       ) : null}
 

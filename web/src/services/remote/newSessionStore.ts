@@ -56,7 +56,8 @@ import { create } from 'zustand'
 
 import { createId } from '../../utils/id.js'
 import { translate } from '../../i18n/index.js'
-import { outcomeToken, uploadAttachment } from './upload.js'
+import { outcomeToken, readRemoteTransport, uploadAttachment, workspaceUploadLimitBytes } from './upload.js'
+import { compressImageFile, isCompressibleImage } from './imageCompress.js'
 import {
   applyPermissionPreset,
   applySessionModel,
@@ -1254,11 +1255,28 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       const blocks: RemotePromptAttachment[] = []
       for (const draft of drafts) {
         try {
-          const bytes = new Uint8Array(await draft.file.arrayBuffer())
+          /*
+           * 图片先压再传（与聊天页 `workspacePaneStore.uploadOne` 同一条策略）：
+           * 手机照片 6–15 MiB 在 relay 上直接超限，压到 1–2 MiB 才传得上去。
+           * 压不动就原样传，绝不因此拦下文件。
+           */
+          let payload: Blob = draft.file
+          let name = draft.name
+          let mediaType = draft.mediaType
+          if (isCompressibleImage({ type: draft.mediaType ?? draft.file.type, name: draft.name })) {
+            const cap = Math.floor(workspaceUploadLimitBytes(readRemoteTransport()) * 0.85)
+            const compressed = await compressImageFile(draft.file, cap)
+            if (compressed.compressed) {
+              payload = compressed.blob
+              name = compressed.name
+              mediaType = compressed.mediaType
+            }
+          }
+          const bytes = new Uint8Array(await payload.arrayBuffer())
           const outcome = await uploadAttachment(target, sessionId!, {
-            name: draft.name,
+            name,
             bytes,
-            ...(draft.mediaType === undefined ? {} : { mediaType: draft.mediaType }),
+            ...(mediaType === undefined ? {} : { mediaType }),
           })
           blocks.push({ type: 'file', receiptId: outcomeToken(outcome) })
         } catch (error) {

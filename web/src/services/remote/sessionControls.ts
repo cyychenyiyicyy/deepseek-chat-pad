@@ -320,6 +320,97 @@ export const permissionProjectionOf = (
   return { currentValue, options: parsePermissionCatalog(value.options) }
 }
 
+/**
+ * 从会话投影的 `values` 里取**当前权限预设** —— 多路兼容。
+ *
+ * 为什么不能只认一个位置：这个值在不同版本里落的地方不一样，认错就等于「没拿到」
+ * （界面上表现为「权限模式显示的和实际用的不一样」）。四路依次试：
+ *
+ *   ① `values.permission` 是字符串 —— Host 的会话级预设（`session/create` 同名字段：
+ *      dsh-Go `new_chat_modes.dart:75` 的 `'permission': permission`）；
+ *   ② `values.permission.{preset|currentValue}` —— 包成对象时；
+ *   ③ `values.permissions.currentValue` —— client-core 的 `session/permissions` 投影；
+ *   ④ `values.permissionPreset` —— 某些版本把 dsh_client 的派生字段直接摊进 values。
+ *
+ * 一条都取不到就返回 `undefined`：**绝不猜默认值**（猜错正是「显示与实际不一致」的来源）。
+ */
+export const permissionPresetOfValues = (values: Record<string, unknown>): string | undefined => {
+  const direct = asString(values.permission)
+  if (direct !== undefined) return direct
+  if (isRecord(values.permission)) {
+    const nested = asString(values.permission.preset) ?? asString(values.permission.currentValue)
+    if (nested !== undefined) return nested
+  }
+  if (isRecord(values.permissions)) {
+    const current = asString(values.permissions.currentValue) ?? asString(values.permissions.preset)
+    if (current !== undefined) return current
+  }
+  return asString(values.permissionPreset)
+}
+
+/*
+ * 权限预设的**按会话缓存**。
+ *
+ * 为什么需要它（而 `projectionCache` 不够）：
+ *   1. 权限可以从三个地方来 —— `session/follow` 快照的 projections、`session/control`
+ *      的帧、用户刚点的 `/permission`；三者到达顺序不固定，必须收敛到同一个值；
+ *   2. `session/control` 打不开的老 Host 上只有快照那一份 —— 不缓存就永远是 null
+ *      （界面显示默认，实际不是）；
+ *   3. 切走再切回：`applyProjection()` 只读投影缓存，权限若是从快照来的就丢了。
+ *
+ * `seq` 是防旧覆盖用的：dsh-Go 的 `SessionPanelsController` 给每个 key 记 `_keySeq`
+ * （`session_detail_state.dart:96-99`），乱序帧比新值旧就不许写。
+ */
+const presetBySession = new Map<string, string>()
+const presetSeqBySession = new Map<string, number>()
+
+/** 记一条权限预设（快照 / control 帧 / 切换成功都走这里）。`seq` 给了就防旧覆盖。 */
+export const noteSessionPermissionPreset = (sessionId: string, preset: string | undefined, seq?: number): void => {
+  if (preset === undefined || preset.length === 0) return
+  if (seq !== undefined) {
+    const known = presetSeqBySession.get(sessionId)
+    if (known !== undefined && seq < known) return
+    presetSeqBySession.set(sessionId, seq)
+  }
+  presetBySession.set(sessionId, preset)
+  if (sessionId === currentSessionId) {
+    useChatControls.setState({ currentPermission: preset, permissionAccess: 'available' })
+  }
+}
+
+/** 某个会话已知的权限预设（没有就是 `undefined`；排障/自测用）。 */
+export const permissionPresetOfSession = (sessionId: string): string | undefined => presetBySession.get(sessionId)
+
+/**
+ * 把 `session/follow` 快照里的 `projections` 收进来（**权限的权威种子**）。
+ *
+ * 形状有三种，逐层兜（都是实际见过的）：
+ *   - `{permissionPreset, asOfSeq, values}`（dsh_client 的 `SessionProjections`）；
+ *   - `{values: {permission: …}}`；
+ *   - `{[sessionId]: {asOfSeq, values}}`（`session/control` 的 baseline 用过这种）。
+ */
+export const noteSnapshotProjections = (sessionId: string, projections: unknown): void => {
+  if (!isRecord(projections)) return
+  const direct = asString(projections.permissionPreset)
+  if (direct !== undefined) {
+    noteSessionPermissionPreset(sessionId, direct)
+    return
+  }
+  const blocks: unknown[] = []
+  if (isRecord(projections.values)) blocks.push(projections.values)
+  if (isRecord(projections[sessionId])) blocks.push(projections[sessionId])
+  blocks.push(projections)
+  for (const block of blocks) {
+    if (!isRecord(block)) continue
+    const values = isRecord(block.values) ? block.values : block
+    const preset = permissionPresetOfValues(values)
+    if (preset !== undefined) {
+      noteSessionPermissionPreset(sessionId, preset)
+      return
+    }
+  }
+}
+
 /** `/permission <preset>` 的合法 preset 形状（与 `sessionsApi.ts:1335`、client-core 同一判据）。 */
 export const PERMISSION_PRESET_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
@@ -895,6 +986,8 @@ export const useChatControls = create<ChatControlsState>(() => ({
         return false
       }
       useChatControls.setState({ currentPermission: preset, error: null })
+      // 同一条值也进按会话缓存：下一次不含权限键的投影/切会话不会把它冲掉
+      noteSessionPermissionPreset(sessionId, preset)
       return true
     } catch (error) {
       if (isUnsupportedError(error)) {
@@ -1214,6 +1307,9 @@ export const applyControlFrame = (item: unknown): void => {
     for (const [sessionId, block] of Object.entries(projections)) {
       if (!isRecord(block) || !isRecord(block.values)) continue
       projectionCache.set(sessionId, { ...(projectionCache.get(sessionId) ?? {}), ...block.values })
+      // baseline 里的权限键可能不叫 `permissions`：用同一套多路解析收进按会话缓存
+      const preset = permissionPresetOfValues(block.values)
+      if (preset !== undefined) noteSessionPermissionPreset(sessionId, preset)
     }
     useChatControls.setState({ projectionAccess: 'available' })
     if (currentSessionId !== null) applyProjection(currentSessionId)
@@ -1235,6 +1331,13 @@ export const applyControlFrame = (item: unknown): void => {
   }
   projectionCache.set(sessionId, cache)
   useChatControls.setState({ projectionAccess: 'available' })
+  /*
+   * 权限跟着帧更新，并带 `seq` 防旧覆盖（乱序帧比已知值旧就不许写回 ——
+   * dsh-Go 的 `_keySeq` 同一个道理）。
+   */
+  const seq = typeof item.seq === 'number' ? item.seq : undefined
+  const preset = permissionPresetOfValues(cache)
+  if (preset !== undefined) noteSessionPermissionPreset(sessionId, preset, seq)
   if (sessionId === currentSessionId) applyProjection(sessionId)
 }
 
@@ -1249,11 +1352,20 @@ const applyProjection = (sessionId: string): void => {
   const values = projectionCache.get(sessionId) ?? {}
   const model = modelSelectionOfProjection(values.modelSelection)
   const permissions = permissionProjectionOf(values.permissions)
+  /*
+   * 权限预设：投影里有多路来源（见 `permissionPresetOfValues`），取不到就**沿用缓存**。
+   * 这里以前写的是 `permissions?.currentValue ?? null` —— 只认 `permissions` 一个位置，
+   * 而且取不到就清成 null：于是 Host 用的是 `permission` 键时，界面永远显示「默认」，
+   * 用户看到的就是「权限模式跟实际用的不一样」。也顺带避免了「一次不含权限键的投影
+   * 把刚点出来的值清掉」。
+   */
+  const preset = permissionPresetOfValues(values) ?? presetBySession.get(sessionId) ?? null
+  if (preset !== null) presetBySession.set(sessionId, preset)
   const catalog = useChatControls.getState().modelCatalog
   useChatControls.setState({
     title: asString(values.title) ?? null,
     currentModel: model ?? useChatControls.getState().currentModel ?? catalog?.defaultModel ?? null,
-    currentPermission: permissions?.currentValue ?? null,
+    currentPermission: preset,
     permissions:
       permissions !== null && permissions.options.length > 0
         ? permissions.options

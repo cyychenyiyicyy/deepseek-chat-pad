@@ -149,6 +149,8 @@ export const zh = {
   uploadFile: '上传文件',
   chatInputStopButtonTooltip: '停止生成',
   uploadMaxMBSize: '单个文件大小超过限制（{size}MB），请调整后重试',
+  uploadCompressing: '正在压缩…',
+  uploadCompressed: '已压缩 {from} → {to}',
   uploadMaxFiles: '上传文件最多支持 {count} 个',
   uploadFileStatusUploading: '上传中...',
   uploadServerBusy: '服务器繁忙',

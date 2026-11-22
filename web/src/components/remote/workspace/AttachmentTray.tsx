@@ -41,13 +41,20 @@ const AttachmentChip = ({ attachment }: { attachment: DraftAttachment }) => {
   const uploading = attachment.status === 'uploading'
   const percent = Math.round(attachment.progress * 100)
   const inWorkspace = attachment.status === 'done' && attachment.remotePath !== undefined
+  /** 被客户端压缩过就把「原体积 → 现体积」标出来，用户才知道传上去的不是原图 */
+  const compressedTag =
+    attachment.compressedFrom === undefined
+      ? ''
+      : ` · ${t('uploadCompressed', { from: formatSize(attachment.compressedFrom), to: formatSize(attachment.size) })}`
   const meta = failed
     ? attachment.error ?? t('workspacePaneAttachFailed')
-    : uploading
-      ? `${t('workspacePaneAttachUploading')} ${percent}%`
-      : inWorkspace
-        ? `${t('uploadRemoteWorkspaceSaved')}${attachment.reference === undefined ? '' : ` · ${attachment.reference}`}`
-        : formatSize(attachment.size)
+    : attachment.compressing === true
+      ? t('uploadCompressing')
+      : uploading
+        ? `${t('workspacePaneAttachUploading')} ${percent}%`
+        : inWorkspace
+          ? `${t('uploadRemoteWorkspaceSaved')}${attachment.reference === undefined ? '' : ` · ${attachment.reference}`}${compressedTag}`
+          : `${formatSize(attachment.size)}${compressedTag}`
   return (
     <div
       className={clsx(styles.chip, failed && styles.chipFailed, inWorkspace && styles.chipWorkspace)}

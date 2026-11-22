@@ -1663,6 +1663,36 @@ export function nativeEventOfFollowItem(item: unknown): NativeSessionEvent | und
   return last?.event
 }
 
+/**
+ * 从一条 follow item 里取 `permission/preset` 事件（没有就 `undefined`）。
+ *
+ * 为什么必须看它：会话进行中改权限（界面点胶囊、Host 侧自动降级、或别的客户端改的）
+ * 在日志里只留一条 `permission/preset` 事件。只靠 `session/control` 的投影的话，
+ * 老 Host 不推那条流、或者帧来晚一步，界面就停在旧值 ——
+ * 用户原话：「权限模式显示的和实际用的不一样」。权限以**日志事件**为准最稳，
+ * dsh-Go 也是这么折的（`session_modes.dart` 的 `PermissionPresetChangedEvent`）。
+ *
+ * 形状：`{type:'permission/preset', data:{preset:'read-only'}}`；有些版本把 `preset`
+ * 摊在事件顶层，两个位置都读。
+ */
+export function permissionPresetOfFollowItem(item: unknown): string | undefined {
+  for (const entry of entriesFromFollowValue(item)) {
+    if (entry.event.type !== 'permission/preset') continue
+    const fromData = stringValue(entry.event.data.preset) ?? stringValue(entry.event.data.value)
+    if (fromData !== undefined && fromData.length > 0) return fromData
+  }
+  /*
+   * 顶层摊平的写法（`{type:'permission/preset', preset:'auto'}`）会被
+   * `historyEntryFromEvent()` 规范化掉（它只保留 type/seq/time/data），所以这里从**原始帧**
+   * 再读一次。少了这一步，只发顶层字段的 Host 改权限时界面不会跟。
+   */
+  if (isRecord(item) && isRecord(item.event) && item.event.type === 'permission/preset') {
+    const flat = stringValue(item.event.preset) ?? stringValue(item.event.value)
+    if (flat !== undefined && flat.length > 0) return flat
+  }
+  return undefined
+}
+
 /** `$events` 的 `ready` item（拿到 clientId 才能应答审批）。 */
 export function eventClientIdOf(item: unknown): string | undefined {
   if (!isRecord(item) || item.type !== 'ready') return undefined

@@ -32,6 +32,7 @@ import {
   type UploadStrategy,
   type UploadUnavailableReason,
 } from '../../../services/remote/upload.js'
+import { compressImageFile, isCompressibleImage } from '../../../services/remote/imageCompress.js'
 import { useRemoteStore } from '../../../services/remote/store.js'
 
 /**
@@ -145,6 +146,12 @@ export interface DraftAttachment {
   error?: string
   /** 重试用的原始字节（失败时留着；成功后释放）。 */
   bytes?: Uint8Array
+  /** 正在客户端压缩（图片），界面据此说「压缩中…」而不是干等。 */
+  compressing?: boolean
+  /** 压缩前的原始体积（有值 = 这张图被压过，界面可以标「已压缩 6.1MB → 1.2MB」）。 */
+  compressedFrom?: number
+  /** 压缩的说明（没压 / 压了也超限的原因；只进日志与 tooltip，不阻断上传）。 */
+  compressionNote?: string
 }
 
 export interface WorkspacePaneState {
@@ -622,8 +629,12 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
         status: 'uploading',
         progress: 0,
       }
-      // 两条通道都装不下：本地就判死，别把几十上百 MiB 读进内存再被拒
-      if (uploadTooLargeHint(file.size)) {
+      /*
+       * 本地提前判死只对**压不了的类型**生效：图片先交给压缩（手机照片 6–15 MiB，
+       * 压完通常 1–2 MiB，relay 的 20 MiB 天花板就够用了）。这里以前对图片也一刀切，
+       * 于是「传张照片提示太大」——正是用户报的那个问题。
+       */
+      if (!isCompressibleImage(file) && uploadTooLargeHint(file.size)) {
         queued.push({ ...entry, status: 'error', error: '这个文件超过本条连接的上传上限' })
         tooLarge.push(entry)
         continue
@@ -705,18 +716,49 @@ const patchAttachment = (id: string, patch: Partial<DraftAttachment>): void => {
 }
 
 const uploadOne = async (id: string, file: File): Promise<void> => {
+  let payload: Blob = file
+  let name = file.name
+  let mediaType = file.type
+  let size = file.size
+  /*
+   * 图片先压再传（`imageCompress.ts` 的注释写了为什么）：
+   *   - 目标体积取**工作区上限的 85%**（工作区通道是 relay 上唯一的通道，留点余量）；
+   *   - 压不动 / 压了还超 → 原样上传，让上传链按原规则去试，绝不因为压缩失败而拦下文件。
+   */
+  if (isCompressibleImage(file)) {
+    patchAttachment(id, { compressing: true, progress: 0 })
+    try {
+      const target = Math.floor(workspaceUploadLimitBytes(readRemoteTransport()) * 0.85)
+      const result = await compressImageFile(file, target)
+      if (result.compressed) {
+        payload = result.blob
+        name = result.name
+        mediaType = result.mediaType
+        size = result.bytes
+        patchAttachment(id, {
+          name,
+          size,
+          mediaType,
+          compressedFrom: result.originalBytes,
+          compressionNote: undefined,
+        })
+      } else if (result.note !== undefined) {
+        patchAttachment(id, { compressionNote: result.note })
+      }
+    } catch {
+      // 压缩是优化：任何意外都退回原图，不影响上传
+    } finally {
+      patchAttachment(id, { compressing: false })
+    }
+  }
   let bytes: Uint8Array
   try {
-    bytes = new Uint8Array(await file.arrayBuffer())
+    bytes = new Uint8Array(await payload.arrayBuffer())
   } catch {
     patchAttachment(id, { status: 'error', progress: 0, error: '读不到这个文件（本地读取失败）' })
     return
   }
-  await uploadBytes(
-    id,
-    { name: file.name, bytes, ...(file.type.length === 0 ? {} : { mediaType: file.type }) },
-    file.size,
-  )
+  await uploadBytes(id, { name, bytes, ...(mediaType.length === 0 ? {} : { mediaType }) }, size)
 }
 
 /** 上传失败 → 一句人话（附件的错误码映射；`UPLOAD_UNAVAILABLE` 再带上原因）。 */

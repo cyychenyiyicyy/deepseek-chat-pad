@@ -15,25 +15,27 @@
   scrollbar-color: var(--scroll-color) transparent;
 }
 
-/* ── 新建对话（R4）：列表顶部一行，比搜索框更显眼（主色描边 + 品牌色文字） ── */
+/* ── 新建对话（R4 / R20 排版）：挪进标题行右侧，做成 28px 胶囊 ──
+   dsh-Go 把它放在品牌行里（`sessions_drawer.dart` 的 `NewChatButton`），
+   不占一整行 —— 原来这里是一条 36px 的通栏主按钮，加上标题 / 搜索 / 两排胶囊，
+   列表被顶掉 5 行。 */
 .newChat {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 5px;
   box-sizing: border-box;
-  width: 100%;
-  height: 36px;
-  margin: 0 0 6px;
+  height: 28px;
+  margin: 0;
   padding: 0 10px;
   border: 1px solid var(--dsw-alias-button-ghost-active-border);
   border-radius: 100px;
   background-color: var(--dsw-alias-button-ghost-active-fill);
   color: var(--dsw-alias-brand-text);
   font: inherit;
-  font-size: 13px;
-  line-height: 20px;
+  font-size: 12px;
+  line-height: 18px;
   font-weight: 500;
   white-space: nowrap;
   cursor: pointer;
@@ -47,6 +49,17 @@
 
   &:active {
     border-color: var(--dsw-alias-brand-text);
+  }
+}
+
+/* 抽屉很窄时只留图标：标题行还要放「会话」与刷新键，文字可以被省略 */
+@media (max-width: 359px) {
+  .newChatText {
+    display: none;
+  }
+
+  .newChat {
+    padding: 0 8px;
   }
 }
 
@@ -237,7 +250,8 @@
   align-items: center;
   gap: 5px;
   box-sizing: border-box;
-  margin: 0 0 6px;
+  /* 行间距交给 .filterRow（R20：两排胶囊并成一行） */
+  margin: 0;
   padding: 0 10px 0 8px;
   height: 30px;
   border: 1px solid var(--dsw-alias-border-l2);
@@ -288,20 +302,28 @@
   text-align: left;
 }
 
-/* ── [D] 状态筛选胶囊行（drawer_filter_bar.dart:15-70） ────────────────────
-   全部 / 运行中 / 待确认，水平排列、可横向滚动（大字号放不下就横滑，不出滚动条）。
-   胶囊本体复用上面的 .filterChip（30px 高、选中品牌色淡底描边）。 */
-.filterBar {
+/* ── [R20 排版] 工作区胶囊 + 状态胶囊共用的一行 ──────────────────────────
+   整行横向可滚（大字号放不下就横滑，不出滚动条），两层筛选同时生效。 */
+.filterRow {
   display: flex;
   flex-shrink: 0;
+  align-items: center;
   gap: 8px;
   margin: 0 0 6px;
   overflow-x: auto;
   scrollbar-width: none;
 }
 
-.filterBar::-webkit-scrollbar {
+.filterRow::-webkit-scrollbar {
   display: none;
+}
+
+/* ── [D] 状态筛选（drawer_filter_bar.dart:15-70）：胶囊本体复用 .filterChip ── */
+.filterBar {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+  margin: 0;
 }
 
 /* 状态胶囊是纯文字（工作区那粒带 icon/chevron）：左右 padding 对称，间距交给容器 */

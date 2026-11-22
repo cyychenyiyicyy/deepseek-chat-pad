@@ -157,6 +157,8 @@ export const en = {
   uploadFile: 'Upload files',
   chatInputStopButtonTooltip: 'Stop',
   uploadMaxMBSize: 'File exceeds the size limit ({size} MB). Please adjust and try again.',
+  uploadCompressing: 'Compressing…',
+  uploadCompressed: 'Compressed {from} → {to}',
   uploadMaxFiles: 'You can upload up to {count} files',
   uploadFileStatusUploading: 'Uploading...',
   uploadServerBusy: 'Server busy',

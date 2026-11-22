@@ -31,6 +31,7 @@ import {
   type WorkspaceSyncPush,
 } from '../workspaces.js'
 import type { StreamEventPayload } from '../core/index.js'
+import { sessionBelongsToWorkspace } from '../../../components/remote/workspace/workspaceItems.js'
 
 /* ── 最小断言器（与其它 selftest 同一套写法） ─────────────────────────── */
 
@@ -696,6 +697,50 @@ check('D4：loadInventory 在 workspace/follow 缺端点时仍给出派生列表
   assertEqual(state.workspaces.map((item) => item.workspaceId), ['ws-1', 'ws-2'], '派生列表照常给出')
   assertEqual(state.workspaceSource, 'derived', '来源标记 derived')
   uninstallWorkspaceSync()
+})
+
+/* ══════════════════════════════════════════════════════════════════════
+ * E. 工作区筛选的会话归属（真机 bug：筛了工作区说「没有」，实际有）
+ * ══════════════════════════════════════════════════════════════════════ */
+
+check('E1 会话行带 workspaceId：直接命中', async () => {
+  assertTrue(
+    sessionBelongsToWorkspace({ id: 's-1', workspaceId: 'ws-a' }, 'ws-a'),
+    'workspaceId 相等就是属于',
+  )
+  assertEqual(
+    sessionBelongsToWorkspace({ id: 's-1', workspaceId: 'ws-b' }, 'ws-a'),
+    false,
+    '别的 workspaceId 不属于',
+  )
+})
+
+check('E2 会话行**没有** workspaceId，但工作区 sessionIds 里有它：必须命中', async () => {
+  // 这正是真机现场：Host 不把 workspaceId 投影到 session/list 行上，
+  // 只认 workspaceId 的话这一筛就是空列表 —— 用户看到的就是「显示没有，实际有」。
+  assertEqual(
+    sessionBelongsToWorkspace({ id: 's-9' }, 'ws-a', ['s-8', 's-9']),
+    true,
+    '成员表命中必须算属于',
+  )
+  assertEqual(
+    sessionBelongsToWorkspace({ id: 's-7' }, 'ws-a', ['s-8', 's-9']),
+    false,
+    '不在成员表里的不能算',
+  )
+})
+
+check('E3 两边都命中也只算一次（布尔判定，天然去重）', async () => {
+  assertTrue(
+    sessionBelongsToWorkspace({ id: 's-1', workspaceId: 'ws-a' }, 'ws-a', ['s-1']),
+    '两条判据都真时仍是属于',
+  )
+})
+
+check('E4 没有成员表时不能「放行全部」', async () => {
+  assertEqual(sessionBelongsToWorkspace({ id: 's-1' }, 'ws-a'), false, '无 workspaceId、无成员表 → 排除')
+  assertEqual(sessionBelongsToWorkspace({ id: 's-1' }, 'ws-a', []), false, '空成员表 → 排除（不是全通过）')
+  assertEqual(sessionBelongsToWorkspace({ id: 's-1' }, 'ws-a', undefined), false, 'undefined 成员表 → 排除')
 })
 
 /* ── 跑 ───────────────────────────────────────────────────────────────── */
