@@ -1,17 +1,18 @@
 /*
- * 新建会话**页**（W6）。
+ * 新建会话**页**（W6 起；R15 改为「发消息即建会话」）。
  *
  * 与 W1 那版 `NewSessionPanel` 的区别只有形态：那时它是从右边滑出来的一列（420px + 遮罩），
  * 现在它是**一个真实视图** —— 平板/桌面铺满右侧内容区、手机整屏覆盖，会话列表照旧在左边。
  * 层级照 dsh-Go 的 `chat/empty_state.dart` + `chat/new_chat_options.dart`：
  *
  *   顶部一行（返回 + 标题）→ 居中一列（淡装饰 / 大标题 / 一句说明 / 工作区大胶囊 /
- *   三个小胶囊 / 提示行）→ 底部吸底（取消 + 创建并开始）
+ *   三个小胶囊 / 提示行）→ 底部是**会话页同一个输入框**（由 `RemoteChatView` 传入，
+ *   样式与规则天然一致 —— R15 起这一页没有自己的操作按钮了）
  *
  * 尺寸：
  *   - 内容列 max-width 560（dsh-Go 的空态控件列是 `readingWidth - 2*floatInset = 696`，
  *     这里窄一点，因为本页没有建议卡片网格，太宽会显得散）；
- *   - 控件三档：工作区大胶囊 44 / 选项小胶囊 34 / 底部按钮 40；
+ *   - 控件两档：工作区大胶囊 44 / 选项小胶囊 34；
  *   - 节奏：装饰 40 + 12 → 标题 22/28 → 4 → 说明 14 → 16 → 工作区胶囊 → 12 → 选项行 → 24 → 提示行。
  * 颜色一律走 `theme.css` 的 dsw-* 变量，暗色/亮色自动跟随。
  */
@@ -338,86 +339,29 @@
   text-align: left;
 }
 
-/* ─────────────────── 底部吸底：取消 + 创建并开始 ─────────────────── */
+/* ─────────────────── 底部：会话页同一个输入框（R15） ─────────────────── */
 
-.footer {
+/*
+ * 输入框本体（`.footer` / `.inputWrapper` / `.textarea`）由 `RemoteChatView` 用**会话页同一份
+ * JSX + 同一份 CSS module** 传进来 —— 这里只给落位与安全区：`flex-shrink: 0` 钉在页尾，
+ * 手机上给 home indicator 留出 `safe-area-inset-bottom`。
+ */
+.composerSlot {
   flex-shrink: 0;
   box-sizing: border-box;
-  padding: 12px 20px calc(12px + env(safe-area-inset-bottom, 0px));
-  border-top: 1px solid var(--dsw-alias-border-l2);
+  padding: 0 8px calc(10px + env(safe-area-inset-bottom, 0px));
   background-color: var(--dsw-alias-bg-base);
 }
 
-/* 与上面那列同宽：主按钮的中线与工作区胶囊的中线对齐 */
-.footerInner {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  box-sizing: border-box;
-  width: 100%;
-  max-width: 696px;
-  margin: 0 auto;
-}
-
-.footerButtons {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.secondaryPill {
-  box-sizing: border-box;
-  height: 40px;
-  padding: 0 22px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 100px;
-  background: none;
-  font: inherit;
-  font-size: 14px;
-  line-height: 20px;
-  color: var(--dsw-alias-label-primary);
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.secondaryPill:hover {
-  background-color: var(--dsw-specific-sidebar-nav-item-hover);
-}
-
-.primaryPill {
-  box-sizing: border-box;
-  height: 40px;
-  padding: 0 24px;
-  border: none;
-  border-radius: 100px;
-  background-color: var(--dsw-alias-button-primary-fill);
-  font: inherit;
-  font-size: 14px;
-  line-height: 20px;
-  font-weight: 600;
-  color: var(--dsw-alias-brand-primary-invert);
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.primaryPill:hover:not(:disabled) {
-  filter: brightness(1.05);
-}
-
-.primaryPill:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.spinner {
-  display: inline-flex;
+/* 顶栏右侧「正在创建…」的小角标（R15）：输入框那边已有提示文案，这里只是安静一记 */
+.creatingBadge {
   flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 100px;
+  font-size: 11px;
+  line-height: 16px;
   color: var(--dsw-alias-label-tertiary);
-  animation: ns-spin 1s linear infinite;
+  user-select: none;
 }
 
 /* ── 文字状态 ── */
@@ -452,59 +396,6 @@
   color: var(--dsw-alias-label-error, #d9534f);
   text-align: center;
   overflow-wrap: anywhere;
-}
-
-/* 模型应用失败：一快卡片 + 两个明确出口（重试 / 跳过用默认模型） */
-.failureCard {
-  box-sizing: border-box;
-  width: 100%;
-  padding: 12px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 14px;
-  background-color: rgb(255 255 255 / 5%);
-}
-
-.failureText {
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-error, #d9534f);
-  overflow-wrap: anywhere;
-}
-
-.failureActions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.failurePrimary,
-.failureSecondary {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 32px;
-  padding: 0 14px;
-  border-radius: 100px;
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.failurePrimary {
-  border: none;
-  background-color: var(--dsw-alias-button-primary-fill);
-  color: var(--dsw-alias-brand-primary-invert);
-}
-
-.failureSecondary {
-  border: 1px solid var(--dsw-alias-border-l2);
-  background: none;
-  color: var(--dsw-alias-label-primary);
-}
-
-.inlineIcon {
-  display: inline-flex;
 }
 
 /* ────────────────────────────── 短列表 ────────────────────────────── */
@@ -980,18 +871,11 @@
   }
 }
 
-@keyframes ns-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 /* 尊重系统「减弱动态效果」 */
 @media (prefers-reduced-motion: reduce) {
   .page,
   .sheetBackdrop,
-  .sheet,
-  .spinner {
+  .sheet {
     animation: none;
   }
 }
@@ -999,23 +883,12 @@
 /* ────────────────────────────── 手机（<768px） ────────────────────────────── */
 
 @media not all and (min-width: 768px) {
-  /* 手机上内容更靠上一点：底部按钮已经吃掉一截，再居中就会显得挤 */
+  /* 手机上内容更靠上一点：输入框已经吃掉一截，再居中就会显得挤 */
   .column {
     padding: 20px 12px 32px;
   }
 
-  .footer {
-    padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px));
-  }
-
-  /* 手机上「取消」按内容宽、主操作吃掉剩下的宽度（两者都吸底） */
-  .footerButtons .secondaryPill {
-    flex: 0 0 auto;
-  }
-
-  .footerButtons .primaryPill {
-    flex: 1;
-    width: auto;
-    min-width: 0;
+  .composerSlot {
+    padding: 0 6px calc(10px + env(safe-area-inset-bottom, 0px));
   }
 }

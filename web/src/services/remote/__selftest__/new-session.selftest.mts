@@ -22,9 +22,9 @@
  *    10. `session/search`：空查询不发请求、>500 字符 → `INVALID_ARGUMENT`。
  *   C. store 级（注入假 target + 假 phase，全程不联网）
  *    11. 连接就绪后 `openPanel()`：工作区 / 权限目录 / agent preset / 默认模型都进 state；
- *    12. `createAndOpen()`：`session/create` 带 workspaceId，权限预设走 `/permission <preset>`，
- *        最后 `openSession(newId)`；
- *    13. 能力缺失（一律 `METHOD_NOT_FOUND`）：所有能力关掉、`createAndOpen()` 不发 create；
+ *    12. [R15] `createAndSend(text)`：`session/create` 带 workspaceId，权限预设走 `/permission <preset>`，
+ *        模型走 selectModel → `openSession(newId)` → **把这条消息发出去**；
+ *    13. 能力缺失（一律 `METHOD_NOT_FOUND`）：所有能力关掉、`createAndSend()` 不发 create 也不发消息；
  *    14. 搜索本地回退：远端 `gateway/internal` ⇒ `search.local === true` 且命中来自标题。
  *   D. 会话管理端点
  *    15. 归档 / 取消归档 / 置顶 / 取消置顶 的端点、参数与「整套 id 列表」覆盖；
@@ -209,9 +209,10 @@ const endpointCount = (fake: FakeTarget, endpoint: string): number =>
 const connectFake = (
   fake: FakeTarget,
   options: { sessionList?: unknown[] } = {},
-): { opened: string[]; refreshed: number[] } => {
+): { opened: string[]; refreshed: number[]; sent: string[] } => {
   const opened: string[] = []
   const refreshed: number[] = []
+  const sent: string[] = []
   observeRemoteTarget(fake.target)
   useRemoteStore.setState({
     phase: 'ready',
@@ -226,12 +227,16 @@ const connectFake = (
     refreshSessions: async () => {
       refreshed.push(Date.now())
     },
+    // [R15] createAndSend 的最后一步是 send(text)：这里不接住就会走真 sendFlow
+    send: async (text: string) => {
+      sent.push(text)
+    },
   })
   if (options.sessionList !== undefined) {
     // 用 session/list 的行喂给 store 的列表投影（`ensureWorkspaceFlags` 读的是它）
     useRemoteStore.setState({ sessions: [] })
   }
-  return { opened, refreshed }
+  return { opened, refreshed, sent }
 }
 
 const resetNewSession = (): void => {
@@ -257,7 +262,6 @@ const resetNewSession = (): void => {
     modelCatalogLoaded: false,
     modelPick: null,
     modelApply: { status: 'idle' },
-    createdSessionId: null,
     sheet: null,
     creating: false,
     lastCreatedSessionId: null,
@@ -568,7 +572,7 @@ check('C11：连接就绪后 refresh() 把工作区 / 预设 / 模型目录都�
   assertEqual(state.error, null, '没有残留错误')
 })
 
-check('C12：createAndOpen 走 session/create → /permission → selectModel → openSession(newId)', async () => {
+check('C12：createAndSend 走 session/create → /permission → selectModel → openSession → send(text)', async () => {
   resetNewSession()
   const fake = fakeTarget(FULL_REPLIES)
   const observed = connectFake(fake)
@@ -579,8 +583,8 @@ check('C12：createAndOpen 走 session/create → /permission → selectModel �
   useNewSessionStore.getState().selectPermission('danger-full-access')
   useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4', 'max')
 
-  const created = await useNewSessionStore.getState().createAndOpen()
-  assertEqual(created, 's-new', '返回新会话 id')
+  const sent = await useNewSessionStore.getState().createAndSend('帮我把这个界面修好')
+  assertEqual(sent, true, '建会话 + 发消息成功')
 
   const createCall = callAt(fake, fake.calls.findIndex((call) => (call.params as { endpoint?: string }).endpoint === 'session/create'))
   assertEqual(createCall.args, { request: { workspaceId: 'ws-1', agentPreset: 'work' } }, 'session/create 的参数（**没有** model 字段）')
@@ -603,13 +607,15 @@ check('C12：createAndOpen 走 session/create → /permission → selectModel �
   }, '模型 + 思考强度走 session/selectModel')
 
   assertEqual(observed.opened, ['s-new'], '建完就进会话')
+  assertEqual(observed.sent, ['帮我把这个界面修好'], '进会话后把这条消息发了出去（R15 的关键一步）')
   assertEqual(useNewSessionStore.getState().open, false, '建完关面板')
   assertEqual(useNewSessionStore.getState().lastCreatedSessionId, 's-new', '记住新建的 id')
+  assertEqual(useNewSessionStore.getState().notice, null, '一路成功就没有 notice')
   assertEqual(useNewSessionStore.getState().modelApply.status, 'idle', '模型应用成功')
   assertEqual(useNewSessionStore.getState().modelApply.via, 'select', '先走 selectModel')
 })
 
-check('C13：能力缺失时整块关掉，createAndOpen 一个 create 请求都不发', async () => {
+check('C13：能力缺失时整块关掉，createAndSend 一个请求都不发', async () => {
   resetNewSession()
   const missing: Record<string, Reply> = {
     'session/list': { ok: false, code: 'METHOD_NOT_FOUND', message: 'no such endpoint' },
@@ -633,11 +639,13 @@ check('C13：能力缺失时整块关掉，createAndOpen 一个 create 请求都
   assertEqual(state.workspaces, [], '没有工作区数据（派生也没有）')
   assertTrue(state.error !== null, '面板里留一行说明（不是弹窗）')
 
-  // UI 里「创建并进入」按钮此时是 disabled 的，点了也不该发请求
-  const created = await useNewSessionStore.getState().createAndOpen()
-  assertEqual(created, null, '不创建')
+  // 输入框此时发不出去（R15：canSubmit 会被 capabilities.create 拦住），点了也不该有请求
+  const sent = await useNewSessionStore.getState().createAndSend('帮我把这个界面修好')
+  assertEqual(sent, false, '不创建')
+  assertTrue(useNewSessionStore.getState().error !== null, '失败原因写进 error（页面那行红字）')
   assertEqual(endpointCount(fake, 'session/create'), 0, '没有发 session/create')
   assertEqual(observed.opened, [], '没有打开任何会话')
+  assertEqual(observed.sent, [], '也没有发任何消息')
 })
 
 check('C14：远端搜索不可用 → 本地按标题匹配，并把 search 能力标 false', async () => {
@@ -832,7 +840,7 @@ check('D17：可选端点的解析（目录 / 权限目录 / agent preset / 默�
  * E. 模型 + 思考强度：建完之后怎么应用（本轮新增）
  * ──────────────────────────────────────────────────────────────────────── */
 
-check('E19：selectModel 不可用 → 退回 initializeDefaultModel，会话照样进得去', async () => {
+check('E19：selectModel 不可用 → 退回 initializeDefaultModel，会话照样进得去、消息照样发', async () => {
   resetNewSession()
   const fake = fakeTarget({
     ...FULL_REPLIES,
@@ -846,7 +854,7 @@ check('E19：selectModel 不可用 → 退回 initializeDefaultModel，会话照
   await useNewSessionStore.getState().refresh()
   useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4', 'max')
 
-  assertEqual(await useNewSessionStore.getState().createAndOpen(), 's-new', '仍然建成功')
+  assertEqual(await useNewSessionStore.getState().createAndSend('跑一遍冒烟'), true, '仍然建成功')
   assertEqual(endpointCount(fake, 'session/selectModel'), 1, '先试了 selectModel')
   assertEqual(endpointCount(fake, 'session/initializeDefaultModel'), 1, '再退到 initializeDefaultModel')
   assertEqual(
@@ -856,16 +864,14 @@ check('E19：selectModel 不可用 → 退回 initializeDefaultModel，会话照
   )
   assertEqual(useNewSessionStore.getState().modelApply.via, 'initialize', '记住走的是哪条路')
   assertEqual(observed.opened, ['s-new'], '照常进会话')
+  assertEqual(observed.sent, ['跑一遍冒烟'], '消息也发出去了')
 })
 
-check('E20：两条模型路都失败 → 失败可见（面板停住）+ 跳过 / 重试 两条出路', async () => {
+check('E20：两条模型路都失败 → 不再拦住消息：notice 说明 + 照常进会话照常发（R15）', async () => {
   resetNewSession()
-  let selectModelOk = false
   const fake = fakeTarget({
     ...FULL_REPLIES,
-    'session/selectModel': () => (selectModelOk
-      ? { ok: true, value: { selected: { provider: 'deepseek', model: 'deepseek-v4', reasoningEffort: 'max' }, defaultSave: { status: 'saved' } } }
-      : { ok: false, code: 'AGENT_BUSY', message: '不能切' }),
+    'session/selectModel': { ok: false, code: 'METHOD_NOT_FOUND', message: 'no such endpoint' },
     'session/initializeDefaultModel': { ok: false, code: 'METHOD_NOT_FOUND', message: 'no such endpoint' },
   })
   const observed = connectFake(fake)
@@ -873,45 +879,51 @@ check('E20：两条模型路都失败 → 失败可见（面板停住）+ 跳过
   useNewSessionStore.setState({ open: true })
   useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4', 'max')
 
-  const created = await useNewSessionStore.getState().createAndOpen()
-  assertEqual(created, 's-new', '会话建出来了')
-  const failed = useNewSessionStore.getState()
-  assertEqual(failed.modelApply.status, 'failed', '失败状态可见')
-  assertTrue((failed.modelApply.error ?? '').length > 0, '带上了原因')
-  assertEqual(failed.createdSessionId, 's-new', '记住这个已建好的会话')
-  assertEqual(failed.open, true, '面板**没有**关（让用户看见失败）')
-  assertEqual(observed.opened, [], '还没进会话')
-
-  // 重试一次就通
-  selectModelOk = true
-  await useNewSessionStore.getState().retryModelApply()
-  assertEqual(observed.opened, ['s-new'], '重试成功后进会话')
-  assertEqual(useNewSessionStore.getState().open, false, '这时才关面板')
-  assertEqual(useNewSessionStore.getState().modelApply.status, 'idle', '状态复位')
+  const sent = await useNewSessionStore.getState().createAndSend('先发这条要紧的')
+  assertEqual(sent, true, '会话建出来了，消息也发了')
+  const state = useNewSessionStore.getState()
+  assertEqual(state.open, false, '新建页关掉（没有「停在失败页」这条路了）')
+  assertEqual(observed.opened, ['s-new'], '进了会话')
+  assertEqual(observed.sent, ['先发这条要紧的'], '消息用 Host 默认模型照发')
+  assertEqual(state.modelApply.status, 'idle', '不再停在 failed 态')
+  assertEqual(state.capabilities.model, false, '两条路都是 METHOD_NOT_FOUND ⇒ 模型能力关掉')
+  const notice = state.notice ?? ''
+  assertTrue(notice.length > 0, '有一句 notice（不静默）')
+  assertTrue(notice.includes('已用 Host 默认模型继续'), '说明消息用的默认模型')
 })
 
-check('E21：跳过模型选择 → 用默认模型直接进会话，并留一句提示', async () => {
+check('E20b：AGENT_BUSY 是「忙」不是「缺端点」—— 能力保持，消息照发', async () => {
   resetNewSession()
   const fake = fakeTarget({
     ...FULL_REPLIES,
     'session/selectModel': { ok: false, code: 'AGENT_BUSY', message: '不能切' },
-    'session/initializeDefaultModel': { ok: false, code: 'METHOD_NOT_FOUND', message: 'no such endpoint' },
   })
   const observed = connectFake(fake)
   await useNewSessionStore.getState().refresh()
-  useNewSessionStore.setState({ open: true })
-  useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4')
+  useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4', 'max')
 
-  await useNewSessionStore.getState().createAndOpen()
-  assertEqual(useNewSessionStore.getState().open, true, '失败后面板还开着')
-
-  await useNewSessionStore.getState().skipModelAndOpen()
-  assertEqual(observed.opened, ['s-new'], '跳过之后进会话')
-  assertEqual(useNewSessionStore.getState().open, false, '面板关掉')
-  assertEqual(useNewSessionStore.getState().createdSessionId, null, '失败态清掉')
+  assertEqual(await useNewSessionStore.getState().createAndSend('先发这条'), true, '照样成功')
+  const state = useNewSessionStore.getState()
+  assertEqual(state.capabilities.model, true, '能力不关（只是这次没切成，下次还能再试）')
+  const notice = state.notice ?? ''
+  assertTrue(notice.includes('不能切'), 'notice 带上失败原因')
+  assertTrue(notice.includes('已用 Host 默认模型继续'), '也说明消息用的默认模型')
+  assertEqual(observed.sent, ['先发这条'], '消息照发')
 })
 
-check('E22：defaultSave 失败 ≠ 模型没切成：会话照常进，但提示「默认没存上」', async () => {
+check('E21：空消息 / 纯空白 → 一个请求都不发', async () => {
+  resetNewSession()
+  const fake = fakeTarget(FULL_REPLIES)
+  const observed = connectFake(fake)
+  await useNewSessionStore.getState().refresh()
+
+  assertEqual(await useNewSessionStore.getState().createAndSend('   '), false, '纯空白被拒')
+  assertEqual(endpointCount(fake, 'session/create'), 0, '没有发 session/create')
+  assertEqual(observed.opened, [], '没有打开任何会话')
+  assertEqual(observed.sent, [], '没有发消息')
+})
+
+check('E22：defaultSave 失败 ≠ 模型没切成：会话照常进、消息照常发，但提示「默认没存上」', async () => {
   resetNewSession()
   const fake = fakeTarget({
     ...FULL_REPLIES,
@@ -927,8 +939,9 @@ check('E22：defaultSave 失败 ≠ 模型没切成：会话照常进，但提�
   await useNewSessionStore.getState().refresh()
   useNewSessionStore.getState().pickModel('deepseek', 'deepseek-v4', 'max')
 
-  await useNewSessionStore.getState().createAndOpen()
+  await useNewSessionStore.getState().createAndSend('帮我看看设置')
   assertEqual(observed.opened, ['s-new'], '模型切好了，会话照常进')
+  assertEqual(observed.sent, ['帮我看看设置'], '消息照常发')
   assertEqual(useNewSessionStore.getState().modelApply.defaultSave, 'failed', '记住 defaultSave 失败了')
   const notice = useNewSessionStore.getState().notice ?? ''
   assertTrue(notice.length > 0, '有一句提示（不静默）')
@@ -942,8 +955,9 @@ check('E23：继承 Host 默认（modelPick=null）→ 一个模型端点都不�
   await useNewSessionStore.getState().refresh()
 
   // 不选模型 = 继承 Host 默认
-  await useNewSessionStore.getState().createAndOpen()
+  await useNewSessionStore.getState().createAndSend('直接开聊')
   assertEqual(observed.opened, ['s-new'], '照常进会话')
+  assertEqual(observed.sent, ['直接开聊'], '照常发消息')
   assertEqual(endpointCount(fake, 'session/selectModel'), 0, '没有发 selectModel')
   assertEqual(endpointCount(fake, 'session/initializeDefaultModel'), 0, '也没有发 initializeDefaultModel')
 

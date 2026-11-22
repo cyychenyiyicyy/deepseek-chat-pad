@@ -5,7 +5,6 @@ import {
   IconPanelLeftOutline16,
   IconSearchOutline16,
   IconSettingsOutline16,
-  IconLinkOutline16,
   NewChatIcon,
 } from '../base/icons.js'
 import { setSiderCollapsed } from '../../services/settings.js'
@@ -25,7 +24,7 @@ import { SessionItem } from './SessionItem.js'
 import styles from './Sider.module.css'
 
 /**
- * 展开的侧边栏：顶部「本机 / 远程」胶囊、搜索框、新建对话（远程模式换成刷新/连接设置）、
+ * 展开的侧边栏：顶部「本机 / 远程」胶囊、搜索框、新建对话（远程模式换成远程会话列表）、
  * 按时间分组的会话列表、底部模型与设置入口。移动端放在抽屉里，收起按钮关闭抽屉。
  *
  * 两种模式共用这一份骨架：胶囊只决定列表读哪一份数据，右栏详情由 `App` 决定。
@@ -118,21 +117,10 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
       {remoteMode === 'remote' ? (
         <>
           {/*
-            [S3] 这里原来是「刷新会话」一整行 36px 的大按钮 —— 用户反馈「这个刷新会话按钮太大了」。
-            刷新已经搬到会话列表标题行右侧的小图标里（`RemoteSessionList` 的 `.listHeader`），
-            所以这一行只剩「连接设置」一个入口，不再占掉列表上方的一整行。
+            [S5] 「连接设置」入口已经删掉（用户原话：不需要、单独占一行浪费空间）——
+            远程连接的设置仍在两处可达：底部的「设置」按钮（设置弹窗里的远程分区）、
+            以及未连接时空态里的「打开设置」按钮。这里不再留一整行。
           */}
-          <div className={styles.remoteActions}>
-            <IconButton
-              size="m"
-              icon={<IconLinkOutline16 />}
-              tooltip={t('settingDialogAsideRemoteOptionLabel')}
-              onClick={() => {
-                openSettings('remote')
-                closeMobileSider()
-              }}
-            />
-          </div>
           <RemoteSessionList
             className={styles.remoteList}
             onSelect={mobile ? closeMobileSider : undefined}

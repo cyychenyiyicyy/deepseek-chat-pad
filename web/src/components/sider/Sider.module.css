@@ -75,15 +75,6 @@
   }
 }
 
-/* 远程模式顶部那行：刷新会话（占满）+ 连接设置 */
-.remoteActions {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
 /* 远程会话列表：跟本地列表占同一个位置，只是数据源不同 */
 .remoteList {
   margin-top: 12px;

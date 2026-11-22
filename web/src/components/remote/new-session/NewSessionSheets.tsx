@@ -13,7 +13,6 @@ import {
   IconBrowseOutline16,
   IconCheckOutline16,
   IconCloseOutline16,
-  IconRefreshOutline16,
   IconSettingsOutline16,
   IconWarningOutline16,
 } from '../../base/icons.js'
@@ -411,27 +410,6 @@ const PermissionSheet = () => {
         />
       ))}
     </SheetFrame>
-  )
-}
-
-/** 模型应用失败时的提示块（在面板正文里，不在 sheet 里）。 */
-export const ModelFailureNote = ({ message, onRetry, onSkip }: { message: string; onRetry: () => void; onSkip: () => void }) => {
-  const t = useTranslate()
-  return (
-    <div className={styles.failureCard} role="alert">
-      <div className={styles.failureText}>{message}</div>
-      <div className={styles.failureActions}>
-        <button type="button" className={styles.failurePrimary} onClick={onRetry}>
-          <span className={styles.inlineIcon} aria-hidden>
-            <IconRefreshOutline16 />
-          </span>
-          {t('newSessionRetry')}
-        </button>
-        <button type="button" className={styles.failureSecondary} onClick={onSkip}>
-          {t('newSessionSkipModel')}
-        </button>
-      </div>
-    </div>
   )
 }
 

@@ -244,6 +244,70 @@
   background-color: var(--dsw-specific-sidebar-nav-item-hover);
 }
 
+/* [R15] 工作区筛选菜单里当前生效的那一行 */
+.menuOptionSelected {
+  color: var(--dsw-alias-brand-text);
+  font-weight: 500;
+}
+
+/* ── [R15] 工作区筛选：搜索行下面的一粒胶囊，与搜索行同一节奏 ── */
+.filterChip {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 5px;
+  box-sizing: border-box;
+  margin: 0 0 6px;
+  padding: 0 10px 0 8px;
+  height: 30px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 100px;
+  background-color: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.filterChip:hover {
+  background-color: var(--dsw-specific-sidebar-nav-item-hover);
+}
+
+/* 筛选生效时品牌色描边 + 淡底：一眼看出「列表被收窄了」 */
+.filterChipActive {
+  border-color: var(--dsw-alias-button-ghost-active-border);
+  background-color: var(--dsw-alias-button-ghost-active-fill);
+  color: var(--dsw-alias-brand-text);
+}
+
+.filterIcon,
+.filterChevron {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.filterIcon > svg {
+  width: 14px;
+  height: 14px;
+}
+
+.filterChipActive .filterIcon,
+.filterChipActive .filterChevron {
+  color: var(--dsw-alias-brand-text);
+}
+
+.filterLabel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
 /* ── 重命名弹窗 ── */
 .renameInput {
   box-sizing: border-box;

@@ -5,17 +5,16 @@ import { IconChevronDownOutline14 } from '../../base/icons.js'
 import styles from './NewSessionPage.module.css'
 
 /**
- * 新建会话页的三档控件 —— 尺寸全部照 dsh-Go 的 `empty_actions.dart` 搬过来：
+ * 新建会话页的控件档位 —— 尺寸照 dsh-Go 的 `empty_actions.dart` 搬过来：
  *
  * | 控件 | 高 | 左右内边距 | 字号 | 图标 | 底色 |
  * |---|---|---|---|---|---|
  * | `QuietChip`（工作区） | 36 | 14 | 14（bodyMedium） | 16 + 6 | 7% 白（暗）/ 5% 墨（亮） |
  * | `SetupItem`（选项行：模型 / 助手 / 权限） | 32 | 8 | 13 | 14 + 5 | 无（按下才亮） |
- * | `PrimaryPill`（创建并进入） | 36 | 18 | 14 / 600 | — | 品牌色 |
  *
- * 这三档是**刻意分层的**：工作区是「这次对话在哪」，选项行是「这次对话怎么跑」，
- * 只有主操作是实心按钮 —— dsh-Go 的原话是「a row of them reads as this chat's settings
- * rather than as more buttons」。
+ * 这两档是**刻意分层的**：工作区是「这次对话在哪」，选项行是「这次对话怎么跑」。
+ * dsh-Go 的原话是「a row of them reads as this chat's settings rather than as more buttons」。
+ * （R15 起这一页没有主操作实心按钮了 —— 发送键就在底部的输入框上。）
  */
 
 /** 工作区胶囊：安静底 + 图标 + 一行字 + 可选的下拉箭头。 */
@@ -84,21 +83,6 @@ export const OptionPill = ({
     <span className={styles.optionPillChevron} aria-hidden>
       <IconChevronDownOutline14 />
     </span>
-  </button>
-)
-
-/** 主操作：实心胶囊（dsh-Go 的 `EmptyPrimaryPill`）。 */
-export const PrimaryPill = ({
-  label,
-  onClick,
-  disabled = false,
-}: {
-  label: string
-  onClick: () => void
-  disabled?: boolean
-}) => (
-  <button type="button" className={styles.primaryPill} disabled={disabled} onClick={onClick}>
-    {label}
   </button>
 )
 

@@ -41,7 +41,7 @@ export type ComposerIntent = 'send' | 'steer' | 'queue' | 'command' | 'none'
 export interface ComposerSignals {
   /** 数据面是否 ready（`phase === 'ready'`） */
   ready: boolean
-  /** 当前会话；`null` 时不能发 */
+  /** 当前会话；`null` 时不能发（`newChat` 除外 —— 那一发就是「建会话 + 发消息」） */
   sessionId: string | null
   /** `store.streaming`：这一轮正在生成 */
   streaming: boolean
@@ -61,6 +61,14 @@ export interface ComposerSignals {
   knownCommand: boolean
   /** 草稿正在打斜杠命令（只影响提示文案） */
   slashTyping: boolean
+  /**
+   * [R15] 新对话页（dsh-Go 的 `sessionId == null` 空态）：这一条输入不是发进现有会话，
+   * 而是「建会话 → 应用选项 → 把消息发出去」。此时 `sessionId` 传 `null`，
+   * `canSubmit` 单独放行。默认 false，旧调用与自测不用改。
+   */
+  newChat?: boolean
+  /** [R15] 新对话正在创建（`newSessionStore.creating`）：主按钮先灰住，防连点 */
+  creating?: boolean
 }
 
 export interface ComposerView {
@@ -93,10 +101,16 @@ export interface ComposerView {
 export const hasDraftContent = (draft: string, attachments: number): boolean =>
   draft.trim().length > 0 || attachments > 0
 
-/** 能不能发：连接 ready + 选中会话 + 有内容 + 附件都传完了 */
+/**
+ * 能不能发：连接 ready + 有会话（或新对话页）+ 有内容 + 附件都传完了。
+ *
+ * [R15] `newChat` 那一支是「发送 = 建会话 + 发消息」，不要求已有会话；
+ * 创建中（`creating`）先灰住，防止连点出两个会话。
+ */
 export const canSubmit = (signals: ComposerSignals): boolean =>
   signals.ready &&
-  signals.sessionId !== null &&
+  (signals.newChat === true || signals.sessionId !== null) &&
+  !(signals.newChat === true && signals.creating === true) &&
   !signals.attachmentsBusy &&
   hasDraftContent(signals.draft, signals.attachments)
 
@@ -105,8 +119,13 @@ export const canSubmit = (signals: ComposerSignals): boolean =>
  *
  * 「运行中」只有两种合法动作：`steer`（插话）与 `queue`（排队）——
  * 都是 `session/prompt` 的 `mode`，客户端不需要别的接口。
+ * 新对话页永远是 `send`（那里没有流也没有命令 —— 命令需要会话才存在）。
  */
 export const composerIntent = (signals: ComposerSignals): ComposerIntent => {
+  if (signals.newChat === true) {
+    if (!canSubmit(signals)) return 'none'
+    return 'send'
+  }
   if (signals.knownCommand) {
     // 命令不排队也不插话：生成中执行 `/compact` 这类命令会被 Host 拒掉，干脆别发
     if (signals.streaming) return 'none'
@@ -184,6 +203,11 @@ const resolveComposerView = (signals: ComposerSignals, running: boolean): Compos
 export const composerHint = (
   signals: ComposerSignals,
 ): { key: TranslationKey; params?: Record<string, number> } => {
+  // [R15] 新对话页的提示先说清「发出即创建」，创建中就说「正在创建」
+  if (signals.newChat === true) {
+    if (signals.creating === true) return { key: 'newSessionCreating' }
+    return { key: 'newSessionComposerHint' }
+  }
   // 停止超时是最高优先级：用户点的最后一个东西没反应，必须先解释
   if (signals.streaming && signals.stopTimedOut) return { key: 'composerHintStopTimeout' }
   if (signals.streaming) {

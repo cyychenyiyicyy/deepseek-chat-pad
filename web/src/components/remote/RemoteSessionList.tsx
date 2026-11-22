@@ -3,12 +3,13 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslate } from '../../i18n/index.js'
 import { sessionListViewState } from '../../services/remote/cache.js'
-import { useNewSessionStore } from '../../services/remote/newSessionStore.js'
 import type { RemoteSearchHit } from '../../services/remote/sessionsApi.js'
 import { useRemoteStore } from '../../services/remote/store.js'
 import { useAnchoredPosition, useDismiss } from '../base/anchored.js'
 import { IconButton } from '../base/IconButton.js'
 import {
+  IconBrowseOutline16,
+  IconChevronDownOutline14,
   IconCloseOutline16,
   IconEllipsisOutline16,
   IconNewChatOutline20,
@@ -23,8 +24,8 @@ import { formatDate } from '../../utils/format.js'
 import { useLiveApprovalCount, useLiveRunningCount, useLiveSessions } from '../../services/remote/liveSessions.js'
 // [R9] 红点数字（纯函数；规则与 store 的记账同一份）
 import { pendingBadgeText, pendingTotal } from './chat-controls/promptModel.js'
+import { useNewSessionStore, workspaceTitleFromPath } from '../../services/remote/newSessionStore.js'
 import styles from './RemoteSessionList.module.css'
-
 /**
  * 远程会话列表 —— 侧栏里那份列表的远程版，外加**会话管理**（W1）：
  *
@@ -118,6 +119,9 @@ export const RemoteSessionList = ({
   const actionError = useNewSessionStore((state) => state.actionError)
   const search = useNewSessionStore((state) => state.search)
   const renameTarget = useNewSessionStore((state) => state.renameTarget)
+  /* [R15] 工作区筛选（照 dsh-Go 抽屉的作用域）：列表按工作区收窄，多一个工作区才值得筛 */
+  const workspaces = useNewSessionStore((state) => state.workspaces)
+  const listWorkspaceFilter = useNewSessionStore((state) => state.listWorkspaceFilter)
 
   const ready = phase === 'ready'
   const canManage = ready && capabilities.manage
@@ -170,13 +174,55 @@ export const RemoteSessionList = ({
     useNewSessionStore.getState().setMenu(useNewSessionStore.getState().menuSessionId === id ? null : id)
   }
 
+  /*
+   * [R15] 工作区筛选的锚定菜单：与上面会话「⋯」菜单同一套基础设施
+   * （`useAnchoredPosition` + `useDismiss` + body portal），视觉同款。
+   */
+  const [filterAnchor, setFilterAnchor] = useState<HTMLElement | null>(null)
+  const [filterOpen, setFilterOpen] = useState(false)
+  const filterAnchored = useAnchoredPosition<HTMLElement, HTMLDivElement>(filterOpen, {
+    align: 'start',
+    maxHeight: 320,
+    measureKey: 'workspace-filter',
+  })
+  if (filterOpen && filterAnchor !== null) filterAnchored.anchorRef.current = filterAnchor
+  useDismiss(filterOpen, [filterAnchored.floatingRef, filterAnchored.anchorRef], () => {
+    setFilterOpen(false)
+  })
+
   const archivedSet = new Set(archivedIds)
   const pinnedSet = new Set(pinnedIds)
   /* [R8] 服务端这次没给、但缓存里还有的会话：标「已不存在」而不是立刻消失（避免网络抖动闪一下） */
   const ghostSet = new Set(cacheStatus.ghostSessionIds)
   const searching = search.query.trim().length > 0
 
+  /**
+   * [R15] 工作区筛选的选项与生效值。
+   *
+   * 生效值要**核对存在**：换过连接 / 工作区被删之后 `listWorkspaceFilter` 可能指向
+   * 一个已经不存在的 id，照筛就会得到一张凭空变空的列表 —— 那时当作没筛。
+   * 显示名判定与 `workspaceItems.ts` 同一套（title → 路径末段 → id）。
+   */
+  const workspaceOptions = workspaces.map((workspace) => ({
+    id: workspace.workspaceId,
+    label:
+      workspace.title.length > 0
+        ? workspace.title
+        : workspace.path.length > 0
+          ? workspaceTitleFromPath(workspace.path)
+          : workspace.workspaceId,
+  }))
+  const workspaceFilter =
+    listWorkspaceFilter !== null && workspaceOptions.some((option) => option.id === listWorkspaceFilter)
+      ? listWorkspaceFilter
+      : null
+  const workspaceFilterLabel =
+    workspaceFilter === null
+      ? t('newSessionWorkspaceFilterAll')
+      : (workspaceOptions.find((option) => option.id === workspaceFilter)?.label ?? t('newSessionWorkspaceFilterAll'))
+
   const sorted: RowView[] = sessions
+    .filter((session) => workspaceFilter === null || session.workspaceId === workspaceFilter)
     .map((session) => ({
       id: session.id,
       title: session.title || t('remoteSessionUntitled'),
@@ -349,6 +395,32 @@ export const RemoteSessionList = ({
         </div>
       ) : null}
 
+      {/*
+        [R15] 工作区筛选（dsh-Go 的 `WorkspaceSwitcher`）：搜索行下面一粒胶囊，
+        点开与「⋯」同款的锚定菜单。只在**多于一个**工作区时出现 —— 只有一个时筛选没有意义。
+        选项点中即筛（`listWorkspaceFilter`），`null` = 全部。
+      */}
+      {ready && workspaceOptions.length > 1 ? (
+        <button
+          type="button"
+          className={clsx(styles.filterChip, workspaceFilter !== null && styles.filterChipActive)}
+          aria-label={t('newSessionWorkspaceFilterLabel')}
+          aria-expanded={filterOpen}
+          onClick={(event) => {
+            setFilterAnchor(event.currentTarget)
+            setFilterOpen(!filterOpen)
+          }}
+        >
+          <span className={styles.filterIcon} aria-hidden>
+            <IconBrowseOutline16 />
+          </span>
+          <span className={styles.filterLabel}>{workspaceFilterLabel}</span>
+          <span className={styles.filterChevron} aria-hidden>
+            <IconChevronDownOutline14 />
+          </span>
+        </button>
+      ) : null}
+
       {search.local && searching ? <div className={styles.listHint}>{t('newSessionSearchLocal')}</div> : null}
       {actionError !== null ? <div className={styles.listError}>{actionError}</div> : null}
       {/*
@@ -371,6 +443,9 @@ export const RemoteSessionList = ({
           ) : listPhase === 'skeleton' ? (
             // 缓存为空 + 正在拉：骨架，**不要**「远端还没有会话」（那是歧义）
             <ListSkeleton label={t('cacheListSkeleton')} />
+          ) : workspaceFilter !== null ? (
+            // [R15] 筛选开着而列表为空：说清楚是「这个工作区没有」，不是「远端没有」
+            <div className={styles.empty}>{t('newSessionWorkspaceNoSessions')}</div>
           ) : (
             <div className={styles.empty}>{t(phase === 'ready' ? 'remoteSessionEmpty' : 'remotePhaseIdle')}</div>
           )
@@ -420,6 +495,13 @@ export const RemoteSessionList = ({
                   aria-current={active ? 'true' : undefined}
                   className={clsx(styles.item, active && styles.itemActive)}
                   onClick={() => {
+                    /*
+                     * [R15] 新对话页是**整页视图**（W6）：它开着的时候点会话，
+                     * `openSession` 只换 `activeSessionId`，内容区还被新对话页占着 ——
+                     * 用户看到的就是「点了没反应」。所以这里必须顺手把那页关掉。
+                     * `closePanel` 幂等、也不动 notice / 草稿，多关一次没有副作用。
+                     */
+                    useNewSessionStore.getState().closePanel()
                     fireAndForget(() => useRemoteStore.getState().openSession(row.id))
                     onSelect?.(row.id)
                   }}
@@ -509,6 +591,43 @@ export const RemoteSessionList = ({
         )
         : null}
 
+      {/*
+        [R15] 工作区筛选菜单：与「⋯」菜单同款外观。第一行永远是「全部工作区」，
+        之后是每个工作区；当前生效的那行高亮（`menuitemradio`）。
+      */}
+      {filterOpen
+        ? createPortal(
+          <div
+            ref={filterAnchored.floatingRef}
+            className={styles.menu}
+            style={filterAnchored.position ?? undefined}
+            role="menu"
+            aria-label={t('newSessionWorkspaceFilterLabel')}
+          >
+            <FilterRow
+              label={t('newSessionWorkspaceFilterAll')}
+              selected={workspaceFilter === null}
+              onSelect={() => {
+                useNewSessionStore.getState().selectListWorkspace(null)
+                setFilterOpen(false)
+              }}
+            />
+            {workspaceOptions.map((option) => (
+              <FilterRow
+                key={option.id}
+                label={option.label}
+                selected={workspaceFilter === option.id}
+                onSelect={() => {
+                  useNewSessionStore.getState().selectListWorkspace(option.id)
+                  setFilterOpen(false)
+                }}
+              />
+            ))}
+          </div>,
+          document.body,
+        )
+        : null}
+
       {renameTarget !== null ? <RenameDialog /> : null}
     </div>
   )
@@ -539,6 +658,29 @@ const MenuRow = ({ label, onSelect }: { label: string; onSelect: () => void }) =
       useNewSessionStore.getState().setMenu(null)
       onSelect()
     }}
+  >
+    {label}
+  </div>
+)
+
+/**
+ * [R15] 工作区筛选菜单的一行：可选中态（`menuitemradio`）+ 选中高亮。
+ * 与 `MenuRow` 分开是因为两者语义不同：这个菜单**点中即改即关**，不碰会话菜单的状态。
+ */
+const FilterRow = ({
+  label,
+  selected,
+  onSelect,
+}: {
+  label: string
+  selected: boolean
+  onSelect: () => void
+}) => (
+  <div
+    className={clsx(styles.menuOption, selected && styles.menuOptionSelected)}
+    role="menuitemradio"
+    aria-checked={selected}
+    onClick={onSelect}
   >
     {label}
   </div>

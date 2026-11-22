@@ -7,6 +7,7 @@
 [PASS] A6 在跑 + 已知斜杠命令：命令不算「可发内容」，主位仍是停止
 [PASS] A7 队列还有条目（streaming 已回 false）：仍然算工作中
 [PASS] A8 未就绪 / 没选会话：谁都发不出去
+[PASS] A8b [R15] 新对话页：没会话也能发（发送=建会话）；创建中灰住
 [PASS] A9 停止 10s 无回执：主按钮还原成发送 + 提示换掉
 [PASS] A10 [S3] 全局运行态：streaming 还没跟上也要认出「它在跑」
 [PASS] B1 回车意图：send / steer / queue / command / none
@@ -27,4 +28,4 @@
 [PASS] D5 换模型不带旧档位：只发 provider + model
 [PASS] E1 模型目录不可用：胶囊整块不渲染
 
-总计 28 项，28 PASS / 0 FAIL
+总计 29 项，29 PASS / 0 FAIL

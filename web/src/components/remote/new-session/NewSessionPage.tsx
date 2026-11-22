@@ -1,54 +1,56 @@
 import clsx from 'clsx'
 import { useEffect } from 'react'
+import type { ReactNode } from 'react'
 import { useIsMobile } from '../../../app/viewport.js'
 import { useTranslate } from '../../../i18n/index.js'
 import { useNewSessionStore } from '../../../services/remote/newSessionStore.js'
 import {
   IconBrowseOutline16,
-  IconRefreshOutline16,
   IconSettingsOutline16,
   IconThinkOutline16,
   IconWarningOutline16,
 } from '../../base/icons.js'
-import { OptionPill, PrimaryPill, QuietChip, TipLine } from './chips.js'
-import { ModelFailureNote, NewSessionSheets, modelItemLabel } from './NewSessionSheets.js'
+import { OptionPill, QuietChip, TipLine } from './chips.js'
+import { NewSessionSheets, modelItemLabel } from './NewSessionSheets.js'
 import styles from './NewSessionPage.module.css'
 
 /**
- * 新建会话**页**（W6）。
+ * 新建会话**页**（W6 起；R15 改为「发消息即建会话」）。
  *
- * 上一版（W1）是从右边滑出来的一列 420px 面板 + 遮罩，用户对着真机说「这个是侧边的，我要的不是侧边」。
- * 现在它是一个**真实视图**（`RemoteChatView` 里 `view: 'chat' | 'new-session'` 的另一半）：
- * 平板/桌面铺满右侧内容区（左侧会话列表照旧在），手机整屏覆盖。没有遮罩、没有滑入动画，
- * 切换靠视图本身换掉，返回就回到原来那个会话。
+ * 形态：**真实视图**（`RemoteChatView` 里 `view: 'chat' | 'new-session'` 的另一半）——
+ * 平板/桌面铺满右侧内容区（左侧会话列表照旧在），手机整屏覆盖。没有遮罩、没有滑入动画。
  *
- * 层级照 dsh-Go（`chat/empty_state.dart` + `chat/new_chat_options.dart` + `chat/chat_screen.dart`
- * 里 `sessionId == null` 的那一支 —— 新对话在那边就是**整屏**的空态，不是侧栏）：
+ * 层级照 dsh-Go（`chat/empty_state.dart` + `chat/new_chat_options.dart` + `chat_screen.dart`
+ * 里 `sessionId == null` 的那一支）：**输入条才是这一屏的主角**，这里只是安静地递几个起点：
  *
  * ```
  *  ←  新建会话                             ← 顶部一行：返回 + 标题
  *
  *                  ⌒)                     ← 40px 淡装饰（dsh-Go 的鲸尾）
  *              开一段新对话                ← 大标题（22/28，displaySmall）
- *         选好工作区和模型，建完就能直接聊      ← 一句说明（14，tertiary）
+ *         选好工作区和模型，第一条消息发出时建会话   ← 一句说明
  *
  *               准备在哪工作                 ← 小节标签
- *       ( ▣ 在「deepseek-tablet」中   ⌄ )    ← 工作区大胶囊（44px，这一页的主选择）
+ *       ( ▣ 在「deepseek-tablet」中   ⌄ )    ← 工作区大胶囊（这一页的主选择）
  *
- *   ( ◍ V4.1 Flash · 高 ⌄ ) ( ⚒ 工作模式 ⌄ )  ← 一排三个小胶囊：模型(含思考强度) / 权限 / 预设
+ *   ( ◍ V4.1 Flash · 高 ⌄ ) ( ⚒ 工作模式 ⌄ )  ← 一排小胶囊：模型(含思考强度) / 权限 / 预设
  *   ( ⛨ 工作区可写 ⌄ )
  *
- *           💡 建好后可以直接发消息…          ← 提示行（12，tertiary）
+ *           💡 发送后会自动创建会话…          ← 提示行
  *  ────────────────────────────────────
- *        [ 取消 ]      [ 创建并开始 ]       ← 底部吸底：次要 + 主操作
+ *  ┌────────────────────────────────┐
+ *  │ 给 DeepSeek 发消息，回车发送…      ↑ │  ← 与会话页同一个输入框（footer 由外部传入）
+ *  └────────────────────────────────┘
  * ```
  *
- * 每个选项点开一个**短列表**（`NewSessionSheets`），而不是页面上的下拉框 —— 这是 dsh-Go 的做法。
+ * R15 的关键变化：**没有「创建并开始」按钮了**。旧版要先点按钮建会话、再进会话发消息；
+ * 用户点名要照 dsh-Go —— 选好选项直接在底下发，发出去了才建会话。所以这一页不再有自己的
+ * 底部操作栏，输入框由 `RemoteChatView` 用**会话页同一份 JSX** 传进来（`footer` prop），
+ * 设计风格天然一致；发送走 `newSessionStore.createAndSend(text)`。
  *
- * 保留的既有能力：工作区可为空（继承 Host 默认 cwd）、模型 / 思考强度可选、权限预设、agent preset、
- * 建完自动进会话、模型应用失败时「重试 / 跳过用默认模型」。
+ * 每个选项点开一个**短列表**（`NewSessionSheets`），而不是页面上的下拉框 —— 这是 dsh-Go 的做法。
  */
-export const NewSessionPage = () => {
+export const NewSessionPage = ({ footer }: { footer?: ReactNode }) => {
   const t = useTranslate()
   const isMobile = useIsMobile()
   const loading = useNewSessionStore((state) => state.loading)
@@ -65,8 +67,6 @@ export const NewSessionPage = () => {
   const selectedAgentPreset = useNewSessionStore((state) => state.selectedAgentPreset)
   const modelCatalog = useNewSessionStore((state) => state.modelCatalog)
   const modelPick = useNewSessionStore((state) => state.modelPick)
-  const modelApply = useNewSessionStore((state) => state.modelApply)
-  const createdSessionId = useNewSessionStore((state) => state.createdSessionId)
   const sheet = useNewSessionStore((state) => state.sheet)
 
   /** 返回 = 关掉这个视图。会话本身在 store 里没动过，所以回去就是原来那一屏。 */
@@ -74,7 +74,7 @@ export const NewSessionPage = () => {
 
   /*
    * Esc：先收起短列表，再退回去。
-   * 能力探测（`probeCapabilities`）不在这里做了 —— 挂在 `RemoteChatView` 上，
+   * 能力探测（`probeCapabilities`）不在这里做 —— 挂在 `RemoteChatView` 上，
    * 远程页一就绪就问一次；挂在「打开面板」里的话，「新建对话」按钮的可见性
    * 又依赖这次探测，入口就成了死结（见 `RemoteChatView` 里那段注释）。
    */
@@ -103,8 +103,6 @@ export const NewSessionPage = () => {
     : permissionOptions.find((option) => option.value === selectedPermission)?.name ?? selectedPermission
   const modelLabel = modelItemLabel(t, modelCatalog, modelPick)
   const showModel = capabilities.model && (modelCatalog?.models.length ?? 0) > 0
-  const failure = modelApply.status === 'failed' ? modelApply.error ?? t('newSessionModelFailed') : null
-  const canCreate = capabilities.create && !creating && createdSessionId === null
 
   return (
     <section
@@ -118,6 +116,15 @@ export const NewSessionPage = () => {
           <IconArrowLeftOutline20 />
         </button>
         <div className={styles.topTitle}>{t('newSession.pageTitle')}</div>
+        {/*
+          [R15] 创建中给一枚小转圈：页面上没有「创建并开始」按钮了，这个状态
+          由输入框那边的提示文案（「正在创建…」）说，顶栏只留一个安静的角标。
+        */}
+        {creating ? (
+          <span className={styles.creatingBadge} role="status">
+            {t('newSessionCreating')}
+          </span>
+        ) : null}
       </div>
 
       {/* ── 中间：居中一列 ── */}
@@ -189,44 +196,12 @@ export const NewSessionPage = () => {
           {notice !== null ? <div className={styles.notice}>{notice}</div> : null}
           {error !== null ? <div className={styles.error}>{error}</div> : null}
           {loading ? <div className={styles.hint}>{t('newSessionLoading')}</div> : null}
+          {!capabilities.create ? <div className={styles.hint}>{t('newSessionCreateUnsupported')}</div> : null}
         </div>
       </div>
 
-      {/* ── 底部吸底：失败时换成两条明确的出路，否则是「取消 / 创建并开始」 ── */}
-      <div className={styles.footer}>
-        <div className={styles.footerInner}>
-          {failure !== null ? (
-            <ModelFailureNote
-              message={failure}
-              onRetry={() => {
-                void useNewSessionStore.getState().retryModelApply()
-              }}
-              onSkip={() => {
-                void useNewSessionStore.getState().skipModelAndOpen()
-              }}
-            />
-          ) : (
-            <div className={styles.footerButtons}>
-              <button type="button" className={styles.secondaryPill} onClick={back}>
-                {t('newSession.pageCancel')}
-              </button>
-              {createdSessionId === null ? null : (
-                <span className={styles.spinner} aria-hidden>
-                  <IconRefreshOutline16 />
-                </span>
-              )}
-              <PrimaryPill
-                label={creating ? t('newSession.pageCreating') : t('newSession.pageCreate')}
-                disabled={!canCreate}
-                onClick={() => {
-                  void useNewSessionStore.getState().createAndOpen()
-                }}
-              />
-            </div>
-          )}
-        </div>
-        {!capabilities.create ? <div className={styles.hint}>{t('newSessionCreateUnsupported')}</div> : null}
-      </div>
+      {/* ── 底部：会话页同一个输入框（footer 由 RemoteChatView 传入） ── */}
+      {footer !== undefined ? <div className={styles.composerSlot}>{footer}</div> : null}
 
       {sheet !== null ? <NewSessionSheets /> : null}
     </section>

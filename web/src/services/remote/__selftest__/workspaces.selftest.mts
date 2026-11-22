@@ -515,7 +515,6 @@ const resetStore = (): void => {
     modelCatalogLoaded: false,
     modelPick: null,
     modelApply: { status: 'idle' },
-    createdSessionId: null,
     sheet: null,
     creating: false,
     lastCreatedSessionId: null,

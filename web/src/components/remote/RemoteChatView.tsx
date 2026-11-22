@@ -39,6 +39,7 @@ import {
 } from '../../services/remote/uiState.js'
 import { Button } from '../base/Button.js'
 import { IconButton } from '../base/IconButton.js'
+import { showToast } from '../base/toastState.js'
 import {
   IconDataOutline16,
   IconMenuOutline20,
@@ -148,6 +149,8 @@ export const RemoteChatView = () => {
   const reconnect = useRemoteStore((state) => state.reconnect)
   /** 新建会话能力（W1）：Host 没有 `session/create` 时入口整块隐藏 */
   const canCreateSession = useNewSessionStore((state) => state.capabilities.create)
+  /** [R15] 新对话「发送即建会话」进行中：输入框灰住、顶栏给角标 */
+  const creatingSession = useNewSessionStore((state) => state.creating)
   /*
    * ── 视图（W6）──────────────────────────────────────────────────────
    * `view` 是**真实切换**，不是浮在上面的层：进出都由 `newSessionStore.open` 驱动
@@ -382,6 +385,19 @@ export const RemoteChatView = () => {
    */
   useEffect(() => {
     if (activeSessionId !== null) patchActiveSession(activeSessionId)
+  }, [activeSessionId])
+
+  /*
+   * [R15] 任何路径打开了会话（列表点击 / 通知直达 / 派生完进新会话），都要把「新对话」
+   * 整页让出来：`openSession` 只改 `activeSessionId`，视图归 `newSessionStore.open` 管 ——
+   * 不补这一刀，新对话页会一直挡在内容区前面（真机反馈：会话列表点了没反应）。
+   * 列表那一侧行点击已经先关了一次；这里兜住其余入口。`closePanel` 幂等、不动 notice / 草稿，
+   * `createAndSend` 的建会话路径走到这里也只是提前一拍关掉（`finishOpen` 自己还要关一次）。
+   */
+  useEffect(() => {
+    if (activeSessionId === null) return
+    if (!useNewSessionStore.getState().open) return
+    useNewSessionStore.getState().closePanel()
   }, [activeSessionId])
 
   useEffect(() => {
@@ -632,19 +648,25 @@ export const RemoteChatView = () => {
   /** 数据层有没有「指定 mode 发送」的入口（没有就退回 Host 默认的 queue，见 promptMode.ts） */
   const modeSupported = supportsPromptMode(useRemoteStore.getState())
   const effectiveMode: PromptMode = modeSupported ? sendMode : 'queue'
+  /*
+   * [R15] 新对话页的信号整形：那一页**没有会话**（sessionId 一律给 null —— 哪怕 store 里
+   * 还留着上一个会话，那一页的发送语义是「建新会话」，绝不能把消息发进旧会话）、
+   * 没有流、没有命令；`creating` 期间主按钮灰住（防连点出两个会话）。
+   */
   const signals = useMemo<ComposerSignals>(
     () => ({
       ready,
-      sessionId: activeSessionId,
-      streaming,
+      sessionId: view === 'new-session' ? null : activeSessionId,
+      streaming: view === 'new-session' ? false : streaming,
       sendMode: effectiveMode,
       stopTimedOut,
-      queueLength,
+      queueLength: view === 'new-session' ? 0 : queueLength,
       draft,
-      attachments: readyReceipts(attachments).length,
-      attachmentsBusy: hasUploadingAttachment(attachments),
-      knownCommand,
-      slashTyping: slashQuery(draft) !== null,
+      attachments: view === 'new-session' ? 0 : readyReceipts(attachments).length,
+      attachmentsBusy: view === 'new-session' ? false : hasUploadingAttachment(attachments),
+      knownCommand: view === 'new-session' ? false : knownCommand,
+      slashTyping: view === 'new-session' ? false : slashQuery(draft) !== null,
+      ...(view === 'new-session' ? { newChat: true, creating: creatingSession } : {}),
     }),
     [
       ready,
@@ -656,6 +678,8 @@ export const RemoteChatView = () => {
       draft,
       attachments,
       knownCommand,
+      view,
+      creatingSession,
     ],
   )
   const composer = useMemo(() => composerView(signals), [signals])
@@ -667,8 +691,29 @@ export const RemoteChatView = () => {
   /**
    * 输入区唯一的提交入口（回车 / 主按钮 / 生成中的次要发送键）：
    * 已知斜杠命令 → 执行；其余 → 发消息（运行中按 `sendMode` 决定插话还是排队）。
+   * 新对话页 → `createAndSend`：建会话 → 应用选项 → 进会话 → 把这条消息发出去（R15）。
    */
   const submit = useCallback(() => {
+    /*
+     * [R15] dsh-Go 的 `_ensureSession`：选好选项直接发，发出去了才建会话。
+     * 乐观清空输入框；建不出来（原因已在页面那行红字上）就把草稿还回去。
+     * `finishOpen` 会把这一页关掉，所以「权限没生效 / 模型没应用」这类打了折扣的
+     * notice 在这里 toast 出来 —— 页面已经切走了，留在页面里没人看得见。
+     */
+    if (view === 'new-session') {
+      const text = draft.trim()
+      if (text.length === 0 || !ready || !canCreateSession || creatingSession) return
+      setDraft('')
+      void Promise.resolve(useNewSessionStore.getState().createAndSend(text)).then((sent) => {
+        if (!sent) {
+          setDraft(text)
+          return
+        }
+        const notice = useNewSessionStore.getState().notice
+        if (notice !== null) showToast(notice)
+      })
+      return
+    }
     const intent = composerIntent(signals)
     if (intent === 'none') return
     if (intent === 'command') {
@@ -676,7 +721,7 @@ export const RemoteChatView = () => {
       return
     }
     send(intent === 'steer' ? 'steer' : 'queue')
-  }, [draft, runCommand, send, signals])
+  }, [draft, ready, view, canCreateSession, creatingSession, runCommand, send, signals])
 
   /**
    * 生成中：主按钮变停止（`session/cancel`）。
@@ -707,16 +752,53 @@ export const RemoteChatView = () => {
   useComposerProbe(ready ? activeSessionId : null)
 
   /*
-   * ── 新建会话整页（W6）────────────────────────────────────────────
+   * ── 新建会话整页（W6 / R15）────────────────────────────────────────────
    * 视图切换，不是叠层：这一支直接把「顶栏 + 时间线 + 输入框」整块换掉。
    * 会话本身（`activeSessionId` / `items` / 草稿）都在上层与 store 里，所以「返回」
    * 回来的是同一个会话，不需要重新 `openSession`。
-   * 工作区抽屉（`WorkspacePane`）不挂：它是当前会话的产物入口，在新会话页上没有输入框可用。
+   *
+   * [R15] 输入框由**这里**传给 `NewSessionPage`（footer prop）：同一个 CSS module、
+   * 同一个 `ComposerRow`、同一份回车规则 —— 两个视图的输入区天然长得一模一样。
+   * 发送走 `submit()` 的 `createAndSend` 分支（建会话 + 发首条消息）。
+   * 附件入口不出现：附件收据是「当前会话」作用域的（`workspacePaneStore.bind`），
+   * 而这一页还没有会话 —— 传了也是发不出去的收据。
    */
   if (view === 'new-session') {
     return (
       <div className={styles.view}>
-        <NewSessionPage />
+        <NewSessionPage
+          footer={
+            <div className={styles.footer}>
+              <div className={styles.inputWrapper}>
+                <textarea
+                  ref={textareaRef}
+                  className={styles.textarea}
+                  rows={2}
+                  value={draft}
+                  placeholder={t('newSessionComposerPlaceholder')}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    // 新对话页没有斜杠命令（命令需要会话才存在），只有「回车发送」一条规则
+                    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                      event.preventDefault()
+                      submit()
+                    }
+                  }}
+                />
+                <ComposerRow
+                  view={composer}
+                  hint={hint}
+                  sendMode={sendMode}
+                  modeSupported={modeSupported}
+                  onSubmit={submit}
+                  onStop={stop}
+                  onSecondarySend={submit}
+                  onModeChange={setSendMode}
+                />
+              </div>
+            </div>
+          }
+        />
       </div>
     )
   }

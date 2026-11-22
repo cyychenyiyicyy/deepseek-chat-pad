@@ -553,7 +553,7 @@ export const parseSessionRow = (value: unknown): RemoteSessionRow | null => {
     : typeof value.workspaceId === 'string' ? value.workspaceId : undefined
   const pinned = typeof values?.pinned === 'boolean' ? values.pinned : undefined
   // `projections.values.modelSelection` 是这个会话**当前**的模型（Host 投影，`client-core:1929-1945`）：
-  // 新建会话选完模型靠它确认到底生效没（见 `newSessionStore.createAndOpen`）。
+  // 新建会话选完模型靠它确认到底生效没（见 `newSessionStore.createAndSend`）。
   const modelSelection = parseSelection(values?.modelSelection) ?? undefined
   return {
     sessionId: value.sessionId,

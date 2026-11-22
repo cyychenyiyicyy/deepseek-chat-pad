@@ -237,6 +237,33 @@ check('A8 未就绪 / 没选会话：谁都发不出去', async () => {
   assertEqual(composerView(baseSignals({ ready: false, draft: 'x' })).primaryEnabled, false, '按钮禁用')
 })
 
+check('A8b [R15] 新对话页：没会话也能发（发送=建会话）；创建中灰住', async () => {
+  const chat = baseSignals({ sessionId: null, newChat: true, draft: '帮我看看这个' })
+  assertEqual(canSubmit(chat), true, 'newChat 放行「没有会话」这一条')
+  assertEqual(composerIntent(chat), 'send', '意图就是发送（建会话由 submit 那边分流）')
+  const view = composerView(chat)
+  assertEqual(view.primary, 'send', '主按钮是发送')
+  assertEqual(view.primaryEnabled, true, '可点')
+  assertEqual(view.secondaryAction, null, '没有第二颗钮（那里没有流可停）')
+  assertEqual(composerHint(chat).key, 'newSessionComposerHint', '提示说「发出后自动创建会话」')
+
+  // 空草稿照旧发不出去
+  assertEqual(composerIntent(baseSignals({ sessionId: null, newChat: true })), 'none', '空草稿 none')
+
+  // 创建中：主按钮灰住，防连点出两个会话
+  const creating = baseSignals({ sessionId: null, newChat: true, draft: '再发一条', creating: true })
+  assertEqual(canSubmit(creating), false, 'creating 期间 canSubmit false')
+  assertEqual(composerView(creating).primaryEnabled, false, '主按钮禁用')
+  assertEqual(composerHint(creating).key, 'newSessionCreating', '提示换成「正在创建…」')
+
+  // knownCommand / slash 都被调用方压成 false；就算漏进来，newChat 分支也只认「发送文本」
+  assertEqual(
+    composerIntent(baseSignals({ sessionId: null, newChat: true, draft: '/compact', knownCommand: true })),
+    'send',
+    'newChat 分支不看 knownCommand —— 斜杠行当普通文本发',
+  )
+})
+
 check('A9 停止 10s 无回执：主按钮还原成发送 + 提示换掉', async () => {
   const signals = baseSignals({ streaming: true, stopTimedOut: true })
   const view = composerView(signals)
