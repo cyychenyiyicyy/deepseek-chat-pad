@@ -193,6 +193,7 @@ import {
   commitSessionTranscript,
   ensureSessionDebug,
   followEpochIsCurrent,
+  followEpochTurnIsCurrent,
   historyOwnerIsCurrent,
   noteSessionDrop,
   newFollowEpoch,
@@ -2971,7 +2972,13 @@ const openSessionFlow = async (id: string): Promise<void> => {
   session.follow = null
   // 让位之后可能已经不是我们这一代了（用户又点了一个会话）：后面的初始化一步都不能做，
   // 否则会把 `session.sessionId` / `state.activeSessionId` 抢回这个会话。
-  if (!flowIsCurrent(session, ticket)) {
+  //
+  // [R18 真根因] 这里**只比代际**，绝不比 sessionId：此刻 `session.sessionId` 还停在
+  // 旧值（刚连上是 null，否则是上一个会话），而工牌里是**目标** id —— 用
+  // `flowIsCurrent()`（内部比 sessionId）会把每一次「点会话」都判成上一代的迟到流程，
+  // 静默 return。v1.13.0 起真机「点会话没反应、右侧一直停在『选择一个会话』」
+  // 就是这一行；`__dsDebug.sessionDrops.staleFlow` 会一路涨。见 routing.ts 的同名注释。
+  if (active !== session || !followEpochTurnIsCurrent(ticket, sessionEpoch)) {
     noteSessionDrop('staleFlow')
     return
   }

@@ -207,6 +207,25 @@ export const followEpochIsCurrent = (
   ticket.epoch === cursor.epoch
 
 /**
+ * 「这一代是不是最新一代」（**只比 epoch，不比 sessionId**）。
+ *
+ * 为什么不能拿 `followEpochIsCurrent()` 做「开新流的让位判定」：那个函数问的是
+ * 「我服务的会话还是不是当下这个会话」，要求 `ticket.sessionId === cursor.sessionId`。
+ * 而 `openSessionFlow(id)` 做检查时**正要切过去** —— `session.sessionId` 还停在旧值
+ *（刚连上是 `null`，否则是上一个会话），工牌里已经是**目标** id，一比较必然不等。
+ * 于是每一次「点会话 / 从空态打开会话 / 重连后重开上次的会话」都被误判成
+ * 「上一代的迟到流程」，静默 `return`。
+ *
+ * 真机表现（v1.13.0 起）：会话列表点了没反应，右侧永远停在「选择一个会话」；
+ * 计数器上只有 `__dsDebug.sessionDrops.staleFlow` 一路涨。
+ *
+ * 这里问的是另一个问题：**我这一代还是不是最新一代**。连点 A→B 时 A 的 epoch 被 B
+ * 顶掉 → false（旧流程照样作废，不会串台）；从空态打开 A、或重开当前会话 → true。
+ */
+export const followEpochTurnIsCurrent = (ticket: FollowEpochTicket, currentEpoch: number): boolean =>
+  ticket.epoch === currentEpoch
+
+/**
  * 翻页归属（Dart `session_api.dart:1325` `_checkHistoryOwner(epoch)`）：
  * `pageHistory` 回来时，发起它的那条 watch 必须还是当前那条。
  */
