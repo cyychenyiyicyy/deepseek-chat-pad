@@ -60,7 +60,12 @@ for (const filename of tests) {
   if (!passed) failed++
   const summary = logs.split('\n').filter((line) => /pass|passed|ok/i.test(line.trim())).at(-1) ?? ''
   console.log((passed ? '[PASS] ' : '[FAIL] ') + path.basename(filename) + ' ' + summary)
-  if (!passed) console.log(result.error?.message ?? logs.slice(-1400))
+  if (!passed) {
+    const detail = (result.error?.message ?? logs).replace(/\r/g, '').trim().slice(-900)
+    // Actions 会把 `::error::` 变成 annotation：不登录也能在 check-run 上看到失败原因。
+    console.log('::error title=' + path.basename(filename) + '::' + detail.replace(/%/g, '%25').replace(/\n/g, '%0A'))
+    console.log(result.error?.message ?? logs.slice(-1400))
+  }
 }
 
 console.log((tests.length - failed) + '/' + tests.length + ' suites passed')
