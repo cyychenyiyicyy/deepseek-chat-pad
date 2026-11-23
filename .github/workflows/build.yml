@@ -48,7 +48,7 @@ jobs:
         env:
           NODE_ENV: production
 
-      # 远程层的自测：36 套，任何一套非零退出就红（需要 Node >= 22.7）
+      # 远程层的自测：36 套，任何一套非零退出就红（用 web 里装好的 tsx 跑，不挑 Node 版本）
       - name: 远程自测
         working-directory: web
         run: pnpm run selftest

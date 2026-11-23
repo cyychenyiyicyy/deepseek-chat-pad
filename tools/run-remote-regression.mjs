@@ -4,8 +4,8 @@
 //   node tools/run-remote-regression.mjs           # 全部
 //   node tools/run-remote-regression.mjs terminal  # 只跑文件名含 terminal 的
 //
-// 依赖 Node >= 22.7（--experimental-transform-types 做类型擦除）；CI 用 Node 22。
-// 每套的原始输出写在 tmp/remote-regression/<文件名>.log，失败时打印尾部 1400 字。
+// 用 web/ 里已经装好的 tsx 执行（.mts / .ts 以及 `./x.js → x.ts` 的解析都由它负责），
+// 不依赖 `--experimental-transform-types`，所以本地 Node 和 CI Node 版本不一致也不会翻车。
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -17,28 +17,12 @@ const filter = process.argv[2] ?? ''
 const reports = process.env.SELFTEST_REPORT_DIR
   ? path.resolve(process.env.SELFTEST_REPORT_DIR)
   : path.join(path.resolve(tools, '..'), 'tmp', 'remote-regression')
+const tsxCli = path.resolve(tools, '../web/node_modules/tsx/dist/cli.mjs')
 
-// --experimental-transform-types 从 Node 22.7 起才有；低于这个版本直接给出可读的失败原因。
-const [major, minor] = process.versions.node.split('.').map(Number)
-if (major < 22 || (major === 22 && minor < 7)) {
-  console.error(`[FAIL] 当前 Node ${process.version} 不支持 --experimental-transform-types，需要 Node >= 22.7`)
+if (!fs.existsSync(tsxCli)) {
+  console.error('[FAIL] 找不到 tsx：先在 web/ 里执行 pnpm install')
   process.exit(1)
 }
-
-// 源码里 import './x.js' 指向 TypeScript 的 x.ts：用 resolve 钩子把后缀换成 .ts。
-const loader = [
-  "import { registerHooks } from 'node:module';",
-  'registerHooks({',
-  '  resolve(specifier, context, nextResolve) {',
-  '    try { return nextResolve(specifier, context) }',
-  '    catch (error) {',
-  "      if (error.code === 'ERR_MODULE_NOT_FOUND' && specifier.startsWith('.') && specifier.endsWith('.js'))",
-  "        return nextResolve(specifier.slice(0, -3) + '.ts', context)",
-  '      throw error',
-  '    }',
-  '  },',
-  '});',
-].join('\n')
 
 const collect = (folder) => fs.readdirSync(folder, { withFileTypes: true }).flatMap((entry) => {
   const filename = path.join(folder, entry.name)
@@ -68,12 +52,8 @@ for (const filename of tests) {
   const report = path.join(reports, path.basename(filename) + '.log')
   const fd = fs.openSync(report, 'w')
   // 用文件描述符而不是管道：沙箱里管道会 EPERM（见 AGENTS.md 第 4 条）。
-  const result = spawnSync(process.execPath, [
-    '--experimental-transform-types',
-    '--disable-warning=ExperimentalWarning',
-    '--import', 'data:text/javascript,' + encodeURIComponent(loader),
-    filename,
-  ], { stdio: ['ignore', fd, fd], windowsHide: true, timeout: 120_000 })
+  const result = spawnSync(process.execPath, [tsxCli, filename],
+    { stdio: ['ignore', fd, fd], windowsHide: true, timeout: 120_000 })
   fs.closeSync(fd)
   const logs = fs.readFileSync(report, 'utf8').trim()
   const passed = result.status === 0 && !/^\[FAIL\]/m.test(logs)

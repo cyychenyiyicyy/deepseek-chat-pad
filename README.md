@@ -89,7 +89,7 @@ APK 更新则下载后拉起系统安装器。
 cd web
 pnpm install
 pnpm run type                          # 类型检查
-pnpm run selftest                      # 远程自测（36 套，需要 Node >= 22.7）
+pnpm run selftest                      # 远程自测（36 套，用已安装的 tsx 跑）
 NODE_ENV=production npx rspack build -c rspack.config.ts
 ```
 
