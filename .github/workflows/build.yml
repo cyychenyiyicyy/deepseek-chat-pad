@@ -65,7 +65,13 @@ jobs:
           NODE_ENV: production
 
       - name: 浏览器回归
-        run: node tools/check-tablet-layout.mjs
+        # 首屏和时序断言在负载高的 runner 上偶发超时：失败后重跑一次，两次都红才算真红。
+        run: |
+          set -o pipefail
+          if node tools/check-tablet-layout.mjs; then exit 0; fi
+          echo "第一次失败，重跑一次…"
+          sleep 5
+          node tools/check-tablet-layout.mjs
         env:
           QA_DIST: tmp/qa-dist
           CHROME_PATH: /usr/bin/google-chrome

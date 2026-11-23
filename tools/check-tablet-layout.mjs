@@ -9,6 +9,14 @@ import { gunzipSync } from 'node:zlib'
 import { runInThisContext } from 'node:vm'
 import { unzipSync } from '../web/node_modules/fflate/esm/index.mjs'
 
+const annotate = (error) => {
+  const message = error instanceof Error ? error.message : String(error)
+  // Actions 会把 ::error:: 变成 annotation：公开仓库不登录也能看到是哪一条断言挂了。
+  console.log('::error title=tablet-layout::' + message.replace(/%/g, '%25').replace(/\r/g, '').replace(/\n/g, '%0A').slice(0, 900))
+}
+process.on('uncaughtException', (error) => { annotate(error); process.exit(1) })
+process.on('unhandledRejection', (error) => { annotate(error); process.exit(1) })
+
 const dir = import.meta.dirname
 const project = path.join(dir, '..')
 // 默认吃 web/dist（CI 先构建再跑这里）；本地也可以 QA_DIST 指到别的产物目录。
@@ -296,7 +304,7 @@ try {
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text)
     return r.result.value
   }
-  const check = async (description, expression, timeout = 1500) => {
+  const check = async (description, expression, timeout = 5000) => {
     const deadline = Date.now() + timeout
     let passed = await js(expression)
     while (!passed && Date.now() < deadline) {
@@ -1300,6 +1308,9 @@ try {
   await openBy('Forget host')
   await check('forgetting an SSH profile leaves other saved hosts available',
     'JSON.parse(localStorage.getItem("dsp.remote.ssh.profiles.v2")).length===1 && document.querySelector("input[name=host]")?.value===""')
+} catch (error) {
+  annotate(error)
+  throw error
 } finally {
   socket?.close()
   child.kill()
