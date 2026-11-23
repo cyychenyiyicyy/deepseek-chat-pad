@@ -60,6 +60,10 @@ import {
   workspaceTitleFromPath,
 } from '../newSessionStore.js'
 import { useRemoteStore } from '../store.js'
+import { useSettings } from '../../settings.js'
+
+/* 这些自测核对的是中文文案：显式钉住 locale，别让 CI 的 en-US 把断言带偏。 */
+useSettings.setState({ locale: 'zh-CN' })
 
 /* ── 最小断言器（与其它 selftest 同一套写法） ─────────────────────────── */
 

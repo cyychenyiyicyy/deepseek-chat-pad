@@ -100,6 +100,10 @@ const localStorageStub = {
  * 订阅都有 `typeof` 守卫，这里正好顺带验证「没有浏览器环境也不会炸」。
  */
 
+// 这里的断言核对中文文案：显式钉住 locale，别让 CI 的 en-US 把断言带偏。
+const settingsModule = await import('../../settings.js')
+settingsModule.useSettings.setState({ locale: 'zh-CN' })
+
 const storeModule = await import('../store.js')
 const { performHostSwitch, resolveHostSwitchTarget, toHostInfoList, hostNameOf } = storeModule
 type HostSwitchRuntime = import('../store.js').HostSwitchRuntime
