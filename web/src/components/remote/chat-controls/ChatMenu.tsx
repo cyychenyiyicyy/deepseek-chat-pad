@@ -13,6 +13,11 @@ import type { RemoteUsage } from '../../../services/remote/sessionControls.js'
 
 type MenuView = 'menu' | 'commands' | 'info'
 
+export interface ChatMenuAction {
+  label: string
+  open: () => void
+}
+
 /**
  * 顶栏最右侧的 `⋯` 菜单：**命令列表 / 会话信息 / 清空队列**。
  *
@@ -29,12 +34,14 @@ export const ChatMenu = ({
   title,
   usage,
   onInsertCommand,
+  actions,
 }: {
   sessionId: string | null
   title: string | null
   usage: RemoteUsage | null
   /** 把 `/name ` 填回输入框（并聚焦），菜单随即关闭 */
   onInsertCommand: (line: string) => void
+  actions?: readonly ChatMenuAction[]
 }) => {
   const t = useTranslate()
   const commands = useChatControls((state) => state.commands)
@@ -168,6 +175,15 @@ export const ChatMenu = ({
                 <IconChevronRightOutline14 />
               </span>
             </button>
+            {actions?.map((action) => (
+              <button key={action.label} type="button" className={styles.row} onClick={() => {
+                close()
+                action.open()
+              }}>
+                <span className={styles.rowName}>{action.label}</span>
+                <span className={styles.rowTail} aria-hidden><IconChevronRightOutline14 /></span>
+              </button>
+            ))}
             {showsClear ? (
               confirmClear ? (
                 <div className={styles.actions}>

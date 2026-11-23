@@ -10,7 +10,8 @@
    * offset + topbar-h / 2，和侧栏 logo 同一条水平线。
    */
   height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
-  padding: var(--ds-top-offset) 14px 0 12px;
+  padding: var(--ds-top-offset) var(--chat-gutter) 0;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 
 .title {

@@ -6,6 +6,7 @@
   /* 与平板顶栏、侧栏 logo 行同一套公式（--ds-topbar-h，见 global.css） */
   height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
   padding: var(--ds-top-offset) 10px 0;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 
 .title {

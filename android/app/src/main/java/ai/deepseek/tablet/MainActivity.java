@@ -25,6 +25,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.ConsoleMessage;
+import android.webkit.PermissionRequest;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -69,6 +70,7 @@ public final class MainActivity extends AppCompatActivity {
     private static final int REQ_FILE_CHOOSER = 4711;
     /** 申请 POST_NOTIFICATIONS 的 requestCode（与 KeepAliveHandler 的 4713 刻意错开） */
     private static final int REQ_POST_NOTIFICATIONS = 4712;
+    private static final int REQ_RECORD_AUDIO = 4714;
     private static final String LOOPBACK_HOST = "127.0.0.1";
 
     /**
@@ -142,6 +144,7 @@ public final class MainActivity extends AppCompatActivity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private FrameLayout rootLayout;
+    private RemoteDshWebView remoteDshWeb;
     private WebView webView;
     private TextView errorView;
     private LocalServer server;
@@ -155,6 +158,7 @@ public final class MainActivity extends AppCompatActivity {
     private String[] pendingAcceptTypes;
     private boolean pendingMultiple;
     private String loadedUrl;
+    private PermissionRequest pendingMicRequest;
     private boolean renderProcessRestartScheduled;
     /** 当前 WebView 的底色（跟着网页主题走；WebView 就地重建时用它，避免闪一下深色） */
     private int surfaceColor = COLOR_BACKGROUND;
@@ -570,6 +574,19 @@ public final class MainActivity extends AppCompatActivity {
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
             @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_RECORD_AUDIO) {
+            PermissionRequest request = pendingMicRequest;
+            pendingMicRequest = null;
+            if (request != null) {
+                if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                        && isTrustedMicrophoneRequest(request)) {
+                    request.grant(new String[] {PermissionRequest.RESOURCE_AUDIO_CAPTURE});
+                } else {
+                    request.deny();
+                }
+            }
+            return;
+        }
         if (requestCode != REQ_POST_NOTIFICATIONS) {
             return;
         }
@@ -751,6 +768,8 @@ public final class MainActivity extends AppCompatActivity {
         // UI 状态中转箱（S1）：页面重载 / WebView 就地重建后，把草稿与滚动位置捞回来。
         // 只活在内存里，退出应用即消失（见 UiStateRelay 的注释）。
         webView.addJavascriptInterface(uiStateRelay, "DSNativeUi");
+        remoteDshWeb = new RemoteDshWebView(this, webView, mainHandler);
+        webView.addJavascriptInterface(remoteDshWeb, "DSNativeDshWeb");
 
         webView.setWebViewClient(new ShellWebViewClient());
         webView.setWebChromeClient(new ShellWebChromeClient());
@@ -929,6 +948,34 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private final class ShellWebChromeClient extends WebChromeClient {
+
+        @Override
+        public void onPermissionRequest(PermissionRequest request) {
+            if (!isVisibleNow() || !isTrustedMicrophoneRequest(request)) {
+                request.deny();
+                return;
+            }
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                request.grant(new String[] {PermissionRequest.RESOURCE_AUDIO_CAPTURE});
+                return;
+            }
+            if (pendingMicRequest != null) {
+                request.deny();
+                return;
+            }
+            pendingMicRequest = request;
+            try {
+                requestPermissions(new String[] {Manifest.permission.RECORD_AUDIO}, REQ_RECORD_AUDIO);
+            } catch (RuntimeException failed) {
+                pendingMicRequest = null;
+                request.deny();
+            }
+        }
+
+        @Override
+        public void onPermissionRequestCanceled(PermissionRequest request) {
+            if (pendingMicRequest == request) pendingMicRequest = null;
+        }
 
         @Override
         public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
@@ -1641,7 +1688,30 @@ public final class MainActivity extends AppCompatActivity {
         }, ACTIVITY_RESTART_DELAY_MS);
     }
 
+    private boolean isTrustedMicrophoneRequest(PermissionRequest request) {
+        if (webView == null || loadedUrl == null || isFinishing() || isDestroyed()) return false;
+        Uri origin = request.getOrigin();
+        Uri page = Uri.parse(loadedUrl);
+        String[] resources = request.getResources();
+        return origin != null && "http".equals(origin.getScheme()) && LOOPBACK_HOST.equals(origin.getHost())
+                && origin.getPort() == page.getPort() && resources.length == 1
+                && PermissionRequest.RESOURCE_AUDIO_CAPTURE.equals(resources[0]);
+    }
+
     private void destroyWebView() {
+        PermissionRequest mic = pendingMicRequest;
+        pendingMicRequest = null;
+        if (mic != null) {
+            try {
+                mic.deny();
+            } catch (RuntimeException ignored) {
+                // The renderer that requested permission may already be gone.
+            }
+        }
+        if (remoteDshWeb != null) {
+            remoteDshWeb.retire();
+            remoteDshWeb = null;
+        }
         WebView view = webView;
         webView = null;
         if (view == null) {

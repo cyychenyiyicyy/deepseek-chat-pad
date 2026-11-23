@@ -140,6 +140,7 @@ globals.fetch = (async () => {
 const ui = await import('../uiState.js')
 const timelineCache = await import('../cache.js')
 const server = await import('../store.js')
+const { pinHostIdentityKey, upsertAccount } = await import('../storage.js')
 
 const {
   MAX_DRAFT_CHARS,
@@ -407,25 +408,28 @@ check('D19 clearUiState 之后三层都读不到', () => {
 check('E20 hydrateCachedTimeline：没连接也能把上一屏铺出来（标注"正在同步"）', async () => {
   reset()
   localMemory.clear()
-  // 盘上那条 last-session 就是缓存桶的来源（连接之前也算得出来）
+  const serverUrl = 'https://dsh.example'
+  const email = 'a@b.c'
+  const hostDeviceId = 'host-1'
+  const identityKey = 'B' + 'A'.repeat(42)
+  const deviceId = 'ui-fixture-device'
   server.useRemoteStore.setState({
-    lastSession: {
-      serverUrl: 'https://dsh.example',
-      email: 'a@b.c',
-      hostDeviceId: 'host-1',
-      hostName: '书房电脑',
-      savedAt: Date.now(),
-    },
+    lastSession: { serverUrl, email, hostDeviceId, hostName: '书房电脑', savedAt: Date.now() },
   })
+  pinHostIdentityKey(serverUrl, { deviceId: hostDeviceId, identityKey })
   timelineCache.writeTimelineCache({
-    serverUrl: 'https://dsh.example',
-    hostDeviceId: 'host-1',
+    serverUrl,
+    hostDeviceId,
+    owner: JSON.stringify([identityKey, deviceId, email]),
     sessionId: 'sess-1',
     now: Date.now(),
     items: [{ kind: 'message', id: 'm-1', sessionId: 'sess-1', createdAt: 1, role: 'user', text: '上一屏的内容' }],
   })
   // 此刻 phase 还是 idle：一条连接都没有
   assertEqual(server.useRemoteStore.getState().phase, 'idle', '前提：还没连上')
+  server.hydrateCachedTimeline('sess-1')
+  assertNull(server.useRemoteStore.getState().activeSessionId, '没有对应的设备记录时，缓存不显示')
+  upsertAccount({ serverUrl, email, deviceId, accessToken: 'fixture-token', refreshToken: 'fixture-refresh', scope: 'device' })
   server.hydrateCachedTimeline('sess-1')
   const state = server.useRemoteStore.getState()
   assertEqual(state.activeSessionId, 'sess-1', '会话先回来了')

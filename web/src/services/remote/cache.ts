@@ -22,8 +22,8 @@
  * | `dsp.remote.sessions-cache.v1` | 每个桶一份会话列表 | 一台手机可能连多台 Host / 多个服务器，列表不能串味 |
  * | `dsp.remote.messages-cache.v1` | 每个桶内每个会话最近 N 条 | 同上；内容比列表大，单独一个键，坏一个不连累另一个 |
  *
- * 桶 id = `serverUrl|hostDeviceId`（`cacheBucketId()`：URL 小写、去尾部斜杠、去空白）。
- * 会话内容**不按账号**分桶：同一台 Host 换账号看到的是同一份会话库（Host 侧事实如此）。
+ * 生产缓存按服务器、主机设备、公钥及本机账号设备分桶。旧缓存缺少可验证的归属，
+ * 在主机重新同步历史之前，不用于显示时间线或恢复待确认消息。
  *
  * ## 合并规则（两套，各自一张表）
  *
@@ -244,13 +244,17 @@ const utf8Bytes = (text: string): number => {
  * 四、桶
  * ──────────────────────────────────────────────────────────────────────── */
 
-/** 桶 id：`serverUrl|hostDeviceId`（URL 归一化，避免 `https://a/` 与 `HTTPS://A` 分成两个桶）。 */
-export const cacheBucketId = (serverUrl: string, hostDeviceId: string): string =>
-  `${serverUrl.trim().replace(/\/+$/u, '').toLowerCase()}|${hostDeviceId.trim()}`
+/** Normalize the origin while retaining case-sensitive reverse proxy paths. */
+export const cacheBucketId = (serverUrl: string, hostDeviceId: string, owner?: string): string => {
+  const address = serverUrl.trim().replace(/\/+$/u, '')
+  const normalized = address.replace(/^[a-z][a-z\d+.-]*:\/\/[^/]+/iu, (origin) => origin.toLowerCase())
+  return owner === undefined ? `${normalized}|${hostDeviceId.trim()}` : JSON.stringify([normalized, hostDeviceId.trim(), owner])
+}
 
 export interface CacheBucket {
   serverUrl: string
   hostDeviceId: string
+  owner?: string
   /** 缺省取当前时刻 */
   now?: number
 }
@@ -258,6 +262,7 @@ export interface CacheBucket {
 interface BucketRecord {
   serverUrl: string
   hostDeviceId: string
+  owner?: string
   savedAt: number
   sessions: unknown
 }
@@ -266,7 +271,9 @@ const bucketRecordOf = (root: Record<string, unknown>, bucketId: string): Record
   const buckets = root.buckets
   if (!isRecord(buckets)) return null
   const entry = buckets[bucketId]
-  return isRecord(entry) ? entry : null
+  if (!isRecord(entry) || typeof entry.serverUrl !== 'string' || typeof entry.hostDeviceId !== 'string') return null
+  const owner = typeof entry.owner === 'string' ? entry.owner : undefined
+  return cacheBucketId(entry.serverUrl, entry.hostDeviceId, owner) === bucketId ? entry : null
 }
 
 /** 把桶写回根对象，并顺手把超过 `MAX_BUCKETS` 的旧桶扔掉（按 `savedAt`）。 */
@@ -315,7 +322,7 @@ const sessionRowOf = (value: unknown): CachedSessionRow | null => {
 export const readSessionsCache = (bucket: CacheBucket): CachedSessions | null => {
   const root = readRoot(SESSIONS_CACHE_KEY)
   if (root === null) return null
-  const record = bucketRecordOf(root, cacheBucketId(bucket.serverUrl, bucket.hostDeviceId))
+  const record = bucketRecordOf(root, cacheBucketId(bucket.serverUrl, bucket.hostDeviceId, bucket.owner))
   if (record === null || !Array.isArray(record.sessions)) return null
   const sessions: CachedSessionRow[] = []
   for (const raw of record.sessions) {
@@ -333,9 +340,10 @@ const isStale = (savedAt: number, now: number | undefined): boolean =>
 /** 写一份列表缓存（服务端列表合并之后调；`sessions` 里的 `missingAt` 会被原样保存）。 */
 export const writeSessionsCache = (input: CacheBucket & { sessions: readonly CachedSessionRow[] }): void => {
   const now = input.now ?? Date.now()
-  putBucket(SESSIONS_CACHE_KEY, cacheBucketId(input.serverUrl, input.hostDeviceId), {
+  putBucket(SESSIONS_CACHE_KEY, cacheBucketId(input.serverUrl, input.hostDeviceId, input.owner), {
     serverUrl: input.serverUrl,
     hostDeviceId: input.hostDeviceId,
+    owner: input.owner,
     savedAt: now,
     sessions: input.sessions,
   })
@@ -421,6 +429,15 @@ const itemOf = (value: unknown): ChatItem | null => {
   if (!finiteNumber(value.createdAt)) return null
   const kind = value.kind
   if (kind !== 'message' && kind !== 'tool' && kind !== 'approval' && kind !== 'question') return null
+  if (kind === 'message' && value.pendingPrompt !== undefined) {
+    const prompt = value.pendingPrompt
+    if (value.role !== 'user' || value.sendState !== 'unconfirmed' || !nonEmptyString(value.requestRpcId) ||
+        value.id !== `local:${value.requestRpcId}` || !isRecord(prompt) ||
+        (prompt.mode !== 'queue' && prompt.mode !== 'steer') || !Array.isArray(prompt.attachments) ||
+        !prompt.attachments.every((part) => isRecord(part) && part.type === 'file' && nonEmptyString(part.receiptId))) {
+      delete value.pendingPrompt
+    }
+  }
   // 结构由我们自己写入，这里只做「像不像一条时间线行」的把关：
   // 真坏了（旧版本残留 / 手改）就整条丢掉，宁可少一条也不要渲染时崩。
   return value as unknown as ChatItem
@@ -430,14 +447,14 @@ const itemOf = (value: unknown): ChatItem | null => {
 export const readTimelineCache = (bucket: CacheBucket & { sessionId: string }): CachedTimeline | null => {
   const root = readRoot(TIMELINE_CACHE_KEY)
   if (root === null) return null
-  const record = bucketRecordOf(root, cacheBucketId(bucket.serverUrl, bucket.hostDeviceId))
+  const record = bucketRecordOf(root, cacheBucketId(bucket.serverUrl, bucket.hostDeviceId, bucket.owner))
   if (record === null || !isRecord(record.sessions)) return null
   const entry = record.sessions[bucket.sessionId]
   if (!isRecord(entry) || !Array.isArray(entry.items)) return null
   const items: ChatItem[] = []
   for (const raw of entry.items) {
     const item = itemOf(raw)
-    if (item !== null) items.push(item)
+    if (item !== null && item.sessionId === bucket.sessionId) items.push(item)
   }
   if (items.length === 0) return null
   const savedAt = savedAtOf(entry)
@@ -451,18 +468,20 @@ const scrubItem = (item: ChatItem): ChatItem => {
   if (copy.kind === 'message') {
     delete copy.streaming
     delete copy.streamingPhase
+    if (copy.sendState === 'queued') copy.sendState = 'unconfirmed'
+    if (copy.pendingPrompt?.attachments.some((part) => part.type === 'image')) delete copy.pendingPrompt
   }
   return copy
 }
 
 /**
- * 裁剪：先洗掉「还在发送中」的乐观行（下次打开时它已经不再是事实），
+ * 裁剪：将已开始发送的持久化草稿视作结果待确认，
  * 再取最近 `TIMELINE_MAX_ITEMS` 条，最后从**最新往旧**累加字节，超 1 MiB 就停。
  *
  * 从最新往前留，是因为「一屏之内看得到的东西」比「翻到很上面才有的东西」重要得多。
  */
 export const trimTimelineForCache = (items: readonly ChatItem[]): ChatItem[] => {
-  const usable = items.filter(item => !(item.kind === 'message' && item.sendState === 'queued'))
+  const usable = items.filter(item => !(item.kind === 'message' && item.sendState === 'queued' && item.pendingPrompt === undefined))
   const spoiled = usable.map(scrubItem)
   const recent = spoiled.slice(Math.max(0, spoiled.length - TIMELINE_MAX_ITEMS))
   const kept: ChatItem[] = []
@@ -482,6 +501,7 @@ export const trimTimelineForCache = (items: readonly ChatItem[]): ChatItem[] => 
 export interface WriteTimelineInput extends CacheBucket {
   sessionId: string
   items: readonly ChatItem[]
+  replaceEmpty?: boolean
 }
 
 /**
@@ -495,15 +515,20 @@ export interface WriteTimelineInput extends CacheBucket {
  * 宁可少缓存几个旧会话，也不能让写盘长期失败（那样连列表缓存都会一起写不进去）。
  */
 export const writeTimelineCache = (input: WriteTimelineInput): number => {
-  const trimmed = trimTimelineForCache(input.items)
-  if (trimmed.length === 0) return 0
+  const trimmed = trimTimelineForCache(input.items.filter((item) => item.sessionId === input.sessionId))
+  if (trimmed.length === 0 && input.replaceEmpty !== true) return 0
   const now = input.now ?? Date.now()
-  const bucketId = cacheBucketId(input.serverUrl, input.hostDeviceId)
+  const bucketId = cacheBucketId(input.serverUrl, input.hostDeviceId, input.owner)
   const root = readRoot(TIMELINE_CACHE_KEY) ?? { v: CACHE_VERSION, buckets: {} }
   const buckets = isRecord(root.buckets) ? { ...root.buckets } : {}
-  const existing = isRecord(buckets[bucketId]) ? buckets[bucketId] : null
+  const existing = bucketRecordOf(root, bucketId)
   const sessions = existing !== null && isRecord(existing.sessions) ? { ...existing.sessions } : {}
-  sessions[input.sessionId] = { savedAt: now, items: trimmed }
+  if (trimmed.length > 0) {
+    sessions[input.sessionId] = { savedAt: now, items: trimmed }
+  } else {
+    if (!Object.hasOwn(sessions, input.sessionId)) return 0
+    delete sessions[input.sessionId]
+  }
 
   /** 按 LRU 截到 `limit` 个会话后落盘；返回是否写成功。 */
   const writeWith = (limit: number): boolean => {
@@ -513,6 +538,7 @@ export const writeTimelineCache = (input: WriteTimelineInput): number => {
     buckets[bucketId] = {
       serverUrl: input.serverUrl,
       hostDeviceId: input.hostDeviceId,
+      owner: input.owner,
       savedAt: now,
       sessions: keptSessions,
     }
@@ -544,9 +570,9 @@ const rpcIdOf = (item: ChatItem): string | undefined =>
     ? item.requestRpcId
     : undefined
 
-/** 本地乐观行的投递状态（只有消息行有；这里做一次收窄，免得每处都写 `kind === 'message'`）。 */
-const sendStateOf = (item: ChatItem): string | undefined =>
-  item.kind === 'message' ? item.sendState : undefined
+const isLocalPrompt = (item: ChatItem): boolean =>
+  item.kind === 'message' && item.role === 'user' &&
+  item.id.startsWith('local:') && seqOf(item) === undefined
 
 /**
  * 把「本地已有（缓存 + 乐观行）」并进服务端给的窗口。规则表见文件头。
@@ -557,11 +583,12 @@ const sendStateOf = (item: ChatItem): string | undefined =>
 export const mergeTimelineItems = (
   local: readonly ChatItem[],
   fresh: readonly ChatItem[],
+  retainEarlier = true,
 ): ChatItem[] => {
   if (local.length === 0) return [...fresh]
   if (fresh.length === 0) {
     // 服务端说这个窗口是空的：只保留还没落定的乐观行，其余都是过期缓存
-    return local.filter(item => rpcIdOf(item) !== undefined || sendStateOf(item) !== undefined)
+    return local.filter(isLocalPrompt)
   }
 
   const freshIds = new Set(fresh.map(item => item.id))
@@ -581,15 +608,11 @@ export const mergeTimelineItems = (
   for (const item of local) {
     if (freshIds.has(item.id)) continue // 服务端权威覆盖同 id
     const rpcId = rpcIdOf(item)
-    if (rpcId !== undefined) {
-      // 乐观行：服务端回显了同一个 rpcId 就丢；没有就接在后面
-      if (!freshRpcIds.has(rpcId)) trailing.push(item)
+    if (isLocalPrompt(item)) {
+      if (rpcId === undefined || !freshRpcIds.has(rpcId)) trailing.push(item)
       continue
     }
-    if (sendStateOf(item) !== undefined) {
-      trailing.push(item)
-      continue
-    }
+    if (!retainEarlier) continue
     const seq = seqOf(item)
     const older = seq !== undefined && oldestSeq !== undefined ? seq < oldestSeq : item.createdAt < oldestTime
     if (older) leading.push(item)

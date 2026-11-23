@@ -39,6 +39,8 @@ import { closeMobileSider } from '../components/sider/mobileSiderState.js'
 import { MobileSider, Sider } from '../components/sider/Sider.js'
 import { RemoteChatView } from '../components/remote/RemoteChatView.js'
 import { useRemoteMode } from '../components/remote/RemoteModeSwitch.js'
+import { WorkspacePane } from '../components/remote/workspace/WorkspacePane.js'
+import { TabletHeader } from '../components/session/TabletHeader.js'
 import styles from './App.module.css'
 
 /**
@@ -79,12 +81,12 @@ export const App = () => {
   const sessionLoadError = useChatStore((state) =>
     state.activeId === null ? false : state.sessionLoadErrors[state.activeId] === true
   )
-  const frameRef = useMobileViewport(isMobile)
   const streaming = useChatStore((state) =>
     state.activeId === null ? false : Object.hasOwn(state.streaming, state.activeId)
   )
   const activeId = useChatStore((state) => state.activeId)
   const uiScale = useSettings((state) => state.uiScale)
+  useMobileViewport(uiScale)
   const autoCheckUpdate = useSettings((state) => state.autoCheckUpdate)
   // 本机 / 远程 双态：远程模式复用同一套壳，只是把内容区换成远端会话
   const chatMode = useRemoteMode((state) => state.mode)
@@ -164,7 +166,7 @@ export const App = () => {
 
   return (
     <>
-      <div ref={frameRef} className={styles.frame}>
+      <div className={styles.frame}>
         {isMobile ? <MobileSider /> : <SiderSlot collapsed={siderCollapsed} />}
         <main className={styles.main}>
           {chatMode === 'local' && saveError ? (
@@ -183,10 +185,15 @@ export const App = () => {
           <div className={styles.content}>
             {chatMode === 'remote' ? (
               // 远程模式不另开页面：左栏仍是侧栏（列表换成远程会话），右栏换成远程会话页
-              <RemoteChatView />
+              <div className={styles.remoteWorkspace}>
+                <div className={styles.remoteConversation}>
+                  <RemoteChatView />
+                </div>
+                <WorkspacePane />
+              </div>
             ) : !ready || (activeId !== null && !session) ? (
               <div className={styles.loadingView}>
-                {isMobile ? <MobileHeader /> : null}
+                {isMobile ? <MobileHeader /> : <TabletHeader />}
                 {(!ready ? initError : sessionLoadError) ? (
                   <div className={styles.loadingState} role="status" aria-live="polite">
                     <span>{t(!ready ? 'sessionListLoadFailed' : 'sessionLoadFailed')}</span>
@@ -218,7 +225,6 @@ export const App = () => {
               <SessionView
                 session={session}
                 streaming={streaming}
-                siderCollapsed={siderCollapsed}
               />
             ) : (
               <Welcome />

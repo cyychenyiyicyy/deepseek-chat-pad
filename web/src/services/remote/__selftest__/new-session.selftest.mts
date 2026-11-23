@@ -223,13 +223,16 @@ const connectFake = (
     error: null,
     openSession: async (id: string) => {
       opened.push(id)
+      useRemoteStore.setState({ activeSessionId: id })
     },
     refreshSessions: async () => {
       refreshed.push(Date.now())
     },
-    // [R15] createAndSend 的最后一步是 send(text)：这里不接住就会走真 sendFlow
-    send: async (text: string) => {
+    sendToSession: async (target, id, text) => {
+      assertEqual(target === fake.target, true, '首条消息沿用新建会话所在连接')
+      assertEqual(id, opened.at(-1), '首条消息只发往刚建的会话')
       sent.push(text)
+      return true
     },
   })
   if (options.sessionList !== undefined) {
@@ -389,13 +392,15 @@ check('A5：normalizeWorkspacePath 只放绝对路径、拒 NUL / 空 / 相对�
  * ──────────────────────────────────────────────────────────────────────── */
 
 check('B6：session/create 的请求体严格是 {request:{workspaceId,agentPreset}}', async () => {
+  const current = fakeTarget()
+  observeRemoteTarget(current.target)
   const fake = fakeTarget({ 'session/create': { ok: true, value: { sessionId: 'new-1', agentPreset: 'work' } } })
   const created = await createSession(fake.target, { workspaceId: 'ws-1', agentPreset: 'work' })
   assertEqual(created, { sessionId: 'new-1', agentPreset: 'work' }, '返回值')
   const call = callAt(fake, 0)
   assertEqual(call.endpoint, 'session/create', '端点')
   assertEqual(call.args, { request: { workspaceId: 'ws-1', agentPreset: 'work' } }, 'args 形状')
-  assertEqual(lastRemoteTarget(), fake.target, '调用被观察者记下来了（newSessionStore 靠它取连接）')
+  assertEqual(lastRemoteTarget() === current.target, true, '旧连接的调用不能覆盖当前连接')
 })
 
 check('B7：老 Host 的 gateway/arguments-invalid → 去掉 preset 重试 + agentPresets/select', async () => {
@@ -766,27 +771,16 @@ check('D16：session/rename 覆盖本地标题；session/fork 建完直接进会
   assertEqual(forked, 's-fork', 'forkSession 返回新 id')
 })
 
-check('C18：probeCapabilities 先等连接对象出现，再一次性把能力打开（空态按钮靠它）', async () => {
+check('C18：probeCapabilities 在连接就绪后只读取一次清单，包括空主机', async () => {
   resetNewSession()
-  // 连接对象还没被任何业务调用记下来（`store.ts` 里 phase=ready 早于第一次业务调用）
-  observeRemoteTarget(null)
+  const fake = fakeTarget({ ...FULL_REPLIES, 'session/list': { ok: true, value: { sessions: [] } } })
+  observeRemoteTarget(fake.target)
   useRemoteStore.setState({ phase: 'ready', openSession: async () => undefined, refreshSessions: async () => undefined })
-  useNewSessionStore.setState({ capabilities: { workspace: false, workspaceCreate: false, create: false, directory: false, permission: false, agentPreset: false, model: false, search: false, manage: false } })
-
-  const fake = fakeTarget(FULL_REPLIES)
-  // 150ms 后才「出现」连接对象（模拟 $events / session/list 稍后才发出）
-  const timer = setTimeout(() => {
-    observeRemoteTarget(fake.target)
-  }, 150)
-  try {
-    await useNewSessionStore.getState().probeCapabilities()
-  } finally {
-    clearTimeout(timer)
-  }
+  await useNewSessionStore.getState().probeCapabilities()
   const state = useNewSessionStore.getState()
-  assertEqual(state.rows.length, 3, '等到连接对象后拉到了清单')
+  assertEqual(state.rows.length, 0, '主机没有会话')
   assertEqual(state.capabilities.create, true, '能力被打开（按钮才会出现）')
-  assertTrue(endpointCount(fake, 'session/list') >= 1, '真的发过 session/list')
+  assertEqual(endpointCount(fake, 'session/list'), 1, '空清单也只拉取一次')
 
   // 完全没有连接（phase 不对）→ 静默放弃，能力保持关闭，不抛
   observeRemoteTarget(null)

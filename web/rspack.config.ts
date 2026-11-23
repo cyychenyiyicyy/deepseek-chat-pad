@@ -10,6 +10,10 @@ const root = path.dirname(fileURLToPath(import.meta.url))
 const { version } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as {
   version: string
 }
+const pdfLibrary = path.resolve(root, 'node_modules/pdfjs-dist')
+const { version: pdfVersion } = JSON.parse(readFileSync(path.join(pdfLibrary, 'package.json'), 'utf8')) as {
+  version: string
+}
 // 版本号与 Android 端共用同一来源（android/version.properties）；
 // 单独部署前端时读不到该文件，退回 package.json 的版本，避免构建直接失败
 const appVersion = (() => {
@@ -104,6 +108,10 @@ export const createConfig = ({
         { from: path.resolve(root, 'LICENSE'), to: 'LICENSE', toType: 'file' },
         // 离线模型目录：public 下的文件原样拷到产物根目录
         { from: path.resolve(root, 'public'), to: '.', noErrorOnMissing: true },
+        ...['cmaps', 'standard_fonts', 'wasm', 'iccs', 'LICENSE'].map((entry) => ({
+          from: path.join(pdfLibrary, entry),
+          to: `static/pdf/${pdfVersion}/${entry}`,
+        })),
       ],
     }),
   ],

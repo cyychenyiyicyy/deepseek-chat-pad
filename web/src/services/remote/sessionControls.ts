@@ -514,6 +514,26 @@ export interface RemoteQueueItem {
  */
 const OWN_QUEUE_KINDS = new Set(['user', 'schedule', 'user-question-reply'])
 
+export const queuedPromptIds = (sessionId: string, projections?: unknown): Set<string> => {
+  const values = projectionCache.get(sessionId)
+  const snapshot = isRecord(projections) ? projections : undefined
+  const nested = snapshot?.[sessionId]
+  const block = isRecord(nested) ? nested : snapshot
+  const snapshotValues = isRecord(block?.values) ? block.values : block
+  const ids = new Set<string>()
+  for (const inbox of [values?.inbox, snapshotValues?.inbox]) {
+    if (!isRecord(inbox)) continue
+    for (const slot of ['next-step', 'next-turn']) {
+      for (const item of asArray(inbox[slot])) {
+        if (!isRecord(item) || !isRecord(item.source) || item.source.kind !== 'user') continue
+        const id = asString(item.source.rpcId)
+        if (id !== undefined) ids.add(id)
+      }
+    }
+  }
+  return ids
+}
+
 /**
  * `projections.values.inbox` → 队列条目（只取 `next-turn`）。
  *
@@ -815,6 +835,7 @@ export interface ChatControlsState {
   title: string | null
   /** 投影里的 `usage`（没有就由 UI 用时间线汇总） */
   usage: RemoteUsage | null
+  goalProjection: unknown
 
   /* ── 忙碌 / 错误 ── */
   loadingModel: boolean
@@ -859,6 +880,7 @@ const INITIAL_CONTROLS = {
   questions: EMPTY_QUESTIONS,
   title: null as string | null,
   usage: null as RemoteUsage | null,
+  goalProjection: undefined,
   loadingModel: false,
   loadingPermission: false,
   loadingCommands: false,
@@ -1372,6 +1394,7 @@ const applyProjection = (sessionId: string): void => {
         : useChatControls.getState().permissions,
     queue: parseInboxQueue(values.inbox),
     usage: usageOfProjection(values.usage),
+    goalProjection: values.goal,
   })
   // 投影里的权限列表比 `permissionPresets/catalog` 更贴近会话：有它就说明能力可用
   if (permissions !== null) {

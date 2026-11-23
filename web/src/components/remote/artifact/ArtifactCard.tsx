@@ -100,7 +100,7 @@ export const ArtifactCard = ({ group }: { group: TurnArtifacts }) => {
  * 说明那一行按官方的 `cardDescription()`（`PresentedFileCard.tsx:13-16`）去掉
  * 结尾的括注 —— 模型常把 `（2.88MB，已签名）` 这类噪音缀在说明后面。
  */
-export const ArtifactTile = ({ file }: { file: ArtifactFile }) => {
+export const ArtifactTile = ({ file, onOpened }: { file: ArtifactFile; onOpened?: () => void }) => {
   const t = useTranslate()
   const [busy, setBusy] = useState(false)
   const metadata = file.extension.length > 0 ? file.extension : t('artifactFile')
@@ -113,7 +113,9 @@ export const ArtifactTile = ({ file }: { file: ArtifactFile }) => {
       return
     }
     setBusy(true)
-    void openArtifactFile(file).finally(() => setBusy(false))
+    void openArtifactFile(file).then((result) => {
+      if (result === 'opened') onOpened?.()
+    }).finally(() => setBusy(false))
   }
 
   return (

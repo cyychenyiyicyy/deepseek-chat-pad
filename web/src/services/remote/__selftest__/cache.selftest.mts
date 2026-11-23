@@ -231,6 +231,27 @@ check('A5 分桶：URL 归一化后同桶，hostDeviceId 不同就不同桶', as
   assertEqual(readSessionsCache(bucket({ hostDeviceId: 'host-b' })), null, '别的 Host 读不到')
 })
 
+check('A6 大小写不同的反代路径不共享列表或历史', async () => {
+  clearCacheKeys()
+  const upper = bucket({ serverUrl: SERVER + '/Relay' })
+  const lower = bucket({ serverUrl: SERVER + '/relay' })
+  writeSessionsCache({ ...upper, sessions: [{ id: SESSION, title: 'Upper' }] })
+  writeTimelineCache({ ...upper, sessionId: SESSION, items: [message('upper-only', T0)] })
+  writeSessionsCache({ ...lower, sessions: [{ id: SESSION, title: 'Lower' }] })
+  writeTimelineCache({ ...lower, sessionId: SESSION, items: [message('lower-only', T0)] })
+  assertEqual(readSessionsCache(upper)?.sessions[0]?.title, 'Upper', '路径 Relay 的列表')
+  assertEqual(readSessionsCache(lower)?.sessions[0]?.title, 'Lower', '路径 relay 的列表')
+  assertEqual(readTimelineCache({ ...upper, sessionId: SESSION })?.items[0]?.id, 'upper-only', '路径 Relay 的历史')
+  assertEqual(readTimelineCache({ ...lower, sessionId: SESSION })?.items[0]?.id, 'lower-only', '路径 relay 的历史')
+  for (const key of [SESSIONS_CACHE_KEY, TIMELINE_CACHE_KEY]) {
+    const root = JSON.parse(memory.get(key)!)
+    root.buckets[cacheBucketId(lower.serverUrl, HOST)] = root.buckets[cacheBucketId(upper.serverUrl, HOST)]
+    memory.set(key, JSON.stringify(root))
+  }
+  assertEqual(readSessionsCache(lower), null, '拒绝旧版误入小写桶的列表')
+  assertEqual(readTimelineCache({ ...lower, sessionId: SESSION }), null, '拒绝旧版误入小写桶的历史')
+})
+
 /* ════════════════════════════════════════════════════════════════════════
  * B. 会话列表合并
  * ════════════════════════════════════════════════════════════════════════ */
@@ -395,13 +416,30 @@ check('C5 瞬态字段（streaming）落盘时被清掉', async () => {
   assertEqual(first?.kind === 'message' ? first.text : '', '正在写', '正文还在')
 })
 
+check('加载一条未确认的纯附件消息并按原请求 ID 对账', async () => {
+  clearCacheKeys()
+  const id = 'attachment-request'
+  const pending = userMessage(`local:${id}`, T0, {
+    text: '', requestRpcId: id, sendState: 'queued', hasFiles: true,
+    pendingPrompt: { mode: 'steer', attachments: [{ type: 'file', receiptId: 'file-receipt' }] },
+  })
+  writeTimelineCache({ ...bucket(), sessionId: SESSION, items: [pending] })
+  const cached = readTimelineCache({ ...bucket(), sessionId: SESSION })?.items ?? []
+  const local = cached[0]
+  assertEqual(local?.kind === 'message' && local.sendState, 'unconfirmed', '重启后不能确认发送结果')
+  assertEqual(local?.kind === 'message' && local.pendingPrompt, pending.pendingPrompt, '保留附件收据和插话模式')
+  assertEqual(readTimelineCache({ ...bucket(), sessionId: 'other' }), null, '其他会话读不到')
+  const echo = userMessage('host-echo', T0, { requestRpcId: id, hasFiles: true })
+  assertEqual(mergeTimelineItems(cached, [echo]), [echo], '主机回显替换本地发送记录')
+})
+
 check('C6 同一桶最多 4 个会话（第 5 个把最旧的挤掉）', async () => {
   clearCacheKeys()
   for (let index = 0; index < MAX_TIMELINES_PER_BUCKET + 1; index += 1) {
     writeTimelineCache({
       ...bucket({ now: T0 + index }),
       sessionId: `s-${index}`,
-      items: [message(`m-${index}`, T0 + index)],
+      items: [message(`m-${index}`, T0 + index, { sessionId: `s-${index}` })],
     })
   }
   assertEqual(readTimelineCache({ ...bucket(), sessionId: 's-0' }), null, '最旧的被挤掉')
@@ -411,8 +449,8 @@ check('C6 同一桶最多 4 个会话（第 5 个把最旧的挤掉）', async (
 check('C7 配额满：先退成「只留当前会话」再写一次（别让写盘长期失败）', async () => {
   clearCacheKeys()
   // 先塞满两个会话
-  writeTimelineCache({ ...bucket({ now: T0 }), sessionId: 's-a', items: [message('a-1', T0)] })
-  writeTimelineCache({ ...bucket({ now: T0 + 1 }), sessionId: 's-b', items: [message('b-1', T0 + 1)] })
+  writeTimelineCache({ ...bucket({ now: T0 }), sessionId: 's-a', items: [message('a-1', T0, { sessionId: 's-a' })] })
+  writeTimelineCache({ ...bucket({ now: T0 + 1 }), sessionId: 's-b', items: [message('b-1', T0 + 1, { sessionId: 's-b' })] })
   // 再模拟「写的时候配额满了」：第一次 setItem 抛错，第二次放行
   const originalSetItem = localStorageStub.setItem
   let thrown = false
@@ -427,7 +465,7 @@ check('C7 配额满：先退成「只留当前会话」再写一次（别让写�
     const written = writeTimelineCache({
       ...bucket({ now: T0 + 2 }),
       sessionId: 's-c',
-      items: [message('c-1', T0 + 2)],
+      items: [message('c-1', T0 + 2, { sessionId: 's-c' })],
     })
     assertEqual(written, 1, '还是写下去了')
   } finally {
@@ -450,7 +488,7 @@ check('D1 同 id：服务端那份胜出', async () => {
 })
 
 check('D2 乐观行已被回显（同 requestRpcId）→ 丢弃', async () => {
-  const local: ChatItem[] = [userMessage('local-1', T0 - 1_000, { requestRpcId: 'rpc-a', sendState: 'queued' })]
+  const local: ChatItem[] = [userMessage('local:rpc-a', T0 - 1_000, { requestRpcId: 'rpc-a', sendState: 'queued' })]
   const fresh: ChatItem[] = [userMessage('msg-user-1', T0 - 1_000, { requestRpcId: 'rpc-a' })]
   const merged = mergeTimelineItems(local, fresh)
   assertEqual(idsOf(merged), ['msg-user-1'], '只留服务端那条')
@@ -459,11 +497,11 @@ check('D2 乐观行已被回显（同 requestRpcId）→ 丢弃', async () => {
 check('D3 乐观行还没回显 → 保留在尾部', async () => {
   const local: ChatItem[] = [
     message('m-1', T0 - 5_000),
-    userMessage('local-1', T0, { requestRpcId: 'rpc-z', sendState: 'queued' }),
+    userMessage('local:rpc-z', T0, { requestRpcId: 'rpc-z', sendState: 'queued' }),
   ]
   const fresh: ChatItem[] = [message('m-1', T0 - 5_000), message('m-2', T0 - 2_000)]
   const merged = mergeTimelineItems(local, fresh)
-  assertEqual(idsOf(merged), ['m-1', 'm-2', 'local-1'], '服务端窗口在前、乐观行在尾')
+  assertEqual(idsOf(merged), ['m-1', 'm-2', 'local:rpc-z'], '服务端窗口在前、乐观行在尾')
 })
 
 check('D4 更早的历史页留在头部，顺序不变', async () => {
@@ -476,10 +514,13 @@ check('D4 更早的历史页留在头部，顺序不变', async () => {
 check('D5 服务端窗口为空 → 只剩未落定的乐观行', async () => {
   const local: ChatItem[] = [
     message('stale-1', T0 - 9_000),
-    userMessage('local-1', T0, { requestRpcId: 'rpc-z', sendState: 'queued' }),
+    userMessage('stale-user', T0 - 8_000, { requestRpcId: 'other-session-rpc', nativeSeq: 1 }),
+    userMessage('local:rpc-z', T0, { requestRpcId: 'rpc-z', sendState: 'queued' }),
   ]
   const merged = mergeTimelineItems(local, [])
-  assertEqual(idsOf(merged), ['local-1'], '过期缓存丢掉、在飞的留着')
+  assertEqual(idsOf(merged), ['local:rpc-z'], '过期缓存丢掉、在飞的留着')
+  const refreshed = mergeTimelineItems(local, [message('fresh', T0 - 1_000, { nativeSeq: 10 })], false)
+  assertEqual(idsOf(refreshed), ['fresh', 'local:rpc-z'], '首次快照之后不混入旧缓存，只保留本地发送行')
 })
 
 check('D6 与真实快照组合：parseSnapshot → reduceSnapshot → merge', async () => {
@@ -530,12 +571,12 @@ check('D6 与真实快照组合：parseSnapshot → reduceSnapshot → merge', a
   // 本地：一条缓存里的旧用户行（同一个 rpcId，应被回显取代）+ 一条还没回显的乐观行
   const local: ChatItem[] = [
     userMessage('cached-user', 1_010, { requestRpcId: 'rpc-0', text: '你好' }),
-    userMessage('local-pending', 1_040, { requestRpcId: 'rpc-9', sendState: 'queued', text: '再问一句' }),
+    userMessage('local:rpc-9', 1_040, { requestRpcId: 'rpc-9', sendState: 'queued', text: '再问一句' }),
   ]
   const merged = mergeTimelineItems(local, fresh.items)
   const ids = idsOf(merged)
   assertEqual(ids.includes('cached-user'), false, '被回显的缓存行丢掉')
-  assertEqual(ids.at(-1), 'local-pending', '未回显的乐观行接在最后')
+  assertEqual(ids.at(-1), 'local:rpc-9', '未回显的乐观行接在最后')
   assertEqual(ids.includes('msg-asst-1'), true, '服务端正文都在')
   assertEqual(merged.length, fresh.items.length + 1, '只多出那一条乐观行')
 })
@@ -635,11 +676,20 @@ const lastSession = {
   savedAt: T0,
 }
 
+const { pinHostIdentityKey, upsertAccount } = await import('../storage.js')
+const fixtureIdentity = 'B' + 'A'.repeat(42)
+const fixtureDeviceId = 'cache-fixture-device'
+const fixtureOwner = JSON.stringify([fixtureIdentity, fixtureDeviceId, lastSession.email])
+
 check('F1 hydrateCachedSessions：缓存铺进 sessions + cacheStatus（含 ghost 标注）', async () => {
   clearCacheKeys()
+  pinHostIdentityKey(SERVER, { deviceId: HOST, identityKey: fixtureIdentity })
+  upsertAccount({ serverUrl: SERVER, email: lastSession.email, deviceId: fixtureDeviceId,
+    accessToken: 'fixture-access-token', refreshToken: 'fixture-refresh-token', scope: 'device' })
   // 一份「上次跑完」的缓存：两行正常 + 一行上次就标过已不存在
   writeSessionsCache({
     ...bucket({ now: Date.now() }),
+    owner: fixtureOwner,
     sessions: [
       { id: 's-1', title: '上次的会话', pinned: true, updatedAt: T0 - 1_000 },
       { id: 's-2', title: '另一个', updatedAt: T0 - 2_000 },
@@ -660,6 +710,17 @@ check('F1 hydrateCachedSessions：缓存铺进 sessions + cacheStatus（含 ghos
   assertEqual(state.cacheStatus.sessionsFromCache, true, '标记「来自缓存」→ UI 挂「正在同步」小标')
   assertEqual(state.cacheStatus.sessionsSynced, false, '还没跟服务端对过')
   assertEqual(state.cacheStatus.ghostSessionIds, ['s-gone'], '上次标过的还标着')
+})
+
+check('离线启动只加载绑定公钥及客户端的缓存', async () => {
+  clearCacheKeys()
+  const selected = bucket({ now: Date.now() })
+  writeSessionsCache({ ...selected, sessions: [{ id: 'old', title: 'Unscoped legacy list' }] })
+  writeSessionsCache({ ...selected, owner: JSON.stringify([fixtureIdentity, 'other-device', lastSession.email]),
+    sessions: [{ id: 'other', title: 'Other device list' }] })
+  useRemoteStore.setState({ sessions: [], lastSession, cacheStatus: cache.emptyCacheStatus() })
+  useRemoteStore.getState().hydrateCachedSessions()
+  assertEqual(useRemoteStore.getState().sessions, [], '没有同一归属的缓存时等待主机')
 })
 
 check('F2 hydrateCachedSessions：已有实时列表就不拿缓存盖回去', async () => {

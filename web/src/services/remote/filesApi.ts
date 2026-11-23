@@ -22,7 +22,7 @@
  * | `workspaceFiles/stat` | `{workspaceFileScopeId, path}` | `{absolutePath, version, bytes?}` |
  * | `workspaceFiles/read` | `{workspaceFileScopeId, path, range:{offset,limit}}`（**行号从 1 起**） | `{absolutePath, version, text, offset, lines, eof}` |
  * | `workspaceFiles/readBytes` | `{workspaceFileScopeId, path, range:{offset,length}}`（**字节偏移**） | `{absolutePath, version, bytes?, offset, eof, data:<base64>}` |
- * | `workspaceFiles/changes` | `{workspaceFileScopeId, path}` | 变更元信息（本批只透传，不订阅） |
+ * | `workspaceFiles/changes` | `{workspaceFileScopeId, path}` | 当前目录或文件的变更订阅 |
  *
  * ## 二、三条必须照做的限制（写错就是白跑或 OOM）
  *
@@ -73,7 +73,7 @@
  */
 
 import { RemoteApiError, isRemoteApiError } from './serverApi.js'
-import { callEndpoint, lastRemoteTarget, type RemoteCallTarget } from './sessionsApi.js'
+import { callEndpoint, lastRemoteTarget, type RemoteCallTarget, type RemoteStreamHandle } from './sessionsApi.js'
 import { useRemoteStore } from './store.js'
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -634,7 +634,7 @@ export const readWorkspaceBytesRange = async (
   path: string,
   offset: number,
   limit: number,
-  options: { timeoutMs?: number; signal?: AbortSignal; chunkBytes?: number } = {},
+  options: { timeoutMs?: number; signal?: AbortSignal; chunkBytes?: number; expectedVersion?: string } = {},
 ): Promise<WorkspaceBytesResult> => {
   if (!Number.isFinite(limit) || limit <= 0) {
     throw new RemoteApiError('INVALID_ARGUMENT', 'readBytes 的 limit 必须是正数')
@@ -650,6 +650,9 @@ export const readWorkspaceBytesRange = async (
     if (options.signal?.aborted === true) throw new RemoteApiError('RPC_ABORTED', '已取消读取')
     const want = Math.min(chunkBytes, limit - read)
     const chunk = await readWorkspaceBytes(target, scopeId, path, cursor, want, options)
+    if (options.expectedVersion !== undefined && chunk.version !== options.expectedVersion) {
+      throw new RemoteApiError('WORKSPACE_FILE_CHANGED', 'The workspace file changed during the preview.')
+    }
     chunks.push(chunk.data)
     read += chunk.data.byteLength
     cursor += chunk.data.byteLength
@@ -697,8 +700,10 @@ const IMAGE_EXTENSION_MIME: Readonly<Record<string, string>> = {
   webp: 'image/webp',
 }
 
-/** 预览种类。`binary` 只给占位（含 PDF / Office / 压缩包）。 */
-export type WorkspaceFileKind = 'text' | 'image' | 'binary'
+const OFFICE_EXTENSIONS = new Set(['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx'])
+
+/** 预览种类。`binary` 只显示文件信息。 */
+export type WorkspaceFileKind = 'text' | 'image' | 'pdf' | 'office' | 'binary'
 
 /** 取小写扩展名（没有就 `undefined`）。 */
 export const extensionOf = (name: string): string | undefined => {
@@ -715,6 +720,8 @@ export const fileKindOf = (name: string): WorkspaceFileKind => {
     return TEXT_NAMES.has(base) ? 'text' : 'binary'
   }
   if (IMAGE_EXTENSION_MIME[extension] !== undefined) return 'image'
+  if (extension === 'pdf') return 'pdf'
+  if (OFFICE_EXTENSIONS.has(extension)) return 'office'
   if (TEXT_EXTENSIONS.has(extension)) return 'text'
   return 'binary'
 }
@@ -837,8 +844,7 @@ export const parseWorkspaceChanges = (value: unknown, fallbackPath: string): Wor
 /**
  * 读变更：`workspaceFiles/changes`（call）。
  *
- * 本批**界面不订阅**它：一次 `list` 的成本比维护增量游标低，且老 Host 对这个端点的
- * `path` 参数做过兼容分支（input-B §2.8.1）。函数留在这里，给后续「自动刷新」用。
+ * 兼容旧主机的单次读取形态。新主机使用 `watchWorkspacePath`。
  */
 export const readWorkspaceChanges = async (
   target: RemoteCallTarget,
@@ -855,6 +861,12 @@ export const readWorkspaceChanges = async (
   )
   return parseWorkspaceChanges(result, args.path)
 }
+
+export const watchWorkspacePath = (
+  target: RemoteCallTarget, scopeId: string, path: string,
+): Promise<RemoteStreamHandle> => target.openStream(WorkspaceFileEndpoints.changes, {
+  args: { workspaceFileScopeId: scopeId, path: pathArgument(path) },
+})
 
 /* ────────────────────────────────────────────────────────────────────────
  * 九、会话附件上传（`fileUploads/upload`）
@@ -1045,11 +1057,11 @@ export const parseSessionAttachment = (value: unknown, fallback: AttachmentRefer
 const ATTACHMENT_REFERENCE_REJECTIONS = new Set(['gateway/arguments-invalid', 'gateway/input-invalid'])
 
 /** 一条连接的「附件完整引用是否支持」缓存（与 Dart 客户端同一策略，见 `session_api.dart:550-585`）。 */
-let attachmentReferenceSupport: boolean | null = null
+let attachmentReferenceSupport = new WeakMap<RemoteCallTarget, boolean>()
 
 /** 换连接时清缓存（`RemoteChatView` 在 `activeSessionId` 变化时调用即可）。 */
 export const resetAttachmentSupport = (): void => {
-  attachmentReferenceSupport = null
+  attachmentReferenceSupport = new WeakMap()
 }
 
 /**
@@ -1097,17 +1109,17 @@ export const readSessionAttachment = async (
     )
 
   let response: unknown
-  if (attachmentReferenceSupport === false) {
+  if (attachmentReferenceSupport.get(target) === false) {
     response = await read(false)
   } else {
     try {
       response = await read(true)
-      attachmentReferenceSupport = true
+      attachmentReferenceSupport.set(target, true)
     } catch (error) {
       const code = errorCodeOf(error)
-      if (attachmentReferenceSupport === true || !ATTACHMENT_REFERENCE_REJECTIONS.has(code)) throw error
+      if (attachmentReferenceSupport.get(target) === true || !ATTACHMENT_REFERENCE_REJECTIONS.has(code)) throw error
       response = await read(false)
-      attachmentReferenceSupport = false
+      attachmentReferenceSupport.set(target, false)
     }
   }
   return parseSessionAttachment(response, ref)
@@ -1203,6 +1215,9 @@ interface ToolImageCacheEntry {
 
 const toolImageCache = new Map<string, ToolImageCacheEntry>()
 const toolImageInflight = new Map<string, Promise<string | null>>()
+const toolImageConnections = new WeakMap<RemoteCallTarget, number>()
+let toolImageConnectionId = 0
+let toolImageCacheGeneration = 0
 
 let activeToolImageLoads = 0
 const toolImageWaiters: Array<() => void> = []
@@ -1252,6 +1267,7 @@ export const toolImageLoaderStats = (): ToolImageLoaderStats => {
 
 /** 清缓存（换连接 / 退出远程模式时调；自测里也用它把用例之间的状态隔开）。 */
 export const clearToolImageCache = (): void => {
+  toolImageCacheGeneration += 1
   toolImageCache.clear()
   toolImageInflight.clear()
 }
@@ -1321,6 +1337,7 @@ const lastTargetOrThrow = (): RemoteCallTarget => {
 
 /** 真正的那一次附件读取：抢名额 → 取字节 → 转 data URL → 进缓存。 */
 const runToolImageAttachmentLoad = async (
+  target: RemoteCallTarget,
   key: string,
   scope: string,
   image: AttachmentReference,
@@ -1328,17 +1345,17 @@ const runToolImageAttachmentLoad = async (
 ): Promise<string | null> => {
   // 用一个取值函数而不是直接读 `options.signal?.aborted`：`await` 前后各判一次，
   // 直接读会被 TS 收窄成「第二次永不成立」（fetch 期间 signal 是可以变的）
-  const aborted = (): boolean => options.signal?.aborted === true
+  const generation = toolImageCacheGeneration
+  const aborted = (): boolean => options.signal?.aborted === true || targetForFiles() !== target
   if (aborted()) throw new RemoteApiError('RPC_ABORTED', '已取消读取图片')
-  // 没连上就直接抛 REMOTE_NOT_READY：界面据此画「未连接」占位，不排队、不算失败
-  const target = lastTargetOrThrow()
   const release = await acquireToolImageSlot()
   try {
+    if (aborted()) throw new RemoteApiError('RPC_ABORTED', '已取消读取图片')
     const attachment = await readSessionAttachment(target, scope, image, options)
     if (aborted()) throw new RemoteApiError('RPC_ABORTED', '已取消读取图片')
     if (attachment.data.byteLength === 0) return null
     const url = `data:${attachment.mimeType};base64,${encodeBase64(attachment.data)}`
-    rememberToolImage(key, url, attachment.data.byteLength)
+    if (generation === toolImageCacheGeneration) rememberToolImage(key, url, attachment.data.byteLength)
     return url
   } finally {
     release()
@@ -1355,7 +1372,7 @@ const runToolImageAttachmentLoad = async (
  *     `file:` / 非图片 `data:`）、`RPC_ABORTED`（调用方取消），以及 `session/attachment`
  *     本身的真实失败。
  *
- * 缓存键是 `${sessionId}:${attachmentId}`：同一张图无论被多少张卡片渲染都只取一次；
+ * 按连接、会话和附件 ID 缓存内容；同一张图无论被多少张卡片渲染都只取一次。
  * 失败**不进缓存**，所以「点重试」真的会重发一次（`force` 还能覆盖已有缓存）。
  */
 export const loadToolImage = async (
@@ -1376,7 +1393,16 @@ export const loadToolImage = async (
     throw unusableUriError(uriKind, image.uri)
   }
 
-  const key = `${scope}:${attachmentId}`
+  if (image.sessionId !== undefined && image.sessionId !== scope) {
+    throw new RemoteApiError('INVALID_ARGUMENT', '图片附件不属于当前会话')
+  }
+  const target = lastTargetOrThrow()
+  let connectionId = toolImageConnections.get(target)
+  if (connectionId === undefined) {
+    connectionId = ++toolImageConnectionId
+    toolImageConnections.set(target, connectionId)
+  }
+  const key = JSON.stringify([connectionId, scope, attachmentId])
   if (options.force !== true) {
     const cached = readCachedToolImage(key)
     if (cached !== undefined) return cached
@@ -1384,12 +1410,12 @@ export const loadToolImage = async (
   const inflight = toolImageInflight.get(key)
   if (inflight !== undefined) return await inflight
 
-  const job = runToolImageAttachmentLoad(key, scope, image, options)
+  const job = runToolImageAttachmentLoad(target, key, scope, image, options)
   toolImageInflight.set(key, job)
   try {
     return await job
   } finally {
-    toolImageInflight.delete(key)
+    if (toolImageInflight.get(key) === job) toolImageInflight.delete(key)
   }
 }
 

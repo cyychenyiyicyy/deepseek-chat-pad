@@ -25,7 +25,7 @@
  * | `closed` 帧 | **先 `off()` 摘掉接收器**，再按退避（0.4s / 1.2s / 3s / 8s…）重开 |
  * | 开流 `METHOD_NOT_FOUND` 等 | 标 `unsupported`：老 Host 没有这个端点 → **不重试**，`newSessionStore` 退回派生列表且**不收起 UI** |
  * | 其它开流失败（网络 / 超时） | 不改能力，按同一套退避重试（静默，不往面板写红字） |
- * | 连接断开 | `reset()`：关流、清定时器、状态回 `idle`（**不清**已拿到的列表） |
+ * | 连接断开 | `reset()`：关流、清定时器、状态回 `idle`（**不清**已拿到的列表，下条连接重新探测） |
  *
  * 之所以「流关闭要在重连后重开」：Host 在通道抖动 / 会话切换后会主动 `stream.closed`，
  * 而 baseline 只在**开流那一刻**发一次；不重开就永远收不到后续增量，而且客户端会拿着
@@ -142,9 +142,13 @@ export const deriveWorkspacesFromSessions = (rows: readonly RemoteSessionRow[]):
   return workspaces.sort((a, b) => a.title.localeCompare(b.title))
 }
 
-/** 路径比较用的归一化（Windows 反斜杠 / 大小写 / 结尾分隔符都不该算两个目录）。 */
-export const workspacePathKey = (path: string): string =>
-  path.trim().replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase()
+/** Windows 路径忽略大小写，POSIX 路径保留大小写与文件名空格。 */
+export const workspacePathKey = (path: string): string => {
+  if (/^(?:[A-Za-z]:[\\/]|\\\\)/u.test(path)) {
+    return path.replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase()
+  }
+  return path.replace(/\/+$/u, '') || path
+}
 
 const uniqueIds = (ids: readonly string[]): string[] => {
   const seen = new Set<string>()
@@ -328,6 +332,7 @@ export const createWorkspaceSyncer = (deps: WorkspaceSyncDeps): WorkspaceSyncer 
   let handle: RemoteStreamHandle | null = null
   let release: (() => void) | null = null
   let opening = false
+  let generation = 0
   let state: WorkspaceFollowStatus = 'idle'
   let attempts = 0
   let timer: unknown = null
@@ -408,20 +413,27 @@ export const createWorkspaceSyncer = (deps: WorkspaceSyncDeps): WorkspaceSyncer 
       return
     }
     opening = true
+    const openedFor = generation
     opens += 1
     void (async (): Promise<void> => {
       try {
         const opened = await deps.open(target)
-        if (!deps.isReady()) {
-          // 开流期间断线了：这条流立刻作废（否则会挂在一条死连接上）
+        if (openedFor !== generation || !deps.isReady()) {
           void Promise.resolve(opened.close()).catch(() => undefined)
           return
         }
         handle = opened
-        release = deps.registerSink(opened.streamId, onPayload)
         state = 'streaming'
         deps.push.onStatus('streaming')
+        const off = deps.registerSink(opened.streamId, (payload) => {
+          if (openedFor === generation && handle === opened) onPayload(payload)
+        })
+        // registerSink can deliver buffered frames, including a close, synchronously.
+        if (handle === opened) release = off
+        else off()
       } catch (error) {
+        if (openedFor !== generation || !deps.isReady()) return
+        detach()
         const failure = failureOf(error, '打开 workspace/follow 失败')
         if (failure.missingEndpoint) {
           // 老 Host：这台机器没有这个端点。不重试，退回派生列表（UI 不收起）
@@ -432,7 +444,7 @@ export const createWorkspaceSyncer = (deps: WorkspaceSyncDeps): WorkspaceSyncer 
         }
         scheduleReopen(failure)
       } finally {
-        opening = false
+        if (openedFor === generation) opening = false
       }
     })()
   }
@@ -449,11 +461,11 @@ export const createWorkspaceSyncer = (deps: WorkspaceSyncDeps): WorkspaceSyncer 
       open()
     },
     reset: (): void => {
+      generation += 1
       clearTimer()
       detach()
       attempts = 0
       opening = false
-      if (state === 'unsupported') return
       state = 'idle'
     },
     status: (): WorkspaceFollowStatus => state,

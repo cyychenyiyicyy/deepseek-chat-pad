@@ -64,6 +64,7 @@ import {
 } from '../filesApi.js'
 import { lastRemoteTarget, observeRemoteTarget, type RemoteCallTarget } from '../sessionsApi.js'
 import { useRemoteStore } from '../store.js'
+import { useWorkspacePane } from '../../../components/remote/workspace/workspacePaneStore.js'
 
 /* ── 最小断言器（与其它 selftest 同一套写法） ─────────────────────────── */
 
@@ -151,7 +152,7 @@ interface FakeTarget {
   calls: RecordedCall[]
 }
 
-const fakeTarget = (replies: Record<string, Reply | ((args: unknown, call: number) => Reply)> = {}): FakeTarget => {
+const fakeTarget = (replies: Record<string, Reply | ((args: unknown, call: number) => Reply | Promise<Reply>)> = {}): FakeTarget => {
   const calls: RecordedCall[] = []
   const seen = new Map<string, number>()
   const target: RemoteCallTarget = {
@@ -168,7 +169,7 @@ const fakeTarget = (replies: Record<string, Reply | ((args: unknown, call: numbe
       const configured = replies[endpoint]
       const reply: Reply = configured === undefined
         ? { ok: true, value: {} }
-        : typeof configured === 'function' ? configured(envelope.payload.args, count) : configured
+        : typeof configured === 'function' ? await configured(envelope.payload.args, count) : configured
       if (reply.ok) return (reply.value === undefined ? { ok: true } : { ok: true, value: reply.value }) as T
       return { ok: false, error: { code: reply.code, message: reply.message ?? reply.code } } as T
     },
@@ -466,7 +467,9 @@ check('C3：fileKindOf / extensionOf / decodeText', async () => {
   assertEqual(fileKindOf('a.md'), 'text', 'md 是文本')
   assertEqual(fileKindOf('a.tsx'), 'text', 'tsx 是文本')
   assertEqual(fileKindOf('a.png'), 'image', 'png 是图片')
-  assertEqual(fileKindOf('a.pdf'), 'binary', 'pdf 归二进制（占位）')
+  assertEqual(fileKindOf('a.pdf'), 'pdf', 'pdf 进入文档预览')
+  assertEqual(fileKindOf('a.docx'), 'office', 'docx 走主机转换')
+  assertEqual(fileKindOf('a.docm'), 'binary', '不请求转换带宏的 docm')
   assertEqual(fileKindOf('a.zip'), 'binary', '压缩包二进制')
   assertEqual(fileKindOf('README'), 'text', 'README 无扩展名也算文本')
   assertEqual(fileKindOf('Makefile'), 'text', 'Makefile')
@@ -700,6 +703,49 @@ check('E5：loadToolImage —— uri 直通；只有 attachmentId 时补出 data
   )
   clearToolImageCache()
   resetAttachmentSupport()
+})
+
+check('F1：A→B→A 的目录读取忽略首个 A 的迟到结果', async () => {
+  const { promise, resolve } = Promise.withResolvers<Reply>()
+  const fake = fakeTarget({
+    'workspaceFiles/list': (_, call) => call === 1 ? promise : {
+      ok: true, value: { path: '.', entries: [{ name: 'current.txt', type: 'file' }] },
+    },
+  })
+  const pane = useWorkspacePane.getState()
+  connect(fake)
+  useRemoteStore.setState({ activeSessionId: 's-a' })
+  await pane.bind('s-a')
+  const stale = pane.refresh('')
+  useRemoteStore.setState({ activeSessionId: 's-b' })
+  await pane.bind('s-b')
+  useRemoteStore.setState({ activeSessionId: 's-a' })
+  await pane.bind('s-a')
+  await pane.refresh('')
+  resolve({ ok: true, value: { path: '.', entries: [{ name: 'stale.txt', type: 'file' }] } })
+  await stale
+  assertEqual(useWorkspacePane.getState().nodes['']?.entries.map(item => item.name), ['current.txt'], '保留当前目录')
+})
+
+check('F2：切主机且会话 ID、文件名相同，旧主机的预览仍不能覆盖', async () => {
+  const { promise, resolve } = Promise.withResolvers<Reply>()
+  const old = fakeTarget({ 'workspaceFiles/readBytes': () => promise })
+  const current = fakeTarget({
+    'workspaceFiles/stat': { ok: true, value: { path: 'x.txt', type: 'file' } },
+    'workspaceFiles/readBytes': { ok: true, value: { data: 'bmV3', offset: 0, eof: true } },
+  })
+  const pane = useWorkspacePane.getState()
+  useRemoteStore.setState({ activeSessionId: 'same' })
+  connect(old)
+  await pane.bind('same')
+  const stale = pane.openFile('x.txt')
+  connect(current)
+  await pane.bind('same')
+  await pane.openFile('x.txt')
+  resolve({ ok: true, value: { data: 'b2xk', offset: 0, eof: true } })
+  await stale
+  const preview = useWorkspacePane.getState().preview
+  assertEqual(preview?.kind === 'text' && preview.text, 'new', '预览属于当前主机')
 })
 
 /* ── 跑 ───────────────────────────────────────────────────────────────── */

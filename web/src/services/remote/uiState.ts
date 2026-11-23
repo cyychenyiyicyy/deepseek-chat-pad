@@ -87,6 +87,7 @@ export type RestoreSource = 'draft' | 'cache' | 'empty'
 export interface UiScrollMark {
   sessionId: string
   top: number
+  owner?: string
 }
 
 /** 一份完整的界面状态快照 */
@@ -97,6 +98,7 @@ export interface RemoteUiState {
   mode: ChatMode | null
   /** 重载后要回到的会话 */
   activeSessionId: string | null
+  activeSessionOwner?: string
   /** 草稿：键是会话 id（`''` = 会话还没打开时打的字，见 `patchDraft`） */
   drafts: Record<string, string>
   /** 时间线滚动位置（只对 `sessionId` 那个会话有效） */
@@ -144,9 +146,12 @@ const normalizeId = (value: unknown): string | null => {
   return trimmed.length === 0 ? null : trimmed.slice(0, 128)
 }
 
+const ownerOf = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.length > 0 && value.length <= 1024 ? value : undefined
+
 /** 草稿表：丢掉空串 / 非字符串，超出上限截断，最多保留 `MAX_DRAFTS` 条（最近的） */
 const sanitizeDrafts = (value: unknown): Record<string, string> => {
-  const result: Record<string, string> = {}
+  const result: Record<string, string> = Object.create(null)
   if (!isRecord(value)) {
     return result
   }
@@ -156,7 +161,7 @@ const sanitizeDrafts = (value: unknown): Record<string, string> => {
     if (typeof text !== 'string' || text.length === 0) {
       continue
     }
-    const key = rawKey.slice(0, 128)
+    const key = rawKey.slice(0, 1024)
     result[key] = text.length > MAX_DRAFT_CHARS ? text.slice(0, MAX_DRAFT_CHARS) : text
   }
   return result
@@ -173,19 +178,22 @@ export const sanitizeUiState = (raw: unknown): RemoteUiState | null => {
     return null
   }
   const mode = raw.mode === 'local' || raw.mode === 'remote' ? raw.mode : null
+  const activeSessionOwner = ownerOf(raw.activeSessionOwner)
   const timelineRaw = raw.timeline
   let timeline: UiScrollMark | null = null
   if (isRecord(timelineRaw)) {
     const sessionId = normalizeId(timelineRaw.sessionId)
     const top = clampScroll(timelineRaw.top)
     if (sessionId !== null && top !== null) {
-      timeline = { sessionId, top }
+      const owner = ownerOf(timelineRaw.owner)
+      timeline = { sessionId, top, ...(owner === undefined ? {} : { owner }) }
     }
   }
   return {
     v: UI_STATE_VERSION,
     mode,
     activeSessionId: normalizeId(raw.activeSessionId),
+    ...(activeSessionOwner === undefined ? {} : { activeSessionOwner }),
     drafts: sanitizeDrafts(raw.drafts),
     timeline,
     sessionsScrollTop: clampScroll(raw.sessionsScrollTop) ?? 0,
@@ -354,7 +362,7 @@ const scheduleRelayPush = (): void => {
  * （换 WebView）。任何一层失败都不抛 —— 返回的始终是一份可用的新快照。
  */
 export const writeUiState = (patch: Partial<RemoteUiState>): RemoteUiState => {
-  const base = mirror ?? readUiState() ?? emptyUiState()
+  const base = mirror ?? readUiState() ?? readUiRelayState() ?? emptyUiState()
   const merged: unknown = { ...base, ...patch, v: UI_STATE_VERSION, updatedAt: Date.now() }
   const next = sanitizeUiState(merged) ?? emptyUiState()
   mirror = next
@@ -384,32 +392,28 @@ const draftKey = (sessionId: string | null): string => sessionId ?? ''
  * 上限 `MAX_DRAFTS` 条，超出的由 `sanitizeDrafts()` 丢掉最旧的。
  */
 export const patchDraft = (sessionId: string | null, text: string): RemoteUiState => {
-  const base = mirror ?? readUiState() ?? emptyUiState()
+  const base = mirror ?? readUiState() ?? readUiRelayState() ?? emptyUiState()
   const drafts: Record<string, string> = { ...base.drafts }
   const key = draftKey(sessionId)
-  if (text.length === 0) {
-    delete drafts[key]
-  } else {
-    drafts[key] = text.length > MAX_DRAFT_CHARS ? text.slice(0, MAX_DRAFT_CHARS) : text
-  }
-  return writeUiState({ drafts })
+  delete drafts[key]
+  return writeUiState({ drafts: text === '' ? drafts : { ...drafts, [key]: text } })
 }
 
 /** 记下「重载后要回到哪个会话」（`null` = 没有会话可回，例如刚退出登录） */
-export const patchActiveSession = (sessionId: string | null): RemoteUiState =>
-  writeUiState({ activeSessionId: sessionId === null ? null : normalizeId(sessionId) })
+export const patchActiveSession = (sessionId: string | null, owner?: string): RemoteUiState =>
+  writeUiState({ activeSessionId: sessionId === null ? null : normalizeId(sessionId), activeSessionOwner: owner })
 
 /** 记下本机 / 远程（只是镜像；盘上那份由 `RemoteModeSwitch` 写，仍是权威） */
 export const patchMode = (mode: ChatMode): RemoteUiState => writeUiState({ mode })
 
 /** 记下时间线的滚动位置（属于 `sessionId` 这个会话） */
-export const patchTimelineScroll = (sessionId: string | null, top: number): RemoteUiState => {
+export const patchTimelineScroll = (sessionId: string | null, top: number, owner?: string): RemoteUiState => {
   const normalized = sessionId === null ? null : normalizeId(sessionId)
   const clamped = clampScroll(top)
   if (normalized === null || clamped === null) {
     return mirror ?? emptyUiState()
   }
-  return writeUiState({ timeline: { sessionId: normalized, top: clamped } })
+  return writeUiState({ timeline: { sessionId: normalized, top: clamped, owner } })
 }
 
 /** 记下会话列表的滚动位置（挂载点在 `RemoteSessionList`，见该文件的注释） */
@@ -499,11 +503,15 @@ export const resolveDraftRestore = (input: DraftRestoreInput): DraftRestore => {
 export interface SessionRestoreInput {
   primary: RemoteUiState | null
   fallback: RemoteUiState | null
+  owner?: string
 }
 
 /** 重载后该回到哪个会话（同样草稿层优先；两层都没有就 null = 什么都不恢复） */
-export const resolveActiveSession = (input: SessionRestoreInput): string | null =>
-  input.primary?.activeSessionId ?? input.fallback?.activeSessionId ?? null
+export const resolveActiveSession = (input: SessionRestoreInput): string | null => {
+  const matches = (state: RemoteUiState | null) =>
+    state && (state.activeSessionOwner === undefined || state.activeSessionOwner === input.owner) ? state.activeSessionId : null
+  return matches(input.primary) ?? matches(input.fallback)
+}
 
 export interface TimelineScrollInput extends SessionRestoreInput {
   sessionId: string | null
@@ -519,13 +527,9 @@ export const resolveTimelineScroll = (input: TimelineScrollInput): number | null
   if (sessionId === null) {
     return null
   }
-  if (input.primary?.timeline?.sessionId === sessionId) {
-    return input.primary.timeline.top
-  }
-  if (input.fallback?.timeline?.sessionId === sessionId) {
-    return input.fallback.timeline.top
-  }
-  return null
+  const matches = (mark?: UiScrollMark | null) => mark?.sessionId === sessionId &&
+    (mark.owner === undefined || mark.owner === input.owner) ? mark.top : null
+  return matches(input.primary?.timeline) ?? matches(input.fallback?.timeline)
 }
 
 /** 会话列表该滚到哪（0 / 没存过 → null；同样草稿层优先，别被一个 0 挡在缓存层前面） */

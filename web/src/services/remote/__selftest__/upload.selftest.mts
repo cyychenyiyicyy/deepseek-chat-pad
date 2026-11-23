@@ -36,7 +36,7 @@ import {
   uploadStrategyMemory,
   workspaceUploadLimitBytes,
 } from '../upload.js'
-import { readyReceipts, useWorkspacePane } from '../../../components/remote/workspace/workspacePaneStore.js'
+import { useWorkspacePane } from '../../../components/remote/workspace/workspacePaneStore.js'
 
 /* ── 最小断言器（与其它 selftest 同一套写法） ─────────────────────────── */
 
@@ -186,6 +186,7 @@ const connect = (fake: FakeTarget, options: { capabilities?: readonly string[]; 
   observeRemoteTarget(fake.target)
   useRemoteStore.setState({
     phase: 'ready',
+    activeSessionId: 's-1',
     capabilities: [...(options.capabilities ?? CAPABILITY_ON)],
     transport: (options.transport ?? 'relay') as 'lan' | 'p2p' | 'relay' | 'turn',
   })
@@ -336,29 +337,17 @@ check('B4：两条都不可用 → UPLOAD_UNAVAILABLE（带原因），这是唯
   assertTrue(uploadStrategyMemory().workspaceUnavailable, '记住了工作区不可用')
 })
 
-check('B5：一次上传成功后，store 的 chip 带 remotePath + 引用，readyReceipts 出令牌', async () => {
+check('B5：上传后的工作区路径可用于显示引用和发送', async () => {
   const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47])
   const fake = fakeTarget({
     endpoints: { 'fileUploads/upload': { ok: false, code: 'METHOD_NOT_ALLOWED' } },
     methods: workspaceUploadHost(),
   })
   connect(fake)
-  const file = {
-    name: 'pic.png',
-    size: bytes.byteLength,
-    type: 'image/png',
-    arrayBuffer: async () => bytes.buffer.slice(0),
-  } as unknown as File
-  await useWorkspacePane.getState().pickFiles([file])
-  const attachment = useWorkspacePane.getState().attachments[0]
-  if (attachment === undefined) fail('附件没有进 store')
-  assertEqual(attachment.status, 'done', '状态')
-  assertEqual(attachment.strategy, 'workspace', '通道')
-  assertEqual(attachment.remotePath, './pic.png', '工作区路径')
-  assertEqual(attachment.reference, '@pic.png', '引用写法')
-  assertEqual(readyReceipts(useWorkspacePane.getState().attachments), ['workspace-ref:./pic.png'], '发送凭据是引用令牌')
-  assertEqual(useWorkspacePane.getState().uploadSupported, true, '入口可用')
-  assertEqual(useWorkspacePane.getState().uploadError, null, '没有错误条')
+  const outcome = await uploadAttachment(fake.target, 's-1', { name: 'pic.png', bytes, mediaType: 'image/png' })
+  assertEqual(outcome.strategy, 'workspace', '通道')
+  assertEqual(outcomeReference(outcome), '@pic.png', '引用写法')
+  assertEqual(outcomeToken(outcome), 'workspace-ref:./pic.png', '发送凭据是引用令牌')
 })
 
 /* ══════════════════════════════════════════════════════════════════════

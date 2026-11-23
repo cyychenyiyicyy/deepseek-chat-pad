@@ -14,6 +14,8 @@ const MAX_ROWS = 300
 const KIND_LABEL: Record<WorkspaceFileKind, TranslationKey> = {
   text: 'workspacePaneKindText',
   image: 'workspacePaneKindImage',
+  pdf: 'workspacePaneKindPdf',
+  office: 'workspacePaneKindOffice',
   binary: 'workspacePaneKindBinary',
 }
 

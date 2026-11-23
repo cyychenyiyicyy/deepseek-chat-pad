@@ -3,9 +3,11 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslate } from '../../i18n/index.js'
 import { sessionListViewState } from '../../services/remote/cache.js'
-import type { RemoteSearchHit } from '../../services/remote/sessionsApi.js'
-import { useRemoteStore } from '../../services/remote/store.js'
+import { describeRemoteError, lastRemoteTarget, type RemoteSearchHit } from '../../services/remote/sessionsApi.js'
+import { forgetDeletedRemoteSession, useRemoteStore } from '../../services/remote/store.js'
+import { deleteHostSession, hostHttpTarget, supportsSessionDeletion, type HostHttpTarget } from '../../services/remote/hostHttpActions.js'
 import { useAnchoredPosition, useDismiss } from '../base/anchored.js'
+import { Button } from '../base/Button.js'
 import { IconButton } from '../base/IconButton.js'
 import {
   IconBrowseOutline16,
@@ -34,6 +36,7 @@ import {
   type RowMarker,
 } from './drawerBlocks.js'
 import { useNewSessionStore, workspaceTitleFromPath } from '../../services/remote/newSessionStore.js'
+import { workspaceSections } from '../../services/remote/workspacePreferences.js'
 import { sessionBelongsToWorkspace } from './workspace/workspaceItems.js'
 import styles from './RemoteSessionList.module.css'
 /**
@@ -90,11 +93,23 @@ export const RemoteSessionList = ({
   const sessions = useRemoteStore((state) => state.sessions)
   const activeSessionId = useRemoteStore((state) => state.activeSessionId)
   const phase = useRemoteStore((state) => state.phase)
+  const hostTarget = phase === 'ready' ? hostHttpTarget(lastRemoteTarget()) : null
+  const [deletionSupport, setDeletionSupport] = useState<HostHttpTarget | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<{ target: HostHttpTarget; id: string; title: string } | null>(null)
+  useEffect(() => {
+    if (!hostTarget) return
+    const abort = new AbortController()
+    void supportsSessionDeletion(hostTarget, abort.signal).then((supported) => {
+      if (supported && !abort.signal.aborted) setDeletionSupport(hostTarget)
+    }).catch(() => undefined)
+    return () => abort.abort()
+  }, [hostTarget])
   /** [R8 缓存] 列表来源与同步态：缓存直出靠它标注「正在同步 / 缓存 / 已不存在」 */
   const cacheStatus = useRemoteStore((state) => state.cacheStatus)
   const capabilities = useNewSessionStore((state) => state.capabilities)
   const archivedIds = useNewSessionStore((state) => state.archivedSessionIds)
   const pinnedIds = useNewSessionStore((state) => state.pinnedSessionIds)
+  const pinnedAuthoritative = useNewSessionStore((state) => state.pinnedAuthoritative)
   /** [R9] 别的会话里等着的审批 / 提问（活动会话不计，见 store 末尾「八」） */
   const pendingInteractions = useRemoteStore((state) => state.pendingInteractions)
   const menuSessionId = useNewSessionStore((state) => state.menuSessionId)
@@ -103,6 +118,8 @@ export const RemoteSessionList = ({
   const renameTarget = useNewSessionStore((state) => state.renameTarget)
   /* [R15] 工作区筛选（照 dsh-Go 抽屉的作用域）：列表按工作区收窄，多一个工作区才值得筛 */
   const workspaces = useNewSessionStore((state) => state.workspaces)
+  const workspacePreferences = useNewSessionStore((state) => state.workspacePreferences)
+  const workspaceSource = useNewSessionStore((state) => state.workspaceSource)
   const listWorkspaceFilter = useNewSessionStore((state) => state.listWorkspaceFilter)
   /*
    * [D] 状态筛选的当前档（drawer_filter_bar.dart 的 DrawerFilter）：本地 UI 态，
@@ -187,7 +204,7 @@ export const RemoteSessionList = ({
    * 显示名判定与 `workspaceItems.ts` 同一套（title → 路径末段 → id）。
    */
   const workspaceOptions = workspaces.map((workspace) => ({
-    id: workspace.workspaceId,
+    workspaceId: workspace.workspaceId,
     label:
       workspace.title.length > 0
         ? workspace.title
@@ -196,13 +213,14 @@ export const RemoteSessionList = ({
           : workspace.workspaceId,
   }))
   const workspaceFilter =
-    listWorkspaceFilter !== null && workspaceOptions.some((option) => option.id === listWorkspaceFilter)
+    listWorkspaceFilter !== null && workspaceOptions.some((option) => option.workspaceId === listWorkspaceFilter)
       ? listWorkspaceFilter
       : null
   const workspaceFilterLabel =
     workspaceFilter === null
       ? t('newSessionWorkspaceFilterAll')
-      : (workspaceOptions.find((option) => option.id === workspaceFilter)?.label ?? t('newSessionWorkspaceFilterAll'))
+      : (workspaceOptions.find((option) => option.workspaceId === workspaceFilter)?.label ?? t('newSessionWorkspaceFilterAll'))
+  const filterSections = filterOpen ? workspaceSections(workspaceOptions, workspacePreferences) : []
 
   /*
    * —— S3 全局运行态 ——
@@ -223,23 +241,19 @@ export const RemoteSessionList = ({
    * 两层筛选同时生效）。分块 / 行尾标记 / 胶囊计数全是 drawerBlocks.ts 的纯函数，
    * 判定口径与改造前逐条一致（running 看 liveById；待确认两条记账取大、活动会话不计）。
    */
+  const workspaceMemberIds = workspaces.find((workspace) => workspace.workspaceId === workspaceFilter)?.sessionIds
+  const authoritativeOrder = workspaceSource === 'follow' ? workspaceMemberIds : undefined
+  const sessionsById = new Map(sessions.map((session) => [session.id, session]))
   const drawerInput = {
-    /*
-     * 工作区筛选的归属判定：`workspaceId` 与 `workspace.sessionIds` **两边都认**
-     * （判定在 `sessionBelongsToWorkspace`，自测见 workspaces.selftest 的 E 组）。
-     * 只认前者时，Host 没把 workspaceId 投影到会话行上 → 一筛就是空列表，
-     * 真机症状：「筛某个工作区，它说这儿没有会话，可实际上有」。
-     */
-    sessions: sessions.filter(
-      (session) =>
-        workspaceFilter === null
-        || sessionBelongsToWorkspace(
-          session,
-          workspaceFilter,
-          workspaces.find((workspace) => workspace.workspaceId === workspaceFilter)?.sessionIds,
-        ),
-    ),
+    sessions: workspaceFilter === null ? sessions : authoritativeOrder !== undefined
+      ? authoritativeOrder.flatMap((id) => {
+        const session = sessionsById.get(id)
+        return session === undefined ? [] : [session]
+      })
+      : sessions.filter((session) => sessionBelongsToWorkspace(session, workspaceFilter, workspaceMemberIds)),
+    preserveOrder: authoritativeOrder !== undefined,
     pinnedIds,
+    pinnedAuthoritative,
     archivedIds,
     // [R8] 服务端这次没给、缓存里还有的行：标「已不存在」而不是闪一下消失
     ghostIds: cacheStatus.ghostSessionIds,
@@ -583,10 +597,17 @@ export const RemoteSessionList = ({
               label={t('newSessionMenuFork')}
               onSelect={() => fireAndForget(() => useNewSessionStore.getState().fork(menuRow.id))}
             />
+            {hostTarget && deletionSupport === hostTarget && !menuRow.ghost && <MenuRow
+              label={t('remoteSessionDelete')}
+              onSelect={() => setDeleteTarget({ target: hostTarget, id: menuRow.id, title: menuRow.title })}
+            />}
           </div>,
           document.body,
         )
         : null}
+      {deleteTarget && deleteTarget.target === hostTarget && <DeleteSessionDialog
+        selection={deleteTarget} onClose={() => setDeleteTarget(null)}
+      />}
 
       {/*
         [R15] 工作区筛选菜单：与「⋯」菜单同款外观。第一行永远是「全部工作区」，
@@ -609,17 +630,26 @@ export const RemoteSessionList = ({
                 setFilterOpen(false)
               }}
             />
-            {workspaceOptions.map((option) => (
-              <FilterRow
-                key={option.id}
-                label={option.label}
-                selected={workspaceFilter === option.id}
-                onSelect={() => {
-                  useNewSessionStore.getState().selectListWorkspace(option.id)
-                  setFilterOpen(false)
-                }}
-              />
-            ))}
+            {filterSections.map((section) => {
+              const title = section.kind === 'pinned' ? t('remoteWorkspacePinnedSection')
+                : section.name ?? (filterSections.length > 1 ? t('remoteWorkspaceOtherSection') : undefined)
+              return (
+                <div key={section.kind === 'group' ? `group:${section.name}` : section.kind} role="group" aria-label={title}>
+                  {title && <div className={styles.menuGroupTitle} aria-hidden>{title}</div>}
+                  {section.items.map((option) => (
+                    <FilterRow
+                      key={option.workspaceId}
+                      label={option.label}
+                      selected={workspaceFilter === option.workspaceId}
+                      onSelect={() => {
+                        useNewSessionStore.getState().selectListWorkspace(option.workspaceId)
+                        setFilterOpen(false)
+                      }}
+                    />
+                  ))}
+                </div>
+              )
+            })}
           </div>,
           document.body,
         )
@@ -672,6 +702,55 @@ const ListSkeleton = ({ label }: { label: string }) => (
 )
 
 /** 菜单的一行（不是 `base/Menu`：那个只能点触发器打开，而这里要支持长按/右键） */
+function DeleteSessionDialog({ selection, onClose }: {
+  selection: { target: HostHttpTarget; id: string; title: string }
+  onClose: () => void
+}) {
+  const t = useTranslate()
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState('')
+  const [outcomeUnknown, setOutcomeUnknown] = useState(false)
+  const submitted = useRef(false)
+  const close = () => { if (!submitted.current) onClose() }
+  async function confirm() {
+    if (submitted.current || outcomeUnknown) return
+    submitted.current = true
+    setPending(true)
+    setError('')
+    const current = () => lastRemoteTarget() === selection.target
+    try {
+      await deleteHostSession(selection.target, selection.id, current)
+      if (!current()) return
+      forgetDeletedRemoteSession(selection.target, selection.id)
+      onClose()
+      fireAndForget(() => useRemoteStore.getState().refreshSessions())
+    } catch (failure) {
+      if (!current()) return
+      const info = describeRemoteError(failure)
+      if (info.code === 'DELETE_OUTCOME_UNKNOWN') {
+        setOutcomeUnknown(true)
+        setError(t('remoteSessionDeleteUnknown'))
+        fireAndForget(() => useRemoteStore.getState().refreshSessions())
+      } else {
+        setError(info.text)
+      }
+    } finally {
+      submitted.current = false
+      if (current()) setPending(false)
+    }
+  }
+  return <Modal title={t('remoteSessionDelete')} onClose={close} closable={!pending} footer={
+    <>
+      <Button variant="outlined" size="m" disabled={pending} onClick={onClose}>{t(outcomeUnknown ? 'close' : 'cancel')}</Button>
+      {!outcomeUnknown && <Button variant="danger" size="m" disabled={pending} onClick={() => void confirm()}>{t('remoteSessionDelete')}</Button>}
+    </>
+  }>
+    <p>{t('remoteSessionDeleteConfirm', { title: selection.title || t('remoteSessionUntitled') })}</p>
+    {pending && <p role="status">{t('remoteSessionDeleting')}</p>}
+    {error && <p role="alert">{error}</p>}
+  </Modal>
+}
+
 const MenuRow = ({ label, onSelect }: { label: string; onSelect: () => void }) => (
   <div
     className={styles.menuOption}

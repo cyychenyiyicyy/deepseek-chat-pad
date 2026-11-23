@@ -78,6 +78,7 @@ final class RemoteWsHandler {
 
     /** 页面真正连的那条路径 */
     private static final String WS_PATH = "/__ds_remote/ws";
+    private static final String SSH_MUX_PATH = "/__ds_remote/ssh-mux";
 
     /**
      * 能力探测：GET /__ds_remote/health。
@@ -156,10 +157,12 @@ final class RemoteWsHandler {
                     "content-length", "transfer-encoding", "te", "trailer", "expect")));
 
     private final OkHttpClient client;
+    private final SshDshHandler ssh;
     private final Set<Tunnel> active =
             Collections.newSetFromMap(new ConcurrentHashMap<Tunnel, Boolean>());
 
-    RemoteWsHandler() {
+    RemoteWsHandler(SshDshHandler ssh) {
+        this.ssh = ssh;
         // 必须独立：MainActivity 的共享实例挂着 HTTPS_ONLY_INTERCEPTOR，而且它的超时策略
         // 是为 SSE 调的；这里要一个干净的长连接客户端。不装任何拦截器。
         this.client = new OkHttpClient.Builder()
@@ -189,7 +192,7 @@ final class RemoteWsHandler {
      * @return true 表示这条连接必须关闭。WebSocket 隧道跑完（或握手失败）后一律返回 true：
      *         Upgrade 之后这条 socket 上不可能再承载普通 HTTP 请求。
      */
-    boolean handle(String method, String path, HttpUtil.Headers headers, InputStream in, OutputStream out,
+    boolean handle(String method, String path, int originPort, HttpUtil.Headers headers, InputStream in, OutputStream out,
             boolean keepAlive) throws IOException {
         // 带 Upgrade 的请求不能复用连接，任何非 101 响应都直接关闭，免得残留字节被当成下一个请求
         boolean reuse = keepAlive && !requestsUpgrade(headers);
@@ -203,9 +206,14 @@ final class RemoteWsHandler {
             return !reuse;
         }
 
-        if (!WS_PATH.equals(path)) {
+        boolean sshMux = SSH_MUX_PATH.equals(path);
+        if (!WS_PATH.equals(path) && !sshMux) {
             HttpUtil.sendJson(out, 404, reuse, httpErrorJson("not_found"));
             return !reuse;
+        }
+        if (sshMux && !SshDshHandler.sameOrigin(headers, originPort)) {
+            HttpUtil.sendJson(out, 403, false, httpErrorJson("forbidden"));
+            return true;
         }
 
         String acceptKey;
@@ -229,7 +237,7 @@ final class RemoteWsHandler {
         // 注意：101 不能带 Content-Length，也不协商 permessage-deflate（页面那边没请求压缩）
         HttpUtil.writeHead(out, 101, "Switching Protocols", responseHeaders);
 
-        Tunnel tunnel = new Tunnel(in, out);
+        Tunnel tunnel = new Tunnel(in, out, sshMux);
         active.add(tunnel);
         try {
             runTunnel(tunnel);
@@ -240,6 +248,7 @@ final class RemoteWsHandler {
         } finally {
             active.remove(tunnel);
             tunnel.shutdown();
+            if (!tunnel.sshId.isEmpty()) ssh.close(tunnel.sshId);
         }
         return true;
     }
@@ -379,6 +388,22 @@ final class RemoteWsHandler {
         if (!"connect".equals(control.optString("type", ""))) {
             writeErrorAndClose(tunnel, "CONNECT_REQUIRED", "第一帧必须是 {\"type\":\"connect\",...}",
                     CLOSE_POLICY_VIOLATION);
+            return null;
+        }
+
+        if (tunnel.sshMux) {
+            UpstreamListener listener = new UpstreamListener(tunnel);
+            try {
+                String id = control.optString("sshId", "");
+                WebSocket socket = ssh.openMux(id, listener);
+                tunnel.sshId = id;
+                tunnel.upstream = socket;
+                if (listener.awaitOpen(UPSTREAM_OPEN_TIMEOUT_MS)) return socket;
+                socket.cancel();
+                writeErrorAndClose(tunnel, "SSH_MUX_UNAVAILABLE", "DSH Host rejected the stream.", CLOSE_GOING_AWAY);
+            } catch (SshDshHandler.BridgeFailure failure) {
+                writeErrorAndClose(tunnel, failure.getMessage(), "DSH SSH connection unavailable.", CLOSE_GOING_AWAY);
+            }
             return null;
         }
 
@@ -903,15 +928,18 @@ final class RemoteWsHandler {
 
         private final InputStream in;
         private final OutputStream out;
+        private final boolean sshMux;
+        private String sshId = "";
         /** 页面→上游 与 上游→页面 两个方向都要写这个 socket，必须串行化 */
         private final Object writeLock = new Object();
 
         private volatile WebSocket upstream;
         private volatile boolean terminated;
 
-        Tunnel(InputStream in, OutputStream out) {
+        Tunnel(InputStream in, OutputStream out, boolean sshMux) {
             this.in = in;
             this.out = out;
+            this.sshMux = sshMux;
         }
 
         /**
@@ -1016,6 +1044,11 @@ final class RemoteWsHandler {
 
         @Override
         public void onMessage(WebSocket webSocket, String text) {
+            if (tunnel.sshMux && text.length() > 16 * 1024 * 1024) {
+                tunnel.finishFromUpstream(CLOSE_MESSAGE_TOO_BIG, "frame_too_large");
+                webSocket.cancel();
+                return;
+            }
             tunnel.writeText(text);
             webSocket.request();
         }

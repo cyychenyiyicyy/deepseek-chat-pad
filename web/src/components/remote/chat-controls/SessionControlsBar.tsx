@@ -9,7 +9,7 @@ import {
 import type { RemoteUsage } from '../../../services/remote/sessionControls.js'
 import { IconCloseOutline16 } from '../../base/icons.js'
 import styles from './Controls.module.css'
-import { ChatMenu, showsChatMenu } from './ChatMenu.js'
+import { ChatMenu, showsChatMenu, type ChatMenuAction } from './ChatMenu.js'
 
 /**
  * 会话顶栏**右侧**的那一个入口：`⋯` 菜单。
@@ -28,6 +28,7 @@ export const SessionControlsBar = ({
   title,
   usage,
   onInsertCommand,
+  actions,
 }: {
   sessionId: string | null
   title: string | null
@@ -35,6 +36,7 @@ export const SessionControlsBar = ({
   usage: RemoteUsage | null
   /** `⋯` → 命令 → 把 `/name ` 填回输入框 */
   onInsertCommand: (line: string) => void
+  actions?: readonly ChatMenuAction[]
 }) => {
   const probe = useChatControls((state) => state.probe)
   const showsMenu = useChatControls(showsChatMenu)
@@ -44,11 +46,11 @@ export const SessionControlsBar = ({
     void probe()
   }, [probe, sessionId])
 
-  if (!showsMenu) return null
+  if (!showsMenu && !actions?.length) return null
 
   return (
     <div className={styles.bar}>
-      <ChatMenu sessionId={sessionId} title={title} usage={usage} onInsertCommand={onInsertCommand} />
+      <ChatMenu sessionId={sessionId} title={title} usage={usage} onInsertCommand={onInsertCommand} actions={actions} />
     </div>
   )
 }

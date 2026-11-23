@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslate, type TranslationKey } from '../../../i18n/index.js'
 import type { ChatImage, ToolActivity, ToolDisplayDetail } from '../../../services/remote/adapter.js'
@@ -205,7 +205,7 @@ export const ToolCard = ({ item }: { item: ToolActivity }) => {
       ) : null}
 
       {item.images !== undefined && item.images.length > 0 ? (
-        <ToolImageStrip images={item.images} />
+        <RemoteImageStrip images={item.images} />
       ) : null}
     </div>
   )
@@ -685,18 +685,37 @@ type ToolImageState =
   | { status: 'failed'; reason: string }
   | { status: 'empty'; kind: 'offline' | 'none' }
 
-const ToolImageStrip = ({ images }: { images: ChatImage[] }) => {
+export const RemoteImageStrip = ({ images, lazy = false }: { images: ChatImage[]; lazy?: boolean }) => {
+  const stripRef = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(!lazy)
   const [preview, setPreview] = useState<{ src: string; name: string } | undefined>(undefined)
+
+  useEffect(() => {
+    if (visible) return
+    const strip = stripRef.current
+    if (!strip || typeof IntersectionObserver === 'undefined') {
+      setVisible(true)
+      return
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry?.isIntersecting) return
+      observer.disconnect()
+      setVisible(true)
+    }, { rootMargin: '160px' })
+    observer.observe(strip)
+    return () => observer.disconnect()
+  }, [visible])
+
   return (
     <>
-      <div className={styles.images}>
-        {images.map((image, index) => (
+      <div ref={stripRef} className={styles.images}>
+        {visible ? images.map((image, index) => (
           <Thumbnail
             key={`${image.attachmentId ?? image.name ?? 'image'}:${index}`}
             image={image}
             onOpen={(src, name) => setPreview({ src, name })}
           />
-        ))}
+        )) : <span className={styles.thumbSkeleton} aria-hidden="true" />}
       </div>
       {preview === undefined ? null : (
         <ImageViewer src={preview.src} name={preview.name} onClose={() => setPreview(undefined)} />

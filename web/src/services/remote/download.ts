@@ -365,6 +365,22 @@ export const saveToDownloads = async (
   }
 }
 
+/** Save generated content in the Android shell or through a browser download. */
+export const saveGeneratedDownload = async (blob: Blob, name: string, current = () => true): Promise<void> => {
+  const native = await isDownloadSupported()
+  if (!current()) return
+  if (native) {
+    await saveToDownloads(blob, name, blob.type || undefined)
+    return
+  }
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  link.click()
+  window.setTimeout(() => URL.revokeObjectURL(url), 5_000)
+}
+
 /* ────────────────────────────────────────────────────────────────────────
  * 四、从 URL / 远端工作区取字节再保存
  * ──────────────────────────────────────────────────────────────────────── */

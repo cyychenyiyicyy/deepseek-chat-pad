@@ -63,13 +63,20 @@ import {
 import {
   buildLinkOptions,
   createRemoteClient,
+  type DeviceChange,
   type RemoteAccount,
   type RemoteClient,
+  type RemoteConnectResult,
   type RemoteHost,
   type RemoteServer,
 } from './connection.js'
 import { createSecureLink, type SecureLink, type StreamEventPayload } from './core/index.js'
+import type { RtcMode } from './core/rtcTransport.js'
+import { isRemoteLinkError, LinkErrorCodes } from './core/errors.js'
 import { installDeepLink } from './deepLink.js'
+import { loadIdentity, loadOrCreateIdentity } from './identity.js'
+import type { PairingOffer } from './devicePairing.js'
+import type { SshHostInput } from './sshHost.js'
 
 /** session/prompt 的发送模式：steer 插话、queue 排队（见 input-R1）。 */
 type RemotePromptMode = 'queue' | 'steer'
@@ -115,10 +122,12 @@ import {
   noteControlUnavailable,
   noteSessionPermissionPreset,
   noteSnapshotProjections,
+  queuedPromptIds,
   selectControlSession,
   unbindSessionControls,
 } from './sessionControls.js'
-import { loadAccounts, loadServers, removeAccount, upsertAccount } from './storage.js'
+import { findAccount, findPinnedHost, loadAccounts, loadAdaptiveTransport, loadCompactHistory, loadServers, pinHostIdentityKey, removeAccount, upsertAccount, upsertServer } from './storage.js'
+import { getConnectionIceServers } from './serverApi.js'
 /*
  * [R9 红点] 待处理交互的记账规则放在 `chat-controls/promptModel.ts`（纯函数、有自测）。
  * 这里 import 过来只为了**同一份规则**：没有 React / CSS / store 的依赖，
@@ -138,6 +147,7 @@ import {
   describeRemoteError,
   listSessions,
   newRequestId,
+  observeRemoteTarget,
   openEvents,
   openFollow,
   pageHistory,
@@ -147,9 +157,11 @@ import {
   sendPrompt,
   type ApprovalDecision,
   type RemotePromptAttachment,
+  type RemoteCallTarget,
   type RemoteSessionRow,
   type RemoteStreamHandle,
 } from './sessionsApi.js'
+import type { SessionTransferOwner, SessionTransferPeer } from './sessionTransfer.js'
 import {
   addOptimisticUserMessage,
   createTranscriptState,
@@ -160,7 +172,7 @@ import {
   historyEntriesFromRecords,
   clearSendState,
   markSendState,
-  oldestSeqOfItems,
+  oldestSeq,
   parseSnapshot,
   permissionPresetOfFollowItem,
   pendingApprovals as pendingApprovalsOf,
@@ -191,7 +203,6 @@ import {
  * 本文件只负责在正确的时机问它：这条帧是不是这个会话的、这条流还作不作数。
  */
 import {
-  acceptCacheWrite,
   belongsToSession,
   commitSessionTranscript,
   ensureSessionDebug,
@@ -399,7 +410,7 @@ export interface RemoteState {
    */
   phase: 'idle' | 'authing' | 'connecting' | 'ready' | 'error' | 'waiting-auth'
   capabilities: string[]
-  transport: 'relay' | 'lan' | 'p2p' | 'turn' | null
+  transport: 'relay' | 'lan' | 'p2p' | 'turn' | 'ssh' | null
   error: { code: string; message: string } | null
   sessions: RemoteSessionSummary[]
   activeSessionId: string | null
@@ -436,6 +447,7 @@ export interface RemoteState {
    */
   hydrateCachedSessions(): void
   connect(serverUrl: string, email: string, password: string): Promise<void>
+  connectSsh(input: SshHostInput): Promise<boolean>
   /**
    * **临时断开**：拆连接、停保活、复位界面，但**保留** `dsp.remote.last-session.v1`
    * —— 下次启动仍然会自动连回来。要清凭据请用 `signOut()`。
@@ -452,6 +464,14 @@ export interface RemoteState {
   send(text: string): Promise<void>
   /** 运行中发消息：mode:'steer' 插话、'queue' 排队（默认沿用 send() 的 queue）。 */
   sendWithMode(text: string, mode: RemotePromptMode): Promise<void>
+  sendToSession(
+    target: RemoteCallTarget,
+    sessionId: string,
+    text: string,
+    attachments: readonly RemotePromptAttachment[],
+    mode?: RemotePromptMode,
+  ): Promise<boolean>
+  retryPrompt(target: RemoteCallTarget, sessionId: string, requestId: string): Promise<boolean>
   cancel(): Promise<void>
   respondApproval(eventId: string, decision: 'allow_once' | 'deny'): Promise<void>
 
@@ -546,6 +566,9 @@ export interface RemoteState {
   hosts: RemoteHostInfo[]
   /** 当前连着的 Host（`null` = 还没连上） */
   hostId: string | null
+  /** URL of the server that owns hostId, published with the successful handshake. */
+  activeServerUrl: string | null
+  connectionDiagnostics: RemoteConnectResult['diagnostics'] | null
   /** 切换进度（见 `HostSwitchState`：`switching` 画 loading，`failed` 弹一次原因） */
   hostSwitch: HostSwitchState
   /**
@@ -587,12 +610,13 @@ interface StreamSink {
 }
 
 interface ActiveSession {
-  client: RemoteClient
+  client: RemoteClient | null
   server: RemoteServer
   account: RemoteAccount
   host: RemoteHost
-  link: SecureLink
+  link: Pick<SecureLink, 'state' | 'close' | 'rpc' | 'openStream'> & { readonly transport: string }
   capabilities: string[]
+  compactHistory?: boolean
   /** 当前打开的会话 id（`null` = 还没开会话）。 */
   sessionId: string | null
   /**
@@ -613,6 +637,7 @@ interface ActiveSession {
    * 上限 `MAX_SESSION_TRANSCRIPTS` 份，按最近使用淘汰（切走的会话回到它时直接接着用）。
    */
   transcripts: Map<string, RemoteTranscriptState>
+  lastTimelineWrite: { sessionId: string; items: readonly ChatItem[] } | null
   hasMore: boolean
   follow: RemoteStreamHandle | null
   events: RemoteStreamHandle | null
@@ -717,6 +742,8 @@ const INITIAL_STATE = {
   // [R14 多 Host] 断开 / 退出登录时一起复位（切 Host 不走 INITIAL_STATE，见 switchHostFlow）
   hosts: [] as RemoteHostInfo[],
   hostId: null as string | null,
+  activeServerUrl: null as string | null,
+  connectionDiagnostics: null,
   hostSwitch: { status: 'idle' } as HostSwitchState,
 }
 
@@ -924,6 +951,88 @@ const requireSession = (): ActiveSession => {
  */
 let sessionEpoch = 0
 
+export function sessionTransferConnection(): { owner: SessionTransferOwner; peer: SessionTransferPeer } | null {
+  const session = active
+  if (session === null || useRemoteStore.getState().phase !== 'ready' || !session.host.identityKey) return null
+  return {
+    owner: {
+      target: session.link,
+      capabilities: session.capabilities,
+      current: () => active === session && useRemoteStore.getState().phase === 'ready',
+    },
+    peer: {
+      serverUrl: session.server.url,
+      hostId: session.host.deviceId,
+      hostIdentity: session.host.identityKey,
+      deviceId: session.account.deviceId,
+    },
+  }
+}
+
+export function remoteDraftOwner(allowSaved = false): string | null {
+  const peer = sessionTransferConnection()?.peer
+  if (peer) return JSON.stringify([peer.serverUrl, peer.hostId, peer.hostIdentity, peer.deviceId])
+  const saved = allowSaved ? useRemoteStore.getState().lastSession : null
+  if (saved === null) return null
+  const key = findPinnedHost(saved.serverUrl, saved.hostDeviceId)?.identityKey
+  const device = findAccount(saved.serverUrl, saved.email)?.deviceId
+  return key && device ? JSON.stringify([saved.serverUrl, saved.hostDeviceId, key, device]) : null
+}
+
+export async function changeRemoteDevice(target: RemoteCallTarget, change: DeviceChange) {
+  const session = requireSession()
+  if (!session.client || session.link !== target || ((change.kind === 'rename' || change.kind === 'revokeHost') &&
+    !useRemoteStore.getState().hosts.some((host) => host.deviceId === change.deviceId))) {
+    throw new RemoteApiError('NOT_FOUND', 'The device is unavailable on the selected account.')
+  }
+  const current = () => active === session
+  const renamed = await session.client.manageDevice(session.server, session.account, change, current)
+  if (change.kind === 'revokeHost' || change.kind === 'unpair') {
+    const last = readLastSession()
+    const activeHostRevoked = change.deviceId === session.host.deviceId &&
+      (current() || (last?.serverUrl === session.server.url && last.email === session.account.email &&
+        last.hostDeviceId === change.deviceId && (active === null || (
+          active.server.url === session.server.url && active.account.deviceId === session.account.deviceId &&
+          active.host.deviceId === change.deviceId
+        ))))
+    if (activeHostRevoked) {
+      clearLastSession()
+      useRemoteStore.getState().disconnect()
+    } else if (current()) {
+      useRemoteStore.setState((state) => ({ hosts: state.hosts.filter((host) => host.deviceId !== change.deviceId) }))
+    }
+    return
+  }
+  if (!current()) return
+  if (change.kind === 'revokeSelf') {
+    useRemoteStore.getState().signOut()
+    return
+  }
+  if (renamed === undefined) return
+  const state = useRemoteStore.getState()
+  if (session.host.deviceId === change.deviceId) {
+    session.host = { ...session.host, name: renamed }
+    if (state.lastSession?.hostDeviceId === change.deviceId) {
+      useRemoteStore.setState({ lastSession: writeLastSession({ ...state.lastSession, hostName: renamed }) })
+    }
+  }
+  useRemoteStore.setState((currentState) => ({
+    hosts: currentState.hosts.map((host) => host.deviceId === change.deviceId ? { ...host, name: renamed } : host),
+  }))
+}
+
+export async function listRemoteMemberships(target: RemoteCallTarget) {
+  const session = requireSession()
+  if (!session.client || session.link !== target) throw new RemoteApiError('RPC_ABORTED', 'The originating connection closed.')
+  const current = () => active === session
+  const memberships = await session.client.listMemberships(session.server, session.account, current)
+  if (!current()) throw new RemoteApiError('RPC_ABORTED', 'The originating connection closed.')
+  return memberships
+}
+
+/** Changes on every session-open attempt, including leaving and returning to the same ID. */
+export const remoteSessionSelectionVersion = (): number => sessionEpoch
+
 /** 开一条新流程：领一张代际工牌，拿到的工牌只有最新那条流程能用。 */
 const newFlowTicket = (sessionId: string): FollowEpochTicket => {
   const ticket = newFollowEpoch(sessionId, sessionEpoch)
@@ -1116,6 +1225,33 @@ export const registerRemoteStreamSink = (
   return release
 }
 
+export function subscribeRemoteStream(
+  target: RemoteCallTarget,
+  opened: Promise<RemoteStreamHandle>,
+  onPayload: StreamListener,
+  onError: (error: unknown) => void,
+): () => void {
+  let disposed = false
+  let close: (() => void) | undefined
+  void opened.then((handle) => {
+    const ownsStream = active?.link === target
+    const release = ownsStream
+      ? registerRemoteStreamSink(handle.streamId, (payload) => {
+        if (!disposed && active?.link === target) onPayload(payload)
+      })
+      : undefined
+    close = () => { void handle.close().catch(() => undefined).finally(() => release?.()) }
+    if (disposed || !ownsStream) close()
+  }, (error) => {
+    if (!disposed && active?.link === target) onError(error)
+  })
+  return () => {
+    if (disposed) return
+    disposed = true
+    close?.()
+  }
+}
+
 /* ── 会话列表投影 ─────────────────────────────────────────────────────── */
 
 /** Host 的 `SessionSummary` → 契约的 `RemoteSessionSummary`（子会话不进列表）。 */
@@ -1195,10 +1331,54 @@ const patchTimelineStatus = (sessionId: string, patch: Partial<RemoteCacheStatus
  *
  * 两个来源都是 `serverUrl + hostDeviceId`，所以「先渲染缓存」与「连上之后合并」用的是同一个桶。
  */
-const cacheBucketNow = (): { serverUrl: string; hostDeviceId: string } | null => {
-  if (active !== null) return { serverUrl: active.server.url, hostDeviceId: active.host.deviceId }
+const cacheBucketFor = (session: ActiveSession) => ({
+  serverUrl: session.server.url,
+  hostDeviceId: session.host.deviceId,
+  owner: JSON.stringify([session.host.identityKey, session.account.deviceId, session.account.email]),
+})
+
+const timelineBucketFor = (session: ActiveSession) => {
+  const bucket = cacheBucketFor(session)
+  return session.compactHistory ? { ...bucket, owner: JSON.stringify([bucket.owner, 'compact']) } : bucket
+}
+
+export function forgetDeletedRemoteSession(target: RemoteCallTarget, id: string): void {
+  const session = active
+  if (!session || session.link !== target) return
+  flushTimelinePersist()
+  session.transcripts.delete(id)
+  if (session.sessionId === id) {
+    sessionEpoch += 1
+    session.sessionId = null
+    session.transcript = createTranscriptState()
+    session.hasMore = false
+    const follow = session.follow
+    session.follow = null
+    void closeStreamQuietly(session, follow)
+    selectControlSession(null)
+    setPaging(false, false)
+    useRemoteStore.setState({
+      activeSessionId: null, items: [], streaming: false, pendingApprovals: [],
+      cacheStatus: { ...useRemoteStore.getState().cacheStatus, timelineSettled: false, timelineFailed: false, timelineFromCache: false },
+    })
+  }
+  clearPendingInteractions({ sessionId: id })
+  const bucket = cacheBucketFor(session)
+  const sessions = useRemoteStore.getState().sessions.filter((item) => item.id !== id)
+  writeSessionsCache({ ...bucket, sessions })
+  writeTimelineCache({ ...timelineBucketFor(session), sessionId: id, items: [], replaceEmpty: true })
+  useRemoteStore.setState({ sessions })
+}
+
+const cacheBucketNow = (): ReturnType<typeof cacheBucketFor> | null => {
+  if (active !== null) return cacheBucketFor(active)
   const last = useRemoteStore.getState().lastSession ?? readLastSession()
-  return last === null ? null : { serverUrl: last.serverUrl, hostDeviceId: last.hostDeviceId }
+  if (!last) return null
+  const key = findPinnedHost(last.serverUrl, last.hostDeviceId)?.identityKey
+  const device = findAccount(last.serverUrl, last.email)?.deviceId
+  return key && device ? {
+    serverUrl: last.serverUrl, hostDeviceId: last.hostDeviceId, owner: JSON.stringify([key, device, last.email]),
+  } : null
 }
 
 /**
@@ -1243,25 +1423,20 @@ const applyRemoteSessionRows = (rows: RemoteSessionRow[]): void => {
   if (bucket !== null) writeSessionsCache({ ...bucket, sessions: merged.sessions, now })
 }
 
-const persistTimelineNow = (session: ActiveSession, sessionId: string): void => {
-  if (session.transcript.items.length === 0) return
-  /*
-   * [S4] 桶键 = **快照 / 帧自带的 sessionId**（`sessionId` 参数），内容却在
-   * `session.transcript` 里。两者对不上就说明这份 transcript 已经不是那个会话的了
-   * （切会话的中间态 / 孤儿流写的），此时写下去就是把 A 的内容存进 B 的桶 ——
-   * 下次打开 B 会先直出一屏 A 的消息，比时间线画错更难发现。宁可少写一屏。
-   */
-  if (!acceptCacheWrite(sessionId, session.sessionId)) {
-    noteSessionDrop('cache')
-    return
-  }
-  writeTimelineCache({
-    serverUrl: session.server.url,
-    hostDeviceId: session.host.deviceId,
+const persistTimelineNow = (session: ActiveSession, sessionId: string, replaceEmpty = false): void => {
+  const transcript = session.transcripts.get(sessionId)
+  if (transcript === undefined) return
+  const lastWrite = session.lastTimelineWrite
+  if (!replaceEmpty && lastWrite?.sessionId === sessionId && lastWrite.items === transcript.items) return
+  const written = writeTimelineCache({
+    ...timelineBucketFor(session),
     sessionId,
-    items: session.transcript.items,
+    items: transcript.items,
+    replaceEmpty,
     now: Date.now(),
   })
+  // Other sessions' writes can evict this entry from the on-disk cache.
+  session.lastTimelineWrite = written > 0 ? { sessionId, items: transcript.items } : null
 }
 
 const scheduleTimelinePersist = (session: ActiveSession, sessionId: string): void => {
@@ -1293,20 +1468,22 @@ type PickedHost = RemoteHost & { identityKey: string }
  * 挑一台可连的 Host（在线优先）；公钥缺失直接 fail-closed —— Noise IK 没有它就握不上手。
  *
  * `preferredHostId` 来自 last-session：**上次连的是哪台就连回哪台**（多台 Host 时不能让
- * 「列表里第一台在线的」把用户悄悄换到另一台机器上）。优先级：
- *   上次那台且在线 → 任意在线 → 上次那台（离线也认，让用户看到真实的连接失败）→ 第一台。
+ * 「列表里第一台在线的」把用户悄悄换到另一台机器上）。
  */
 const pickHost = (hosts: RemoteHost[], preferredHostId?: string): PickedHost => {
   const usable = hosts.filter(host => host.identityMismatch !== true)
+  const preferred = preferredHostId === undefined ? undefined : usable.find(host => host.deviceId === preferredHostId)
+  if (preferredHostId !== undefined && preferred === undefined) {
+    const code = hosts.some(host => host.deviceId === preferredHostId) ? 'PEER_IDENTITY_MISMATCH' : 'HOST_UNKNOWN'
+    throw new RemoteApiError(code, '原远程主机不可用，请在主机列表中重新选择')
+  }
   if (usable.length === 0) {
     if (hosts.length > 0) {
       throw new RemoteApiError('PEER_IDENTITY_MISMATCH', '账号下主机的公钥都与本机 pin 的不一致，已拒绝连接')
     }
     throw new RemoteApiError('NO_HOST', '这个账号下没有可连接的 Host：请先在电脑上的 DSH 里开启远程访问并注册设备')
   }
-  const preferred = preferredHostId === undefined ? undefined : usable.find(host => host.deviceId === preferredHostId)
-  const preferredOnline = preferred?.online === true ? preferred : undefined
-  const picked = preferredOnline ?? usable.find(host => host.online === true) ?? preferred ?? usable[0]!
+  const picked = preferred ?? usable.find(host => host.online === true) ?? usable[0]!
   if (picked.identityKey === undefined || picked.identityKey.length === 0) {
     throw new RemoteApiError(
       'HOST_IDENTITY_MISSING',
@@ -1525,6 +1702,13 @@ const openControlStream = async (session: ActiveSession): Promise<void> => {
       // —— S3 live —— 投影是「打开会话后」唯一能校正运行态的东西（`turn` / `turnState` / `status`）
       noteLiveControlFrame(value)
       applyControlFrame(value)
+      const id = session.sessionId
+      if (active !== session || id === null) return
+      const transcript = session.transcript
+      const items = reconcileQueuedPrompts(transcript.items, id)
+      if (items === transcript.items) return
+      commitTranscript(session, id, { ...transcript, items })
+      scheduleTimelinePersist(session, id)
     },
     onClosed: (reason, failure) => {
       closed = true
@@ -1548,8 +1732,10 @@ const openControlStream = async (session: ActiveSession): Promise<void> => {
 const shutdown = async (): Promise<void> => {
   const session = active
   active = null
+  observeRemoteTarget(null)
   if (session === null) return
   session.closing = true
+  unbindSessionControls()
   session.sinks.clear()
   session.unrouted.clear()
   // 外部接收器要先收到一次「连不上了」，否则它们会一直等一个永远不会来的帧
@@ -1561,8 +1747,6 @@ const shutdown = async (): Promise<void> => {
   session.events = null
   session.control = null
   session.eventClientId = null
-  // 会话内控制的状态（模型 / 权限 / 队列 / 提问认领）都属于这条连接：一起作废
-  unbindSessionControls()
   try {
     session.link.close()
   } catch {
@@ -1644,6 +1828,7 @@ const rememberLastSession = (input: RememberLastSessionInput): void => {
 
 /** 连接收尾（临时断开与退出登录共用）：停连接、停保活、清「登录中」的会话、复位本地游标 */
 const teardownConnection = (): void => {
+  sshReconnectInput = null
   // R8：断线**保留**缓存（下次打开还要用它直出），但要把攒着的内容先写完
   flushTimelinePersist()
   void shutdown()
@@ -1668,6 +1853,130 @@ const teardownConnection = (): void => {
 
 /* ── 动作实现 ─────────────────────────────────────────────────────────── */
 
+const rtcRetryAfter = new Map<string, number>()
+const RTC_RETRY_DELAY_MS = 45_000
+let sshReconnectInput: SshHostInput | null = null
+/** SSH 掉线重连的退避状态：成功连上后归零。 */
+let sshReconnectAttempts = 0
+let sshReconnectDelay = 1_000
+const SSH_RECONNECT_MAX_ATTEMPTS = 8
+let sshRestoreId: string | undefined
+
+function createActiveSession(
+  client: RemoteClient | null, server: RemoteServer, account: RemoteAccount, host: RemoteHost, link: ActiveSession['link'],
+): ActiveSession {
+  return {
+    client, server, account, host, link,
+    capabilities: [], sessionId: null, transcript: createTranscriptState(), transcripts: new Map(),
+    lastTimelineWrite: null, hasMore: false, follow: null, events: null, control: null, eventClientId: null,
+    sinks: new Map(), listeners: new Map(), unrouted: new Map(), closing: false,
+  }
+}
+
+async function loadHostData(session: ActiveSession): Promise<void> {
+  await openEventsStream(session)
+  if (active !== session) return
+  bindSessionControls({
+    target: session.link,
+    registerStreamSink: registerRemoteStreamSink,
+    eventClientId: () => active === session ? session.eventClientId : null,
+  })
+  void openControlStream(session)
+  patchCacheStatus({ sessionsSyncing: true })
+  const rows = await listSessions(session.link)
+  if (active === session) applyRemoteSessionRows(rows)
+}
+
+async function connectSshFlow(input: SshHostInput, restoreId?: string): Promise<boolean> {
+  cancelReconnect()
+  const generation = reconnectGeneration
+  sshReconnectInput = input
+  sshRestoreId = restoreId
+  flushTimelinePersist()
+  stopKeepAliveFlow()
+  void closeAuthPage()
+  abortResume()
+  clearPendingLogin()
+  await shutdown()
+  if (generation !== reconnectGeneration) return false
+  resetLiveSessions()
+  resetPendingInteractions()
+  setPaging(false, false)
+  autoConnectSettled = true
+  useRemoteStore.setState({ ...INITIAL_STATE, phase: 'connecting', autoConnect: { state: 'done' } })
+  let session: ActiveSession | undefined
+  try {
+    const { createSshHost, rememberSshProfile, validateSshHost } = await import('./sshHost.js')
+    if (generation !== reconnectGeneration) return false
+    const profile = validateSshHost(input)
+    const { deviceId } = loadOrCreateIdentity()
+    const authority = profile.host.includes(':') ? '[' + profile.host + ']' : profile.host
+    const server = { url: 'ssh://' + authority + ':' + profile.port }
+    const host: RemoteHost = {
+      deviceId: JSON.stringify([profile.user, profile.mode, profile.remotePort ?? 0]),
+      name: profile.host, identityKey: profile.fingerprint, online: true,
+    }
+    const account: RemoteAccount = { email: profile.user, deviceId, accessToken: '', refreshToken: '' }
+    const start = performance.now()
+    const link = createSshHost(profile, {
+      onStreamEvent: (id, event) => { if (session && active === session) routeStream(session, id, event) },
+      onState: (state, detail) => {
+        if (state !== 'closed' || !session || active !== session || session.closing || useRemoteStore.getState().phase !== 'ready') return
+        sshRestoreId = session.sessionId ?? undefined
+        flushTimelinePersist()
+        void shutdown()
+        failConnection(new RemoteApiError(detail ?? 'CONNECTION_FAILED', 'The DSH SSH connection closed.'))
+        if (sshReconnectInput === profile && useRemoteStore.getState().phase === 'error' &&
+          sshReconnectAttempts < SSH_RECONNECT_MAX_ATTEMPTS) {
+          const retryGeneration = reconnectGeneration
+          // 固定 1 秒会在一抖就重下一遍 SSH 登录 + 端口转发（managed 模式还要起进程）：
+          // 按 1/2/4/…/30 秒退避，次数用完就把错误留在界面上等用户手动重连。
+          const delay = sshReconnectDelay
+          sshReconnectAttempts += 1
+          sshReconnectDelay = Math.min(30_000, sshReconnectDelay * 2)
+          setTimeout(() => {
+            if (retryGeneration === reconnectGeneration && sshReconnectInput === profile) void connectSshFlow(profile, sshRestoreId)
+          }, delay)
+        }
+      },
+    })
+    active = session = createActiveSession(null, server, account, host, link)
+    await link.ready()
+    if (active !== session) return false
+    const measuredAt = Date.now()
+    const connectMs = Math.round(performance.now() - start)
+    session.capabilities = ['dsh.http.v1']
+    observeRemoteTarget(link)
+    useRemoteStore.setState({
+      transport: 'ssh', capabilities: session.capabilities, hostId: host.deviceId,
+      activeServerUrl: server.url, hosts: toHostInfoList([host]),
+      connectionDiagnostics: { connectMs, secureChannelMs: connectMs, capabilityProbeMs: 0, hostRequestMs: 0, measuredAt },
+    })
+    await loadHostData(session)
+    if (active !== session) return false
+    sshReconnectInput = profile
+    rememberSshProfile(profile)
+    rememberLastSession({ serverUrl: server.url, account, host, capabilities: session.capabilities, transport: 'ssh' })
+    useRemoteStore.setState({ phase: 'ready' })
+    sshReconnectAttempts = 0
+    sshReconnectDelay = 1_000
+    if (restoreId && useRemoteStore.getState().sessions.some((row) => row.id === restoreId)) await openSessionFlow(restoreId)
+    return active === session
+  } catch (error) {
+    if (generation !== reconnectGeneration || (session && active !== session)) return false
+    await shutdown()
+    if (generation === reconnectGeneration) {
+      failConnection(error)
+      const code = errorCodeOf(error)
+      if (code === 'PEER_IDENTITY_MISMATCH' || code === 'SSH_AUTH_FAILED' || code === 'SSH_INVALID_KEY' ||
+        code === 'SSH_DSH_LOGIN_FAILED' || code === 'INVALID_SSH_REQUEST') {
+        sshReconnectInput = null
+      }
+    }
+    return false
+  }
+}
+
 /**
  * 登录拿到**设备账号**之后的全部动作：列 Host → 建安全通道 → 握手 → `$events` → 首屏列表，
  * 最后**记下这次连接**（`dsp.remote.last-session.v1`，下次启动据此自动连回来）。
@@ -1684,8 +1993,10 @@ const establishSession = async (
   client: RemoteClient,
   server: RemoteServer,
   device: RemoteAccount,
-  options: { preferredHostId?: string } = {},
+  options: { preferredHostId?: string; reconnectHistory?: boolean } = {},
 ): Promise<void> => {
+  const compactHistory = options.reconnectHistory ?? loadCompactHistory()
+  let sessionRef: ActiveSession | null = null
   try {
     // 3. 列 Host（内部已经补好 presence 与 identityKey pin）
     const listedHosts = await client.listHosts(server, device)
@@ -1698,68 +2009,69 @@ const establishSession = async (
 
     useRemoteStore.setState({ phase: 'connecting' })
 
-    // 4. 建安全通道。`hostIdentityKey` 是契约 §3 缺的必填项（Noise IK 的 responder 公钥，
-    // 见 `core/index.ts` 头部「契约缺口」）。S3 的 `buildLinkOptions()` 运行时也会带这个字段，
-    // 但它的 `SecureLinkOptions` **类型里没声明**（靠条件展开绕过了属性检查），
-    // 所以这里显式再写一次：既补类型，也让「Noise 需要 Host 公钥」这件事在调用点可见。
-    // `sessionRef` 先挂上：link 的回调可能在 session 对象建好之前就被触发（建链阶段），
-    // 真正有流要分发时它一定已经指向本连接的上下文。
-    let sessionRef: ActiveSession | null = null
-    const link = createSecureLink({
-      ...buildLinkOptions({ server, account: device, host }),
-      hostIdentityKey: host.identityKey,
-      onStreamEvent: (streamId, payload) => {
-        if (sessionRef !== null) routeStream(sessionRef, streamId, payload)
-      },
-      onState: (state, detail) => {
-        if (state !== 'closed') return
-        const current = active
-        if (current === null || current.link !== link || current.closing) return
-        // 建链成功后才算「意外断开」；建链期间的失败由 client.connect 自己抛。
-        current.closing = true
-        active = null
-        // 这条连接上的东西全作废（消费者收到的 `closed` 也在这里发出去）；保活服务必须停，
-        // 别留一个「守护着死连接」的前台服务。
-        void shutdown()
-        /*
-         * **R10 的核心改动**：意外断开**不再**直接判成「连接失败」红字，而是交给自愈流程分诊。
-         *
-         * 这里原来是一句 `failConnection(TRANSPORT_CLOSED)` —— 于是「App 在后台待久了被服务端
-         * 踢掉」在用户眼里变成「凭据失效 / 连接失败」，而重启 App 恰好重建了整条链路，看起来
-         * 就像「莫名其妙自己好了」。`detail` 里带着真实的失败码与 WS close code
-         *（`（code=4002）` 这种），分诊靠它区分「网络断了」和「token 过期」。
-         */
-        handleLinkClosed(detail)
-      },
-    })
-
-    const session: ActiveSession = {
-      client,
-      server,
-      account: device,
-      host,
-      link,
-      capabilities: [],
-      sessionId: null,
-      transcript: createTranscriptState(),
-      // [S4] 每条连接一份「会话 → transcript」的登记表（Dart 的 ChatTranscript per controller）
-      transcripts: new Map(),
-      hasMore: false,
-      follow: null,
-      events: null,
-      control: null,
-      eventClientId: null,
-      sinks: new Map(),
-      listeners: new Map(),
-      unrouted: new Map(),
-      closing: false,
+    // Each transport attempt has its own authorized connection and Noise session.
+    const openLink = (mode?: RtcMode): SecureLink => {
+      const link = createSecureLink({
+        ...buildLinkOptions({ server, account: device, host }),
+        hostIdentityKey: host.identityKey,
+        useRelayNode: loadAdaptiveTransport(),
+        ...(mode === undefined ? {} : {
+          rtc: { mode, iceServers: (connectionId: string) => getConnectionIceServers(server, device.accessToken, connectionId) },
+        }),
+        onStreamEvent: (streamId, payload) => {
+          if (sessionRef?.link === link) routeStream(sessionRef, streamId, payload)
+        },
+        onState: (state, detail) => {
+          const current = active
+          if (state !== 'closed' || current?.link !== link || current.closing) return
+          if (useRemoteStore.getState().phase !== 'ready') return
+          void shutdown()
+          handleLinkClosed(detail, current.compactHistory)
+        },
+      })
+      return link
     }
+
+    const rtcEnabled = loadAdaptiveTransport() && typeof RTCPeerConnection === 'function'
+    const retryKey = (mode: RtcMode) => JSON.stringify([server.url, device.deviceId, host.deviceId, host.identityKey, mode])
+    const attemptModes: (RtcMode | undefined)[] = []
+    if (rtcEnabled) {
+      for (const mode of ['direct', 'turn'] as const) {
+        if ((rtcRetryAfter.get(retryKey(mode)) ?? 0) <= Date.now()) attemptModes.push(mode)
+      }
+    }
+    attemptModes.push(undefined)
+    let link = openLink(attemptModes[0])
+
+    const session = createActiveSession(client, server, device, host, link)
     active = session
     sessionRef = session
 
     // 5. 控制面握手 + `harness.transport.describe`（拿不到 v1|v3 就 fail-closed）
-    const connected = await client.connect(server, device, host, link)
+    const connectStarted = performance.now()
+    let connected: Awaited<ReturnType<RemoteClient['connect']>> | undefined
+    for (const [index, mode] of attemptModes.entries()) {
+      try {
+        connected = await client.connect(server, device, host, link, {
+          ...(mode ? { timeoutMs: 57_000 } : {}),
+          compactHistory,
+          requireCompactHistory: options.reconnectHistory === true,
+        })
+        break
+      } catch (error) {
+        if (active !== session) return
+        if (mode === undefined || errorCodeOf(error) !== 'WEBRTC_UNAVAILABLE') throw error
+        const now = Date.now()
+        for (const [key, retryAt] of rtcRetryAfter) if (retryAt <= now) rtcRetryAfter.delete(key)
+        rtcRetryAfter.set(retryKey(mode), now + RTC_RETRY_DELAY_MS)
+        link = session.link = openLink(attemptModes[index + 1])
+      }
+    }
+    if (!connected) throw new RemoteApiError('CONNECTION_FAILED', '无法建立远程连接')
+    if (active !== session) return
     session.capabilities = connected.capabilities
+    session.compactHistory = connected.compactHistory === true
+    observeRemoteTarget(link)
     useRemoteStore.setState({
       phase: 'ready',
       capabilities: [...connected.capabilities],
@@ -1767,6 +2079,8 @@ const establishSession = async (
       error: null,
       // [R14 多 Host] 真的握上手才算「当前这台」：下拉里的对勾与「正在连接 x」都读它
       hostId: host.deviceId,
+      activeServerUrl: server.url,
+      connectionDiagnostics: rtcEnabled ? { ...connected.diagnostics, connectMs: Math.round(performance.now() - connectStarted) } : connected.diagnostics,
     })
     // 1-5 都过了就是「连上了」：立刻记下来（`$events` / 首屏列表再抖，下次启动也能恢复 ——
     // 那两步是被动拉数据，失败不该剥夺用户的「记住这台 Host」）
@@ -1781,25 +2095,9 @@ const establishSession = async (
     // 不 await：保活失败不该拖住首屏（也不该影响连接结果）。
     void refreshKeepAliveFlow()
 
-    // 6. `$events` 必须先 ready（审批 / 目录增量都靠它）
-    await openEventsStream(session)
-    /*
-     * 6b. 会话内控制（W2）：把这条连接交给 `sessionControls.ts`，并开 `session/control` 投影流。
-     *
-     * 依赖是**反向注入**的（不 import 那个模块的 store）：这样 `store.ts → sessionControls`
-     * 单向，sessionControls 不需要反过来 import 本文件，也就没有循环 import 的初始化顺序坑。
-     * `openControlStream` 不 await：投影只是补充信息，拿不到不影响聊天。
-     */
-    bindSessionControls({
-      target: link,
-      registerStreamSink: registerRemoteStreamSink,
-      eventClientId: () => active?.eventClientId ?? null,
-    })
-    void openControlStream(session)
-    // 7. 首屏列表（R8：与本地缓存合并 —— 服务端为准、本地 pinned 保留；合并完顺手落盘）
-    patchCacheStatus({ sessionsSyncing: true })
-    applyRemoteSessionRows(await listSessions(link))
+    await loadHostData(session)
   } catch (error) {
+    if (sessionRef !== null && active !== sessionRef) return
     // 已经 ready 之后才失败的（`$events` / 首屏）：保活服务不该继续守护一条死连接
     stopKeepAliveFlow()
     await shutdown()
@@ -1809,6 +2107,7 @@ const establishSession = async (
 
 /** 邮箱密码登录 → 设备注册 → 建链（`connect()` 的完整实现，行为保持不变）。 */
 const connectOnce = async (serverUrl: string, email: string, password: string): Promise<void> => {
+  sshReconnectInput = null
   await shutdown()
   setPaging(false, false)
   useRemoteStore.setState({ ...INITIAL_STATE, phase: 'authing' })
@@ -1859,10 +2158,12 @@ const ensureOAuthProviders = async (server: RemoteServer): Promise<OAuthProvider
 }
 
 const loadOAuthProvidersFlow = async (serverUrl?: string): Promise<void> => {
+  if (active !== null) return
   try {
     await ensureOAuthProviders({ url: normalizeServerUrl(serverUrl ?? lastUsedServerUrl()) })
   } catch (error) {
-    failSignIn(error)
+    const { phase } = useRemoteStore.getState()
+    if (active === null && (phase === 'idle' || phase === 'error')) noteSignInError(error)
   }
 }
 
@@ -2287,7 +2588,7 @@ interface RecoveryRoundResult {
  */
 let recoveryGate: Promise<void> = Promise.resolve()
 
-const runRecoveryRound = (options: { refreshFirst: boolean }): Promise<RecoveryRoundResult> => {
+const runRecoveryRound = (options: { refreshFirst: boolean; reconnectHistory?: boolean }): Promise<RecoveryRoundResult> => {
   const task: Promise<RecoveryRoundResult> = recoveryGate.then(() => runRecoveryRoundOnce(options))
   recoveryGate = task.then(
     () => undefined,
@@ -2296,7 +2597,7 @@ const runRecoveryRound = (options: { refreshFirst: boolean }): Promise<RecoveryR
   return task
 }
 
-const runRecoveryRoundOnce = async (options: { refreshFirst: boolean }): Promise<RecoveryRoundResult> => {
+const runRecoveryRoundOnce = async (options: { refreshFirst: boolean; reconnectHistory?: boolean }): Promise<RecoveryRoundResult> => {
   const last = readLastSession()
   if (last === null) {
     // 没记住「连哪台」：什么都没得恢复（不是错误，静默）
@@ -2355,7 +2656,9 @@ const runRecoveryRoundOnce = async (options: { refreshFirst: boolean }): Promise
     }
   }
   // `establishSession` 自己接住所有建链错误（不抛），失败信息在 state 里
-  await establishSession(client, server, account, { preferredHostId: plan.session.hostDeviceId })
+  await establishSession(client, server, account, {
+    preferredHostId: plan.session.hostDeviceId, reconnectHistory: options.reconnectHistory,
+  })
   if (useRemoteStore.getState().phase === 'ready') return { ok: true, failure: null, refreshed: wantRefresh }
   return { ok: false, failure: failureFromErrorState(useRemoteStore.getState().error), refreshed: wantRefresh }
 }
@@ -2448,6 +2751,7 @@ const runReconnectLoop = async (
   generation: number,
   initialFailure: FailureInput | null,
   immediate: boolean,
+  reconnectHistory?: boolean,
 ): Promise<void> => {
   let failure = initialFailure
   let step: RecoveryStep = planRecoveryStep(recoveryState, failure, { immediate })
@@ -2499,7 +2803,7 @@ const runReconnectLoop = async (
       useRemoteStore.setState({ phase: 'connecting', error: null, autoConnect: { state: 'connecting' } })
     }
 
-    const result = await runRecoveryRound({ refreshFirst: step.refresh })
+    const result = await runRecoveryRound({ refreshFirst: step.refresh, reconnectHistory })
     if (generation !== reconnectGeneration) return
 
     if (result.ok) {
@@ -2517,6 +2821,7 @@ const runReconnectLoop = async (
 }
 
 interface StartReconnectOptions {
+  reconnectHistory?: boolean
   /** 触发原因（诊断用；不进状态） */
   reason: string
   /** 首轮不等退避（回前台 / 用户点击 / 刚掉线） */
@@ -2535,9 +2840,17 @@ interface StartReconnectOptions {
  */
 const startReconnect = (options: StartReconnectOptions): Promise<void> => {
   if (!isNativeShell()) return Promise.resolve()
+  if (sshReconnectInput) {
+    if (useRemoteStore.getState().phase === 'error' && options.reason === 'foreground') {
+      return connectSshFlow(sshReconnectInput, sshRestoreId).then(() => undefined)
+    }
+    return Promise.resolve()
+  }
   if (connecting) return Promise.resolve()
   const state = useRemoteStore.getState()
-  if (state.phase === 'ready') return Promise.resolve()
+  // 掉线自愈时 `shutdown()` 已经把 active 清空，但 phase 可能还停在 ready（没有新状态到达）。
+  // 只有「真的还有一条活连接」才该拦下重连，否则自愈会被自己的相位守卫吃掉。
+  if (state.phase === 'ready' && active !== null) return Promise.resolve()
   if (state.phase === 'authing' || state.phase === 'waiting-auth') return Promise.resolve()
   /*
    * 这两种结论是**人**才能解决的（登录过期 / 设备撤销 / 身份不符）：
@@ -2547,14 +2860,15 @@ const startReconnect = (options: StartReconnectOptions): Promise<void> => {
   if (options.restart !== true && (state.reconnect.status === 'need-login' || state.reconnect.status === 'blocked')) {
     return Promise.resolve()
   }
-  if (readLastSession() === null) return Promise.resolve()
+  const saved = readLastSession()
+  if (saved === null || saved.transport === 'ssh') return Promise.resolve()
   // 启动恢复正在飞：让它先落地（它自己会写 autoConnect 状态），别两条建链抢 `active`
   if (autoConnectInFlight !== null) return autoConnectInFlight.then(() => undefined)
   if (options.restart !== true && reconnectInFlight !== null) return reconnectInFlight
 
   cancelReconnect()
   const generation = reconnectGeneration
-  const task: Promise<void> = runReconnectLoop(generation, options.failure ?? null, options.immediate === true)
+  const task: Promise<void> = runReconnectLoop(generation, options.failure ?? null, options.immediate === true, options.reconnectHistory)
     .catch(() => undefined)
     .finally(() => {
       if (reconnectInFlight === task) reconnectInFlight = null
@@ -2569,7 +2883,7 @@ const startReconnect = (options: StartReconnectOptions): Promise<void> => {
  * `detail` 形如 `TRANSPORT_CLOSED: 原生桥关闭：heartbeat timeout（code=4009）` ——
  * 真实的失败码和 WS close code 都藏在这句话里（`core/` 不在本次可改范围，只能解析字符串）。
  */
-const handleLinkClosed = (detail?: string): void => {
+const handleLinkClosed = (detail?: string, reconnectHistory?: boolean): void => {
   const parsed = parseLinkCloseDetail(detail)
   const failure: FailureInput = {
     code: parsed.code ?? 'TRANSPORT_CLOSED',
@@ -2613,7 +2927,7 @@ const handleLinkClosed = (detail?: string): void => {
    * 而且会给 Host 侧制造「刚断就连」的噪音。用户回前台或点「立即重连」时才是真的「现在就试」，
    * 那条路径传 `immediate: true`（第一次不等退避）。
    */
-  void startReconnect({ reason: 'link-closed', failure })
+  void startReconnect({ reason: 'link-closed', failure, reconnectHistory })
 }
 
 /** 前台自愈监听是否已经装过（模块级副作用只装一次） */
@@ -2653,7 +2967,10 @@ export const installForegroundSelfHeal = (): void => {
      * 只挂 `online`：`offline` 不该伪造失败 —— 链路自己会 close，然后由
      * `handleLinkClosed()` 分诊成中性的「网络断开」。
      */
-    window.addEventListener('online', kick)
+    window.addEventListener('online', () => {
+      rtcRetryAfter.clear()
+      kick()
+    })
   }
 }
 
@@ -2690,6 +3007,7 @@ const runAutoConnect = async (force: boolean): Promise<void> => {
   if (!isNativeShell()) return
 
   const session = readLastSession()
+  if (session?.transport === 'ssh') return
   if (session === null) {
     useRemoteStore.setState({ lastSession: null, autoConnect: { state: 'idle' } })
     return
@@ -2803,6 +3121,36 @@ const cancelProviderLoginFlow = async (): Promise<void> => {
 /** 建链互斥：连点两次不能并发建两条安全通道（第二条会覆盖 `active` 并泄漏第一条）。 */
 let connecting = false
 
+export async function connectPairedDevice(offer: PairingOffer, account: RemoteAccount) {
+  if (connecting || active !== null || useRemoteStore.getState().phase === 'waiting-auth') {
+    throw new RemoteApiError('RPC_ABORTED', 'A different remote sign-in is already active.')
+  }
+  if (account.serverUrl !== offer.server.url || loadIdentity()?.deviceId !== account.deviceId) {
+    throw new RemoteApiError('PAIRING_IDENTITY_MISMATCH', 'Pairing does not match this device.')
+  }
+  const pin = pinHostIdentityKey(offer.server.url, offer.host)
+  if (pin.state === 'mismatch') throw new RemoteApiError('PEER_IDENTITY_MISMATCH', 'Host key changed.')
+  upsertServer(offer.server.url)
+  const stored = upsertAccount(account)
+  if (!loadAccounts().some((entry) => entry.serverUrl === account.serverUrl && entry.deviceId === account.deviceId
+    && entry.email === account.email && entry.refreshToken === account.refreshToken)) {
+    throw new RemoteApiError('PAIRING_STORAGE_FAILED', 'The paired credentials could not be saved.')
+  }
+  const lastSession = writeLastSession({
+    serverUrl: offer.server.url, email: account.email, hostDeviceId: offer.host.deviceId, hostName: offer.host.name,
+  })
+  connecting = true
+  cancelReconnect()
+  try {
+    await shutdown()
+    setPaging(false, false)
+    useRemoteStore.setState({ ...INITIAL_STATE, phase: 'connecting', lastSession })
+    await establishSession(createRemoteClient(), offer.server, stored, { preferredHostId: offer.host.deviceId })
+  } finally {
+    connecting = false
+  }
+}
+
 const connectFlow = async (serverUrl: string, email: string, password: string): Promise<void> => {
   if (connecting) return
   connecting = true
@@ -2883,6 +3231,10 @@ const switchHostFlow = async (targetId: string): Promise<void> => {
   // 拆连接之后 `active` 会被清空，所以先把这条连接的三件套拍成快照：
   // 用**同一个账号**连新 Host 靠的就是它们（token 仍然只在 `storage.ts`，这里不复制凭据）
   const { client, server, account } = session
+  if (!client) {
+    switchingHost = false
+    return
+  }
   try {
     await performHostSwitch(
       {
@@ -2916,13 +3268,10 @@ const switchHostFlow = async (targetId: string): Promise<void> => {
         },
         connect: async (hostDeviceId: string) => {
           await establishSession(client, server, account, { preferredHostId: hostDeviceId })
-          /*
-           * `establishSession` 内部把失败折成 `state.error`（不抛），所以这里必须自己复核：
-           * 连上的不是目标那台 = 这次切换失败（目标掉线时 `pickHost` 会回落到别的在线机，
-           * 那种「悄悄换了台机器」正是本功能最不该有的行为）。
-           */
           const switched = active
           if (switched === null || switched.host.deviceId !== hostDeviceId) {
+            const failure = useRemoteStore.getState().error
+            if (failure !== null) throw new RemoteApiError(failure.code, failure.message)
             throw new RemoteApiError('HOST_SWITCH_FAILED', '没能连上这台主机')
           }
         },
@@ -2940,22 +3289,30 @@ const switchHostFlow = async (targetId: string): Promise<void> => {
 /** 重新探一遍 Host 在线状态（下拉里的刷新）。失败静默：手上那份列表仍然可用 */
 const refreshHostsFlow = async (): Promise<void> => {
   const session = active
-  if (session === null) return
+  if (!session?.client) return
   try {
     const rows = await session.client.listHosts(session.server, session.account)
-    useRemoteStore.setState({ hosts: toHostInfoList(rows) })
+    if (active === session) useRemoteStore.setState({ hosts: toHostInfoList(rows) })
   } catch {
     // 连通性抖动 / 服务器拒绝：保持原样（离线主机本来就灰着），不弹错
   }
 }
 
 const refreshSessionsFlow = async (): Promise<void> => {
+  let session: ActiveSession
   try {
-    const session = requireSession()
+    session = requireSession()
+  } catch (error) {
+    fail(error)
+    return
+  }
+  try {
     // R8：先把「正在同步」立起来（列表可能已经是缓存直出的一屏），合并完由 applyRemoteSessionRows 落定
     patchCacheStatus({ sessionsSyncing: true })
-    applyRemoteSessionRows(await listSessions(session.link))
+    const rows = await listSessions(session.link)
+    if (active === session) applyRemoteSessionRows(rows)
   } catch (error) {
+    if (active !== session) return
     patchCacheStatus({ sessionsSyncing: false })
     fail(error)
   }
@@ -2981,29 +3338,23 @@ const openSessionFlow = async (id: string): Promise<void> => {
   const ticket = newFlowTicket(id)
   // 切走之前先把手上的内容写盘（攒着的最后几帧别丢）
   flushTimelinePersist()
-  await closeStreamQuietly(session, session.follow)
+  const previousFollow = session.follow
   session.follow = null
-  // 让位之后可能已经不是我们这一代了（用户又点了一个会话）：后面的初始化一步都不能做，
-  // 否则会把 `session.sessionId` / `state.activeSessionId` 抢回这个会话。
-  //
-  // [R18 真根因] 这里**只比代际**，绝不比 sessionId：此刻 `session.sessionId` 还停在
-  // 旧值（刚连上是 null，否则是上一个会话），而工牌里是**目标** id —— 用
-  // `flowIsCurrent()`（内部比 sessionId）会把每一次「点会话」都判成上一代的迟到流程，
-  // 静默 return。v1.13.0 起真机「点会话没反应、右侧一直停在『选择一个会话』」
-  // 就是这一行；`__dsDebug.sessionDrops.staleFlow` 会一路涨。见 routing.ts 的同名注释。
+  void closeStreamQuietly(session, previousFollow)
+  // 老流的本地接收器已经移除，展示新会话不必等待主机确认关流。
   if (active !== session || !followEpochTurnIsCurrent(ticket, sessionEpoch)) {
     noteSessionDrop('staleFlow')
     return
   }
   session.sessionId = id
+  const remembered = session.transcripts.get(id)
   /*
    * R8：**先铺缓存**。有缓存就立刻直出一屏（顶部挂「正在同步…」），
    * 没缓存才进骨架 —— 两种情况都**不**显示「这个会话还没有消息」。
    * `cursor` 给 -1：缓存不持有 follow 游标，真正的游标由快照的 `cursor` 决定。
    */
-  const cachedTimeline = readTimelineCache({
-    serverUrl: session.server.url,
-    hostDeviceId: session.host.deviceId,
+  const cachedTimeline = remembered ? null : readTimelineCache({
+    ...timelineBucketFor(session),
     sessionId: id,
     now: Date.now(),
   })
@@ -3012,7 +3363,6 @@ const openSessionFlow = async (id: string): Promise<void> => {
    * controller 里，切回来接着用；只有从没打开过的会话才走磁盘缓存 → 骨架）。
    * 这条也让「切走 → 切回」不再闪一下缓存版。
    */
-  const remembered = session.transcripts.get(id)
   const painted = remembered ?? (cachedTimeline === null
     ? createTranscriptState()
     : { items: cachedTimeline.items, cursor: -1, transient: 0 })
@@ -3037,7 +3387,7 @@ const openSessionFlow = async (id: string): Promise<void> => {
    */
   const liveRunning = liveRunningOf(id)
   // 「缓存直出」只在**确实用磁盘缓存画的**那一屏才算（内存里那份不算缓存）
-  const fromCache = remembered === null && cachedTimeline !== null
+  const fromCache = remembered === undefined && cachedTimeline !== null
   useRemoteStore.setState({
     activeSessionId: id,
     items: painted.items,
@@ -3047,7 +3397,7 @@ const openSessionFlow = async (id: string): Promise<void> => {
     cacheStatus: {
       ...useRemoteStore.getState().cacheStatus,
       timelineFromCache: fromCache,
-      timelineLoading: remembered === null && cachedTimeline === null,
+      timelineLoading: remembered === undefined && cachedTimeline === null,
       timelineSettled: false,
       timelineFailed: false,
     },
@@ -3081,6 +3431,10 @@ const openSessionFlow = async (id: string): Promise<void> => {
           ready.reject(new RemoteApiError('INVALID_MESSAGE', '远端没有先给 session/follow 快照（协议要求首帧必须是 snapshot）'))
           return
         }
+        if (snapshot.sessionId !== undefined && snapshot.sessionId !== id) {
+          ready.reject(new RemoteApiError('INVALID_MESSAGE', '收到其他会话的快照，请重试加载'))
+          return
+        }
         // R8：快照是权威窗口，但**不丢**本地已经画出来的东西 —— 同 id 服务端覆盖、
         // 乐观行按 requestRpcId 对齐、更早的历史页留在头部（`cache.mergeTimelineItems`）。
         /*
@@ -3092,14 +3446,25 @@ const openSessionFlow = async (id: string): Promise<void> => {
         const followedPreset = permissionPresetOfFollowItem(value)
         if (followedPreset !== undefined) noteSessionPermissionPreset(id, followedPreset)
         const fresh = reduceSnapshot(snapshot, id)
-        const next = { ...fresh, items: mergeTimelineItems(current.items, fresh.items) }
-        session.hasMore = snapshot.hasMore
+        const retainEarlier = snapshot.hasMore && remembered !== undefined && remembered.cursor >= 0 &&
+          remembered.cursor <= fresh.cursor
+        const merged = mergeTimelineItems(current.items, fresh.items, retainEarlier)
+        const previousAnchor = retainEarlier ? remembered.historyBeforeSeq : undefined
+        const keepAnchor = previousAnchor !== undefined &&
+          (fresh.historyBeforeSeq === undefined || previousAnchor <= fresh.historyBeforeSeq)
+        const next = {
+          ...fresh,
+          items: reconcileQueuedPrompts(merged, id, snapshot.projections),
+          ...(keepAnchor ? { historyBeforeSeq: previousAnchor, hasMoreHistory: remembered?.hasMoreHistory ?? snapshot.hasMore } : {}),
+        }
+        session.hasMore = next.hasMoreHistory === true
         applied = true
         // 只往 `id` 这个会话的格子里写（+ 它是活动会话时才推给屏幕）
         commitTranscript(session, id, next)
-        setPaging(snapshot.hasMore, false)
+        setPaging(session.hasMore, false)
         patchTimelineStatus(id, { timelineFromCache: false, timelineLoading: false, timelineSettled: true })
-        scheduleTimelinePersist(session, id)
+        if (next.items.length === 0) persistTimelineNow(session, id, true)
+        else scheduleTimelinePersist(session, id)
         ready.resolve()
         return
       }
@@ -3189,8 +3554,8 @@ const loadOlderFlow = async (): Promise<void> => {
    * 注意这里**不能** `newFlowTicket()` —— 那是「开新流」，会把当前 follow 的工牌顶掉。
    */
   const ticket = currentFlowTicket(id)
-  const beforeSeq = oldestSeqOfItems(session.transcript.items)
-  // 没有任何带 seq 的行 = 没锚点，只能承认没有更早的（比乱发一个 beforeSeq 安全）。
+  const beforeSeq = session.transcript.historyBeforeSeq
+  // 空快照没有可用于请求更早事件的锚点。
   if (beforeSeq === undefined) {
     session.hasMore = false
     setPaging(false, false)
@@ -3208,62 +3573,105 @@ const loadOlderFlow = async (): Promise<void> => {
      * `_checkHistoryOwner(epoch)`（`session_api.dart:1325`）：本次翻页领的 epoch
      * 必须还是当前那条 follow 的，否则这次结果整份作废。
      */
-    if (!historyOwnerIsCurrent(ticket, epochCursor(session))) {
+    if (active !== session || !historyOwnerIsCurrent(ticket, epochCursor(session))) {
       noteSessionDrop('staleAction')
       return
     }
-    session.hasMore = page.hasMore
-    const older = foldHistory(historyEntriesFromRecords(page.records), id, false)
-    if (older.length > 0) {
-      // 归到 `id` 自己的格子（`ChatTranscript.prependHistory` 的同义操作）
-      commitTranscript(session, id, { ...session.transcript, items: prependHistory(older, session.transcript.items) })
-      // R8：翻页追加到头部（`prependHistory` 自己去重），顺手把更大的窗口写进缓存
-      scheduleTimelinePersist(session, id)
-    }
+    const entries = historyEntriesFromRecords(page.records).filter(({ event }) => event.seq < beforeSeq)
+    const nextAnchor = oldestSeq(entries)
+    session.hasMore = page.hasMore && nextAnchor !== undefined
+    const older = foldHistory(entries, id, false)
+    const transcript = session.transcript
+    commitTranscript(session, id, {
+      ...transcript,
+      historyBeforeSeq: nextAnchor ?? beforeSeq,
+      hasMoreHistory: session.hasMore,
+      items: older.length > 0 ? prependHistory(older, transcript.items) : transcript.items,
+    })
+    if (older.length > 0) scheduleTimelinePersist(session, id)
   } catch (error) {
-    fail(error)
+    if (active === session && historyOwnerIsCurrent(ticket, epochCursor(session))) fail(error)
   } finally {
-    // 切走之后这个游标属于上一条会话，别去动它
-    if (belongsToSession(session.sessionId, id)) setPaging(session.hasMore, false)
+    if (active === session && historyOwnerIsCurrent(ticket, epochCursor(session))) {
+      setPaging(session.hasMore, false)
+    }
   }
+}
+
+const reconcileQueuedPrompts = (items: ChatItem[], sessionId: string, projections?: unknown): ChatItem[] => {
+  const pending = items.filter((item) => item.kind === 'message' && item.pendingPrompt !== undefined)
+  if (pending.length === 0) return items
+  const queue = queuedPromptIds(sessionId, projections)
+  let next = items
+  for (const item of pending) {
+    if (item.kind === 'message' && item.sessionId === sessionId &&
+        item.requestRpcId !== undefined && queue.has(item.requestRpcId)) {
+      next = clearSendState(next, item.requestRpcId)
+    }
+  }
+  return next
+}
+
+const deliveryOutcomeUnknown = (error: unknown): boolean => {
+  const code = errorCodeOf(error)
+  if (code === LinkErrorCodes.RPC_TIMEOUT) return true
+  if (isRemoteApiError(error) || (isRemoteLinkError(error) && error.fromHost)) return false
+  return code !== LinkErrorCodes.RATE_LIMITED && code !== LinkErrorCodes.FRAME_TOO_LARGE
 }
 
 const sendFlow = async (
   text: string,
   attachments: readonly RemotePromptAttachment[] = [],
   mode?: RemotePromptMode,
-): Promise<void> => {
+  owner?: { target: RemoteCallTarget; sessionId: string },
+  retryId?: string,
+): Promise<boolean> => {
   let session: ActiveSession
   try {
     session = requireSession()
   } catch (error) {
     fail(error)
-    return
+    return false
   }
   const id = session.sessionId
+  if (owner !== undefined && (owner.target !== session.link || owner.sessionId !== id ||
+    useRemoteStore.getState().activeSessionId !== id)) {
+    return false
+  }
   if (id === null) {
     fail(new RemoteApiError('SESSION_NOT_OPEN', '先选一个会话再发消息'))
-    return
+    return false
   }
-  if (!hasVisibleMessageText(text) && attachments.length === 0) {
+  const retryItem = retryId === undefined ? undefined : session.transcript.items.find((item) =>
+    item.kind === 'message' && item.sessionId === id && item.id === `local:${retryId}` &&
+    item.sendState === 'unconfirmed' && item.pendingPrompt !== undefined,
+  )
+  if (retryId !== undefined && (retryItem?.kind !== 'message' || retryItem.pendingPrompt === undefined)) return false
+  const promptText = retryItem?.kind === 'message' ? retryItem.text : text
+  const prompt = retryItem?.kind === 'message' && retryItem.pendingPrompt !== undefined
+    ? retryItem.pendingPrompt : { attachments, mode: mode ?? 'queue' as const }
+  if (!hasVisibleMessageText(promptText) && prompt.attachments.length === 0) {
     fail(new RemoteApiError('INVALID_ARGUMENT', '消息不能为空'))
-    return
+    return false
   }
 
   // 乐观上屏：requestId 同时是 `session/prompt` 的幂等键与 Host 回显的 `source.rpcId`，
   // `addUserMessage()` 靠它把这条本地行替换成权威行。
-  const requestId = newRequestId()
+  const requestId = retryId ?? newRequestId()
   // [S4] 乐观行落进 `id` 自己的格子（Dart：`_pending` 是 ChatController 的字段，天然属于该会话）
   commitTranscript(session, id, {
     ...session.transcript,
-    items: addOptimisticUserMessage(session.transcript.items, id, text, requestId),
+    items: retryId === undefined
+      ? addOptimisticUserMessage(session.transcript.items, id, promptText, requestId, prompt)
+      : markSendState(session.transcript.items, requestId, 'queued'),
   })
   useRemoteStore.setState({ streaming: true, error: null })
+  persistTimelineNow(session, id)
 
   try {
-    await sendPrompt(session.link, id, text, attachments, {
+    await sendPrompt(session.link, id, promptText, prompt.attachments, {
       requestId,
-      ...(mode === undefined ? {} : { mode }),
+      mode: prompt.mode,
     })
     /*
      * [S4] Host 已受理，但**此刻的活动会话可能已经不是 id 了**（用户发完就切走）。
@@ -3273,30 +3681,37 @@ const sendFlow = async (
      * 为什么这里比 sessionId 而不是比代际：A→B→A 切回来时，这条乐观行确实还是 A 的，
      * 落回 A 是对的（代际只用来挡「开流」这种抢共享槽位的动作）。
      */
-    if (!belongsToSession(session.sessionId, id)) {
-      noteSessionDrop('staleAction')
-      return
-    }
     // Host 已受理：清掉「发送中」挂起标记。steer/插话不一定回显这条消息，
     // 不清的话它会永远停在发送中（真机反馈的 bug）。
-    commitTranscript(session, id, {
-      ...session.transcript,
-      items: clearSendState(session.transcript.items, requestId),
-    })
-  } catch (error) {
-    // 失败**不删行**：把原因留在行上（契约要求「可读错误」给到 UI），同时写进 state.error。
-    const info = describeRemoteError(error)
-    if (belongsToSession(session.sessionId, id)) {
-      commitTranscript(session, id, {
-        ...session.transcript,
-        items: markSendState(session.transcript.items, requestId, 'failed', info.text),
-      })
-      useRemoteStore.setState({ streaming: false })
-    } else {
-      // 行在 id 的 transcript 里（切走时已随缓存/重新打开保留），别往别人的上面盖
-      noteSessionDrop('staleAction')
+    const transcript = session.transcripts.get(id)
+    if (active === session && transcript !== undefined) {
+      commitTranscript(session, id, { ...transcript, items: clearSendState(transcript.items, requestId) })
+      persistTimelineNow(session, id)
     }
-    fail(error)
+    return true
+  } catch (error) {
+    const unknown = retryId !== undefined || deliveryOutcomeUnknown(error)
+    const info = describeRemoteError(error)
+    const transcript = session.transcripts.get(id)
+    if (active === session && transcript !== undefined) {
+      const accepted = transcript.items.some((item) => item.kind === 'message' && item.sessionId === id &&
+        item.requestRpcId === requestId && (item.id !== `local:${requestId}` || item.sendState === undefined))
+      if (accepted) return true
+      const queued = queuedPromptIds(id).has(requestId)
+      commitTranscript(session, id, {
+        ...transcript,
+        items: queued ? clearSendState(transcript.items, requestId)
+          : markSendState(transcript.items, requestId, unknown ? 'unconfirmed' : 'failed', info.text),
+      })
+      persistTimelineNow(session, id)
+      if (belongsToSession(session.sessionId, id)) {
+        useRemoteStore.setState({ streaming: liveRunningOf(id) })
+        if (!unknown && !queued) fail(error)
+      }
+      if (queued) return true
+    }
+    // The caller consumes the composer. Retrying from the bubble keeps the original request ID.
+    return unknown
   }
 }
 
@@ -3308,13 +3723,14 @@ const cancelFlow = async (): Promise<void> => {
     fail(error)
     return
   }
-  if (session.sessionId === null) return
+  const id = session.sessionId
+  if (id === null) return
   try {
-    await cancelSession(session.link, session.sessionId)
+    await cancelSession(session.link, id)
     // `accepted:true` 只代表已受理，真正的终态是 `turn/end.reason.kind = aborted`；
     // 所以这里**不**急着把 streaming 关掉（那会让人以为已经停了）。
   } catch (error) {
-    fail(error)
+    if (active === session && belongsToSession(session.sessionId, id)) fail(error)
   }
 }
 
@@ -3341,6 +3757,7 @@ const respondApprovalFlow = async (eventId: string, decision: ApprovalDecision):
   }
   try {
     await respondApprovalApi(session.link, { clientId: session.eventClientId, eventId, decision })
+    if (active !== session) return
     if (!belongsToSession(session.sessionId, owner)) {
       noteSessionDrop('staleAction')
       clearPendingInteractions({ eventId })
@@ -3358,7 +3775,8 @@ const respondApprovalFlow = async (eventId: string, decision: ApprovalDecision):
     // [R9 红点] 本机应答完 = 这条不再「等你点」了
     clearPendingInteractions({ eventId })
   } catch (error) {
-    fail(error)
+    if (active !== session) return
+    if (belongsToSession(session.sessionId, owner)) fail(error)
     const code = typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : ''
     // 句柄已失效：把卡片标成 unavailable（继续显示 pending 只会让人反复点）。
     if (code === 'PERMISSION_NOT_PENDING' || code === 'AGENT_BUSY') {
@@ -3396,6 +3814,7 @@ export const useRemoteStore = create<RemoteState>(() => ({
   connect: async (serverUrl: string, email: string, password: string): Promise<void> => {
     await connectFlow(serverUrl, email, password)
   },
+  connectSsh: connectSshFlow,
 
   disconnect: (): void => {
     teardownConnection()
@@ -3425,6 +3844,11 @@ export const useRemoteStore = create<RemoteState>(() => ({
   },
 
   reconnectNow: async (): Promise<void> => {
+    if (sshReconnectInput) {
+      const id = active?.sessionId
+      await connectSshFlow(sshReconnectInput, id ?? sshRestoreId)
+      return
+    }
     await reconnectNowFlow()
   },
 
@@ -3483,6 +3907,10 @@ export const useRemoteStore = create<RemoteState>(() => ({
   sendWithMode: async (text: string, mode: RemotePromptMode): Promise<void> => {
     await sendFlow(text, [], mode)
   },
+  sendToSession: (target, sessionId, text, attachments, mode) =>
+    sendFlow(text, attachments, mode, { target, sessionId }),
+  retryPrompt: (target, sessionId, requestId) =>
+    sendFlow('', [], undefined, { target, sessionId }, requestId),
 
   cancel: async (): Promise<void> => {
     await cancelFlow()
@@ -3536,7 +3964,6 @@ export const useRemoteStore = create<RemoteState>(() => ({
  * ──────────────────────────────────────────────────────────────────────── */
 
 /** 带附件发一条消息（P1 的收据 / 图片走这里；契约里的 `send()` 只发文本）。 */
-export const sendRemoteMessage = sendFlow
 
 /**
  * 诊断用：会话路由的丢弃计数（S4）。
@@ -4465,7 +4892,7 @@ export const hydrateCachedTimeline = (sessionId: string): void => {
   if (sessionId.length === 0) return
   const state = useRemoteStore.getState()
   if (state.activeSessionId !== null || state.items.length > 0) return
-  const bucket = cacheBucketNow()
+  const bucket = active ? timelineBucketFor(active) : loadCompactHistory() ? null : cacheBucketNow()
   if (bucket === null) return
   const cached = readTimelineCache({ ...bucket, sessionId, now: Date.now() })
   if (cached === null || cached.items.length === 0) return

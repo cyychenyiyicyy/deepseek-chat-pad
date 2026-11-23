@@ -26,7 +26,7 @@
   justify-content: center;
   gap: 5px;
   box-sizing: border-box;
-  height: 28px;
+  min-height: 40px;
   margin: 0;
   padding: 0 10px;
   border: 1px solid var(--dsw-alias-button-ghost-active-border);
@@ -98,11 +98,11 @@
 .searchInput {
   flex: 1;
   min-width: 0;
-  height: 32px;
+  height: 38px;
   border: none;
   background: none;
   font: inherit;
-  font-size: 13px;
+  font-size: 16px;
   color: var(--dsw-alias-label-primary);
   outline: none;
 }
@@ -222,6 +222,13 @@
     0 12px 32px rgba(0, 0, 0, 0.12);
 }
 
+.menuGroupTitle {
+  padding: 8px 10px 3px;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .menuOption {
   padding: 8px 10px;
   border-radius: 8px;
@@ -307,29 +314,24 @@
 .filterRow {
   display: flex;
   flex-shrink: 0;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
-  margin: 0 0 6px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.filterRow::-webkit-scrollbar {
-  display: none;
+  gap: 4px;
+  margin: 0 0 8px;
 }
 
 /* ── [D] 状态筛选（drawer_filter_bar.dart:15-70）：胶囊本体复用 .filterChip ── */
 .filterBar {
   display: flex;
-  flex-shrink: 0;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px;
   margin: 0;
 }
 
 /* 状态胶囊是纯文字（工作区那粒带 icon/chevron）：左右 padding 对称，间距交给容器 */
 .statusChip {
   margin: 0;
-  padding: 0 12px;
+  padding: 0 8px;
 }
 
 /* ── [D] 一行（session_tile.dart:44-155） ──────────────────────────────────

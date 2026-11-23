@@ -5,7 +5,7 @@
   width: 100%;
   height: 100%;
   /* 顶部不留内边距：安全区由 .top 自己的 --ds-top-offset 让，否则左栏比右栏多下移一截 */
-  padding: 0 12px 0;
+  padding: 0 12px;
   border-right: 1px solid var(--dsw-alias-border-l1);
   background-color: var(--dsw-specific-sidebar-fill);
 }
@@ -22,7 +22,7 @@
    * （旧写法在 >=768 把 height 写死 52px，安全区吃掉的其实是行高，logo 才会忽高忽低。）
    */
   height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   padding: var(--ds-top-offset) 0 0 4px;
   flex-shrink: 0;
 }
@@ -31,7 +31,7 @@
   min-width: 0;
   padding-left: 4px;
   overflow: hidden;
-  font-size: 20px;
+  font-size: clamp(17px, 1.65vw, 20px);
   line-height: 22px;
   font-weight: 600;
   white-space: nowrap;
@@ -77,11 +77,11 @@
 
 /* 远程会话列表：跟本地列表占同一个位置，只是数据源不同 */
 .remoteList {
-  margin-top: 12px;
+  margin-top: 4px;
 }
 
 .mobile .remoteList {
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
 .newChat {
@@ -176,8 +176,9 @@
 .bottom {
   display: flex;
   flex-shrink: 0;
-  gap: 2px;
-  padding: 8px 0;
+  gap: 4px;
+  padding: 8px 0 max(8px, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--dsw-alias-border-l1);
 }
 
 .settings {
@@ -257,7 +258,7 @@
   top: 0;
   bottom: 0;
   left: 0;
-  width: min(320px, 82vw);
+  width: min(344px, 92vw);
   transform: translateX(-100%);
   will-change: transform;
   transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
@@ -314,11 +315,6 @@
 
   .top {
     margin-bottom: 8px;
-  }
-
-  .appName {
-    font-size: 21px;
-    line-height: 24px;
   }
 
   .search {

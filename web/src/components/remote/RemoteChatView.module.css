@@ -20,17 +20,21 @@
    * （--ds-topbar-h + --ds-top-offset），左右两栏顶栏才会齐平。
    */
   height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
-  padding: var(--ds-top-offset) 16px 0;
+  padding: var(--ds-top-offset) var(--chat-gutter) 0;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
   background: var(--dsw-alias-bg-base);
 }
 
-.title {
+.heading {
   flex: 1;
   min-width: 0;
+}
+
+.title {
   overflow: hidden;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 22px;
-  font-weight: 500;
+  font-weight: 600;
   white-space: nowrap;
   text-overflow: ellipsis;
   color: var(--dsw-alias-label-primary);
@@ -42,11 +46,12 @@
  */
 .subagentBack {
   display: inline-flex;
-  flex-shrink: 0;
+  flex-shrink: 1;
   align-items: center;
   gap: 2px;
-  max-width: 220px;
-  height: 28px;
+  min-width: 38px;
+  max-width: min(25%, 180px);
+  min-height: 40px;
   margin-left: -6px;
   padding: 0 8px;
   border: none;
@@ -76,30 +81,24 @@
   text-overflow: ellipsis;
 }
 
-/* transport 徽标：小胶囊，一眼看出走的是中继还是局域网 */
-.badge {
-  flex-shrink: 0;
-  box-sizing: border-box;
-  padding: 2px 8px;
-  border-radius: 100px;
-  font-size: 11px;
+.connectionStatus {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
   line-height: 16px;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  white-space: nowrap;
-  user-select: none;
-}
-
-.badgeLive {
-  border: 1px solid var(--dsw-alias-button-ghost-active-border);
-  background-color: var(--dsw-alias-button-ghost-active-fill);
-  color: var(--dsw-alias-brand-text);
-}
-
-.badgeIdle {
-  border: 1px solid var(--dsw-alias-border-l2);
-  background-color: transparent;
   color: var(--dsw-alias-label-tertiary);
+}
+
+.connectionDot {
+  flex: 0 0 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.connectionLive {
+  background: var(--dsw-static-green-500);
 }
 
 /* 未连接 / 未选会话时的整块空态 */
@@ -109,14 +108,17 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 24px;
+  gap: 14px;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--chat-gutter);
   text-align: center;
 }
 
 .centerTitle {
-  font-size: 15px;
-  line-height: 24px;
+  font-size: clamp(17px, 2.2vw, 21px);
+  line-height: 1.35;
+  font-weight: 600;
   color: var(--dsw-alias-label-primary);
 }
 
@@ -146,10 +148,9 @@
 
 .column {
   box-sizing: border-box;
-  width: calc(var(--message-list-max-width) - 2 * var(--message-list-padding-horizontal));
-  max-width: calc(100% - 40px);
+  width: min(var(--chat-width), calc(100% - 2 * var(--chat-gutter)));
   margin: 0 auto;
-  padding: 8px 0 24px;
+  padding: 20px 0 24px;
 }
 
 .placeholder {
@@ -208,6 +209,34 @@
   padding: 10px 14px;
   border-radius: 18px 18px 4px 18px;
   background-color: var(--dsw-alias-interactive-bg-hover);
+}
+
+.messageActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.reuseMessage {
+  min-height: 36px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+
+  &:enabled:hover {
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
+
+  &:disabled {
+    cursor: default;
+    opacity: 0.55;
+  }
 }
 
 .plainText {
@@ -305,26 +334,24 @@
 /* ---------- 底部：审批卡片 + 输入框 ---------- */
 
 .footer {
-  position: sticky;
-  bottom: 0;
   z-index: 10;
   display: flex;
   flex-shrink: 0;
   flex-direction: column;
   gap: 8px;
   box-sizing: border-box;
-  width: calc(var(--message-list-max-width) - 2 * var(--message-list-padding-horizontal));
-  max-width: calc(100% - 32px);
+  width: min(var(--chat-width), calc(100% - 2 * var(--chat-gutter)));
   margin: 0 auto;
-  padding-bottom: 10px;
+  padding-bottom: max(12px, env(safe-area-inset-bottom));
   background: var(--dsw-alias-bg-base);
+  min-height: 0;
 }
 
 .approvals {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 40vh;
+  max-height: min(40dvh, calc(var(--app-viewport-height, 100dvh) * 0.26));
   overflow-y: auto;
 }
 
@@ -402,7 +429,7 @@
   box-sizing: border-box;
   width: 100%;
   min-height: 56px;
-  max-height: 168px;
+  max-height: max(56px, min(168px, calc(var(--app-viewport-height, 100dvh) * 0.26)));
   margin: 0;
   padding: 10px 16px 0;
   border: none;
@@ -411,7 +438,7 @@
   background: transparent;
   color: var(--dsw-alias-label-primary);
   font: inherit;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 24px;
   caret-color: var(--dsw-alias-brand-text);
 
@@ -469,28 +496,12 @@
 
 @media not all and (min-width: 768px) {
   .header {
-    /* 高度与平板同值（--ds-topbar-h），手机只是左右收窄一点 */
-    gap: 8px;
-    padding: var(--ds-top-offset) 12px 0;
-  }
-
-  .title {
-    font-size: 16px;
-  }
-
-  .footer {
-    position: relative;
-    bottom: auto;
-    width: 100%;
-    max-width: none;
-    margin: 0;
-    padding: 0 12px calc(10px + env(safe-area-inset-bottom));
+    gap: 4px;
+    padding-inline: 6px;
   }
 
   .column {
-    width: 100%;
-    max-width: none;
-    padding: 4px 12px 16px;
+    padding-block: 14px 16px;
   }
 
   .bubbleUser {
@@ -500,6 +511,16 @@
   .sendButton {
     width: 40px;
     height: 40px;
+  }
+}
+
+@media (max-width: 440px) {
+  .subagentBack {
+    justify-content: center;
+  }
+
+  .subagentBackText {
+    display: none;
   }
 }
 

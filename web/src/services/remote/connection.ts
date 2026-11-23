@@ -21,12 +21,18 @@ import {
   accountMe,
   getDevice,
   getPresence,
+  listDeviceMemberships,
   listDevices,
   login as loginApi,
   needsReauth,
   normalizeServerUrl,
   registerDevice as registerDeviceApi,
+  renameAccountHost,
+  revokeAccountHost,
+  revokeClientDevice,
+  revokeDeviceMembership,
   withRefreshRetry,
+  type DeviceMembership,
   type ServerApiDeps,
   type ServerDeviceRecord,
 } from './serverApi.js'
@@ -109,8 +115,10 @@ export type RemoteStatus =
   | { phase: 'error'; code: string; message: string }
 
 export interface RemoteConnectResult {
+  diagnostics: { connectMs: number; secureChannelMs: number; capabilityProbeMs: number; hostRequestMs: number; measuredAt: number }
   capabilities: string[]
   transport: string
+  compactHistory?: boolean
 }
 
 /** 附加选项：契约里 `connect` 只有 4 个参数，这里多一个可选参数（对契约签名保持可赋值） */
@@ -122,6 +130,8 @@ export interface ConnectOptions {
   /** 能力探测（describe）的超时，缺省 DESCRIBE_TIMEOUT_MS */
   describeTimeoutMs?: number
   signal?: AbortSignal
+  compactHistory?: boolean
+  requireCompactHistory?: boolean
 }
 
 export interface RemoteClient {
@@ -137,6 +147,13 @@ export interface RemoteClient {
   /** 契约里 name 必填；这里放宽为可选（缺省 "Chat Pad"，仍满足契约调用方式） */
   registerDevice(server: RemoteServer, account: RemoteAccount, name?: string): Promise<RemoteAccount>
   listHosts(server: RemoteServer, account: RemoteAccount): Promise<RemoteHost[]>
+  listMemberships(server: RemoteServer, account: RemoteAccount, current: () => boolean): Promise<DeviceMembership[]>
+  manageDevice(
+    server: RemoteServer,
+    account: RemoteAccount,
+    change: DeviceChange,
+    current: () => boolean,
+  ): Promise<string | undefined>
   connect(
     server: RemoteServer,
     account: RemoteAccount,
@@ -152,12 +169,19 @@ export interface RemoteClient {
   logout(server: RemoteServer, account: RemoteAccount): Promise<void>
 }
 
+export type DeviceChange =
+  | { kind: 'rename'; deviceId: string; name: string }
+  | { kind: 'revokeHost'; deviceId: string }
+  | { kind: 'unpair'; deviceId: string }
+  | { kind: 'revokeSelf' }
+
 /* ── 常量 ─────────────────────────────────────────────────────────────── */
 
 /** 控制面授权 + 传输选择 + Noise 的总等待（协议 §10.3：各阶段独立计时，这里给一个宽上限） */
 const HANDSHAKE_TIMEOUT_MS = 30_000
 /** `harness.transport.describe` 的等待；Host 侧同类探测预算是 5s，客户端给足余量 */
 const DESCRIBE_TIMEOUT_MS = 10_000
+const COMPACT_HISTORY_CAPABILITY = 'remote.history.compact.v1'
 /** 观察 link.state 的间隔：把 connecting → handshaking 的阶段切换报给 UI */
 const LINK_POLL_MS = 120
 /** Host presence / identityKey 的并发上限（协议 §9 允许 8，这里取 4 更保守） */
@@ -463,6 +487,38 @@ export class RemoteClientImpl implements RemoteClient {
     )
   }
 
+  async manageDevice(server: RemoteServer, account: RemoteAccount, change: DeviceChange, current: () => boolean) {
+    return this.withCurrentDeviceAccess(server, account, current, async (accessToken) => {
+      if (change.kind === 'rename') return renameAccountHost(server, accessToken, change.deviceId, change.name, this.deps)
+      if (change.kind === 'revokeHost') await revokeAccountHost(server, accessToken, change.deviceId, this.deps)
+      if (change.kind === 'unpair') await revokeDeviceMembership(server, accessToken, change.deviceId, this.deps)
+      if (change.kind === 'revokeSelf') await revokeClientDevice(server, accessToken, this.deps)
+      return undefined
+    })
+  }
+
+  async listMemberships(server: RemoteServer, account: RemoteAccount, current: () => boolean) {
+    return this.withCurrentDeviceAccess(server, account, current,
+      (accessToken) => listDeviceMemberships(server, accessToken, this.deps))
+  }
+
+  private withCurrentDeviceAccess<T>(server: RemoteServer, account: RemoteAccount, current: () => boolean,
+    run: (accessToken: string) => Promise<T>) {
+    this.assertDeviceAccount(account, normalizeServerUrl(server.url))
+    return withRefreshRetry({
+      server,
+      auth: { deviceId: account.deviceId, accessToken: account.accessToken, refreshToken: account.refreshToken },
+      deps: this.deps,
+      onRefresh: (pair) => {
+        if (current()) this.applyTokens(account, pair)
+      },
+      run: (accessToken) => {
+        if (!current()) throw new RemoteApiError('RPC_ABORTED', 'The originating account connection closed.')
+        return run(accessToken)
+      },
+    })
+  }
+
   private async describeHost(
     serverUrl: string,
     account: RemoteAccount,
@@ -522,6 +578,7 @@ export class RemoteClientImpl implements RemoteClient {
     if (options.signal?.aborted === true) throw new RemoteApiError('RPC_ABORTED', '连接已被取消')
 
     this.setStatus({ phase: 'connecting' })
+    const start = performance.now()
     const stopWatch = this.watchLink(link)
     try {
       await this.withDeadline(
@@ -532,10 +589,39 @@ export class RemoteClientImpl implements RemoteClient {
       )
       stopWatch()
       this.setStatus({ phase: 'handshaking' })
+      const describeStarted = performance.now()
       const capabilities = await this.describe(link, options)
+      const supportsCompactHistory = capabilities.includes(COMPACT_HISTORY_CAPABILITY)
+      const compactHistory = options.compactHistory === true && supportsCompactHistory
+      if (options.requireCompactHistory && !supportsCompactHistory) {
+        throw new RemoteApiError('HISTORY_MODE_CHANGED', 'The host no longer supports compact history. Start a new connection.')
+      }
+      let hostRequestMs = 0
+      if (supportsCompactHistory) {
+        const hostRequestStarted = performance.now()
+        const result = await link.rpc('remote.history.configure', { compact: compactHistory }, {
+          timeoutMs: options.describeTimeoutMs ?? DESCRIBE_TIMEOUT_MS,
+        })
+        hostRequestMs = Math.round(performance.now() - hostRequestStarted)
+        if (!isRecord(result) || Object.keys(result).length !== 1 || result.compact !== compactHistory) {
+          throw new RemoteApiError('INVALID_MESSAGE', 'The host did not confirm the requested history mode.')
+        }
+      }
+      const readyAt = performance.now()
       const transport = resolveTransport(link, options)
       this.setStatus({ phase: 'ready', capabilities, transport })
-      return { capabilities: [...capabilities], transport }
+      return {
+        capabilities: [...capabilities],
+        transport,
+        compactHistory,
+        diagnostics: {
+          connectMs: Math.round(readyAt - start),
+          secureChannelMs: Math.round(describeStarted - start),
+          capabilityProbeMs: Math.round(readyAt - describeStarted),
+          hostRequestMs,
+          measuredAt: Date.now(),
+        },
+      }
     } catch (error) {
       stopWatch()
       // 半开的链路必须断掉：认证完成前禁止发业务消息，也不能留着占用 Server 的 connection

@@ -1,24 +1,14 @@
 .frame {
-  --sider-w: 261px;
+  --sider-w: clamp(236px, 25vw, 312px);
+  --chat-gutter: clamp(12px, 2.7vw, 32px);
+  --chat-width: 760px;
 
-  position: absolute;
-  inset: 0;
+  position: fixed;
+  inset: var(--app-viewport-top, 0px) 0 0;
+  height: var(--app-viewport-height, 100dvh);
   display: flex;
   overflow: hidden;
   background-color: var(--dsw-alias-bg-base);
-}
-
-/* 平板及以上：侧栏更宽，字与触控目标整体放大，向官方平板端看齐 */
-@media (min-width: 768px) {
-  .frame {
-    --sider-w: clamp(280px, 27vw, 396px);
-  }
-}
-
-@supports (height: 100dvh) {
-  .frame {
-    height: 100dvh;
-  }
 }
 
 .siderSlot {
@@ -39,11 +29,13 @@
   width: var(--sider-w);
   height: 100%;
   will-change: transform;
-  transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+  transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s;
 }
 
 .siderSlotCollapsed .siderInner {
+  visibility: hidden;
   transform: translateX(-100%);
+  transition-delay: 0s, 0.3s;
 }
 
 .main {
@@ -58,6 +50,18 @@
   position: relative;
   flex: 1;
   min-height: 0;
+}
+
+.remoteWorkspace {
+  position: absolute;
+  inset: 0;
+  display: flex;
+}
+
+.remoteConversation {
+  position: relative;
+  flex: 1;
+  min-width: 0;
 }
 
 .saveError {
@@ -94,10 +98,7 @@
 
 @media not all and (min-width: 768px) {
   .frame {
-    position: fixed;
-    top: var(--app-viewport-top, 0px);
-    bottom: auto;
-    height: var(--app-viewport-height, 100dvh);
+    --chat-gutter: clamp(12px, 4vw, 24px);
   }
 }
 

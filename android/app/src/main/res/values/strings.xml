@@ -18,4 +18,5 @@
     <string name="error_server_start">本地服务器启动失败\n\n无法在 127.0.0.1 上分配可用端口，端口可能已被占用。\n\n%1$s\n\n点击屏幕重试</string>
     <string name="error_missing_assets">前端资源缺失\n\n没有找到 assets/www/index.html。\n请在构建前把 Web 产物复制到 android/app/src/main/assets/www/。\n\n点击屏幕重试</string>
     <string name="error_renderer_lost">渲染进程已退出，正在重新加载…</string>
+    <string name="remote_web_close">Close</string>
 </resources>

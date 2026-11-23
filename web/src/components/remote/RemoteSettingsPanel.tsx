@@ -1,13 +1,27 @@
 import clsx from 'clsx'
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslate, type TranslationKey } from '../../i18n/index.js'
 import { qrDataUrl } from '../../services/remote/qr.js'
-import { loadAccounts, loadServers, type LoginMethod } from '../../services/remote/storage.js'
+import { openDshWeb, supportsDshWeb } from '../../services/remote/dshWeb.js'
+import { DSH_WEB_CAPABILITY } from '../../vendor/dsh-remote/protocol/dsh-web.js'
+import { describeRemoteError, lastRemoteTarget, type RemoteCallTarget } from '../../services/remote/sessionsApi.js'
+import { loadAccounts, loadAdaptiveTransport, loadCompactHistory, loadServers, saveAdaptiveTransport, saveCompactHistory, type LoginMethod } from '../../services/remote/storage.js'
 import { probeAuthBridge, useRemoteStore, type AuthBridgeStatus } from '../../services/remote/store.js'
 import { Button } from '../base/Button.js'
+import { showToast } from '../base/toastState.js'
 import { openSettings } from '../settings/settingsDialogState.js'
 import { useRemoteAvailability } from './RemoteModeSwitch.js'
 import styles from './RemoteSettingsPanel.module.css'
+
+const SessionBackups = lazy(() => import('./SessionBackups.js'))
+const RemoteConversationShares = lazy(() => import('./RemoteConversationShares.js'))
+const HostPlugins = lazy(() => import('./HostPlugins.js'))
+const HostWorkspaces = lazy(() => import('./HostWorkspaces.js'))
+const RemoteDevices = lazy(() => import('./RemoteDevices.js'))
+const RemoteSchedules = lazy(() => import('./RemoteSchedules.js'))
+const RemoteHostSettings = lazy(() => import('./RemoteHostSettings.js'))
+const PairDevice = lazy(() => import('./PairDevice.js'))
+const SshHostDialog = lazy(() => import('./SshHostDialog.js'))
 
 /**
  * 设置里的「远程 DSH」一节：服务器地址 + 登录方式 → 连接 / 断开，下面是状态区与账号摘要。
@@ -75,10 +89,23 @@ const formatCountdown = (totalSeconds: number): string => {
 const loginMethodLabel = (method: LoginMethod | undefined): TranslationKey => {
   if (method === 'oauth') return 'remoteLoginMethodOauth'
   if (method === 'qr') return 'remoteLoginMethodQr'
+  if (method === 'pairing') return 'remotePairDevice'
   return 'remoteLoginMethodPassword'
 }
 
 export const RemoteSettingsPanel = () => {
+  const [showBackups, setShowBackups] = useState(false)
+  const [showShares, setShowShares] = useState(false)
+  const [showPairing, setShowPairing] = useState(false)
+  const [showSsh, setShowSsh] = useState(false)
+  const [sshAvailable, setSshAvailable] = useState(false)
+  const [hostDialog, setHostDialog] = useState<{
+    kind: 'plugins' | 'workspaces' | 'devices' | 'schedules' | 'configuration' | 'providers'
+    target: RemoteCallTarget
+  } | null>(null)
+  const [openingWeb, setOpeningWeb] = useState(false)
+  const [adaptiveTransport, setAdaptiveTransport] = useState(loadAdaptiveTransport)
+  const [compactHistory, setCompactHistory] = useState(loadCompactHistory)
   const t = useTranslate()
   const phase = useRemoteStore((state) => state.phase)
   const transport = useRemoteStore((state) => state.transport)
@@ -98,6 +125,14 @@ export const RemoteSettingsPanel = () => {
   /** 上次连上的会话（`null` = 没有可恢复的）：连接表单隐藏时也能显示「上次连的是谁」 */
   const lastSession = useRemoteStore((state) => state.lastSession)
   const { availability, retry } = useRemoteAvailability()
+  useEffect(() => {
+    let current = true
+    if (availability === 'ready') {
+      void import('../../services/remote/sshHost.js').then(({ supportsSshHost }) => supportsSshHost())
+        .then((available) => { if (current) setSshAvailable(available) }).catch(() => undefined)
+    }
+    return () => { current = false }
+  }, [availability])
   // 预填上次用过的服务器与邮箱（storage 里已有的那份），没有就用默认值
   const [server, setServer] = useState(() => loadServers()[0]?.url ?? DEFAULT_SERVER)
   const [email, setEmail] = useState(() => loadAccounts()[0]?.email ?? '')
@@ -117,6 +152,7 @@ export const RemoteSettingsPanel = () => {
 
   const busy = phase === 'authing' || phase === 'connecting' || phase === 'waiting-auth' || starting !== null
   const connected = phase === 'ready'
+  const currentTarget = connected ? lastRemoteTarget() : null
   const blocked = availability !== 'ready'
   const bridgeProbing = bridge === 'probing'
   const appOnly = bridge === 'missing' || bridge === 'outdated'
@@ -130,7 +166,7 @@ export const RemoteSettingsPanel = () => {
   /** 凭据过期：last-session 已清，账号邮箱还在，表单照常可填 */
   const sessionExpired = autoConnect.state === 'failed' && autoConnect.code === 'SESSION_EXPIRED'
   /** 有没有可恢复的「上次连接」（临时断开之后也还在，用来显示「重新连接」） */
-  const reconnectable = lastSession !== null && !connected && !busy && !blocked
+  const reconnectable = lastSession !== null && lastSession.transport !== 'ssh' && !connected && !busy && !blocked
 
   const selected = providers.find((item) => item.id === method) ?? null
   const providerName = (id: string): string =>
@@ -155,11 +191,11 @@ export const RemoteSettingsPanel = () => {
 
   /* ── 2. 桥可用时拉一次登录方式清单（清单来自服务器，不写死） ─────────── */
   useEffect(() => {
-    if (bridge !== 'ready') { return }
+    if (bridge !== 'ready' || connected) return
     fireAndForget(() =>
       useRemoteStore.getState().loadOAuthProviders(serverRef.current.trim() === '' ? DEFAULT_SERVER : serverRef.current.trim()),
     )
-  }, [bridge])
+  }, [bridge, connected])
 
   /* ── 3. 登录轮询：只在「有一个 pending 的登录会话」时跑，2s 一拍 ─────
    * 停止条件全由状态驱动，不需要额外的取消标志：
@@ -232,11 +268,11 @@ export const RemoteSettingsPanel = () => {
 
   /* ── 6. 登录成功后的账号摘要（数据层不把账号放进 state，读落盘的那一条） ── */
   const account = useMemo(() => {
-    if (phase !== 'ready') { return null }
+    if (phase !== 'ready' || transport === 'ssh') { return null }
     const url = server.trim() === '' ? DEFAULT_SERVER : server.trim()
     const items = loadAccounts()
     return items.find((item) => item.serverUrl === url) ?? items[0] ?? null
-  }, [phase, server])
+  }, [phase, server, transport])
 
   /* ── 动作 ───────────────────────────────────────────────────────────── */
 
@@ -553,12 +589,13 @@ export const RemoteSettingsPanel = () => {
       {connected ? (
         <div className={styles.accountCard}>
           <div className={styles.status}>
-            <StatusChip label={t('remoteAccount')} value={account?.email ?? lastSession?.email ?? '—'} />
+            <StatusChip label={t(transport === 'ssh' ? 'remoteSshUser' : 'remoteAccount')}
+              value={account?.email ?? lastSession?.email ?? '—'} />
             <StatusChip
               label={t('remoteHostLabel')}
               value={lastSession?.hostName ?? '—'}
             />
-            <StatusChip label={t('remoteLoginMethodLabel')} value={t(loginMethodLabel(account?.loginMethod))} />
+            {transport !== 'ssh' && <StatusChip label={t('remoteLoginMethodLabel')} value={t(loginMethodLabel(account?.loginMethod))} />}
           </div>
           <div className={styles.actions}>
             <Button
@@ -568,14 +605,15 @@ export const RemoteSettingsPanel = () => {
             >
               {t('remoteRefreshSessions')}
             </Button>
-            <Button variant="outlined" size="m" onClick={disconnect} title={t('remoteDisconnectHint')}>
+            <Button variant="outlined" size="m" onClick={disconnect}
+              title={transport === 'ssh' ? undefined : t('remoteDisconnectHint')}>
               {t('remoteDisconnect')}
             </Button>
-            <Button variant="outlined" size="m" onClick={signOut} title={t('remoteSignOutHint')}>
+            {transport !== 'ssh' && <Button variant="outlined" size="m" onClick={signOut} title={t('remoteSignOutHint')}>
               {t('remoteSignOut')}
-            </Button>
+            </Button>}
           </div>
-          <div className={styles.description}>{t('remoteDisconnectHint')}</div>
+          {transport !== 'ssh' && <div className={styles.description}>{t('remoteDisconnectHint')}</div>}
         </div>
       ) : null}
 
@@ -590,6 +628,77 @@ export const RemoteSettingsPanel = () => {
           <span>{error.message}</span>
         </div>
       ) : null}
+
+      {availability === 'ready' && transport !== 'ssh' && typeof RTCPeerConnection === 'function' && (
+        <Field label={t('remoteTransportPreference')} description={t('remoteTransportPreferenceHint')}>
+          <select className={styles.input} aria-label={t('remoteTransportPreference')} disabled={busy}
+            value={adaptiveTransport ? 'automatic' : 'relay'} onChange={(event) => {
+              const automatic = event.currentTarget.value === 'automatic'
+              if (saveAdaptiveTransport(automatic)) setAdaptiveTransport(automatic)
+            }}>
+            <option value="relay">{t('remoteTransportRelayFirst')}</option>
+            <option value="automatic">{t('remoteTransportAutomatic')}</option>
+          </select>
+        </Field>
+      )}
+      {availability === 'ready' && transport !== 'ssh' && (
+        <Field label={t('remoteCompactHistory')} description={t('remoteCompactHistoryHint')}>
+          <input type="checkbox" aria-label={t('remoteCompactHistory')} checked={compactHistory} disabled={busy} onChange={(event) => {
+            const enabled = event.currentTarget.checked
+            if (saveCompactHistory(enabled)) setCompactHistory(enabled)
+          }} />
+        </Field>
+      )}
+      {connected && <ConnectionDetails key={JSON.stringify([lastSession?.serverUrl, lastSession?.hostDeviceId])} />}
+      {availability === 'ready' && (
+        <div className={styles.actions}>
+          <Button variant="outlined" size="m" onClick={() => setShowBackups(true)}>{t('remoteSessionBackups')}</Button>
+          <Button variant="outlined" size="m" onClick={() => setShowShares(true)}>{t('remoteHostedManage')}</Button>
+          {sshAvailable && (
+            <Button variant="outlined" size="m" disabled={busy || restoring} onClick={() => setShowSsh(true)}>
+              {t(!connected && lastSession?.transport === 'ssh' ? 'remoteSshReconnect' : 'remoteSshHost')}
+            </Button>
+          )}
+          {!connected && (
+            <Button variant="outlined" size="m" disabled={busy || restoring} onClick={() => setShowPairing(true)}>
+              {t('remotePairDevice')}
+            </Button>
+          )}
+          {currentTarget && (
+            <>
+              <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'workspaces', target: currentTarget })}>{t('remoteManageWorkspaces')}</Button>
+              <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'plugins', target: currentTarget })}>{t('remoteHostPlugins')}</Button>
+              <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'configuration', target: currentTarget })}>{t('remoteHostConfiguration')}</Button>
+              <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'providers', target: currentTarget })}>{t('remoteHostModels')}</Button>
+              {transport !== 'ssh' && (
+                <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'devices', target: currentTarget })}>{t('remoteManageDevices')}</Button>
+              )}
+              <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'schedules', target: currentTarget })}>{t('remoteSchedules')}</Button>
+            </>
+          )}
+          {connected && capabilities.includes(DSH_WEB_CAPABILITY) && supportsDshWeb() && (
+            <Button variant="outlined" size="m" disabled={openingWeb} onClick={() => {
+              setOpeningWeb(true)
+              void openDshWeb().catch((error) => showToast(describeRemoteError(error).text)).finally(() => setOpeningWeb(false))
+            }}>{t('remoteOpenDshWeb')}</Button>
+          )}
+        </div>
+      )}
+      {showBackups && <Suspense fallback={null}><SessionBackups onClose={() => setShowBackups(false)} /></Suspense>}
+      {showShares && <Suspense fallback={null}><RemoteConversationShares onClose={() => setShowShares(false)} /></Suspense>}
+      {showPairing && <Suspense fallback={null}><PairDevice onClose={() => setShowPairing(false)} /></Suspense>}
+      {showSsh && <Suspense fallback={null}><SshHostDialog onClose={() => setShowSsh(false)} /></Suspense>}
+      {hostDialog && hostDialog.target === currentTarget && (
+        <Suspense fallback={null}>
+          {hostDialog.kind === 'workspaces' && <HostWorkspaces target={currentTarget} onClose={() => setHostDialog(null)} />}
+          {hostDialog.kind === 'plugins' && <HostPlugins target={currentTarget} onClose={() => setHostDialog(null)} />}
+          {hostDialog.kind === 'devices' && <RemoteDevices target={currentTarget} onClose={() => setHostDialog(null)} />}
+          {hostDialog.kind === 'schedules' && <RemoteSchedules target={currentTarget} onClose={() => setHostDialog(null)} />}
+          {(hostDialog.kind === 'configuration' || hostDialog.kind === 'providers') && (
+            <RemoteHostSettings key={hostDialog.kind} mode={hostDialog.kind} target={currentTarget} onClose={() => setHostDialog(null)} />
+          )}
+        </Suspense>
+      )}
 
       {/* ── 后台与权限：**已搬到通用设置**（K4）。这里只留一句小字 + 一个跳过去的入口：
        * 通知权限 / 电池优化 / 自启动 / 精确定时 / 悬浮窗属于整个 App 的后台存活能力，
@@ -607,6 +716,74 @@ export const RemoteSettingsPanel = () => {
         </>
       ) : null}
     </div>
+  )
+}
+
+const ConnectionDetails = () => {
+  const t = useTranslate()
+  const diagnostics = useRemoteStore((state) => state.connectionDiagnostics)
+  const transport = useRemoteStore((state) => state.transport)
+  const [measurement, setMeasurement] = useState<'idle' | 'measuring' | 'failed'>('idle')
+
+  const measure = async () => {
+    const target = lastRemoteTarget()
+    if (target === null || diagnostics === null) return
+    setMeasurement('measuring')
+    const start = performance.now()
+    try {
+      await target.rpc('harness.transport.describe', {}, { timeoutMs: 5_000 })
+      if (lastRemoteTarget() !== target) return
+      useRemoteStore.setState({
+        connectionDiagnostics: {
+          ...diagnostics,
+          hostRequestMs: Math.round(performance.now() - start),
+          measuredAt: Date.now(),
+        },
+      })
+      setMeasurement('idle')
+    } catch {
+      if (lastRemoteTarget() === target) setMeasurement('failed')
+    }
+  }
+
+  const time = (value: number | undefined) => value === undefined ? '—' : `${value} ms`
+  const exportDiagnostics = async () => {
+    if (!diagnostics) return
+    const mime = 'application/json'
+    const name = 'deepseek-chat-pad-connection.json'
+    const blob = new Blob([JSON.stringify({
+      schemaVersion: 1,
+      transport: transport === 'relay' || transport === 'lan' || transport === 'p2p' || transport === 'turn' ? transport : 'unknown',
+      connectMs: diagnostics.connectMs,
+      secureChannelMs: diagnostics.secureChannelMs,
+      capabilityProbeMs: diagnostics.capabilityProbeMs,
+      hostRequestMs: diagnostics.hostRequestMs,
+      measuredAt: new Date(diagnostics.measuredAt).toISOString(),
+    }, null, 2)], { type: mime })
+    const { saveGeneratedDownload } = await import('../../services/remote/download.js')
+    await saveGeneratedDownload(blob, name).catch(() => undefined)
+  }
+  return (
+    <details className={styles.connectionDetails}>
+      <summary>{t('remoteConnectionDetails')}</summary>
+      <div className={styles.status}>
+        <StatusChip label={t('remoteConnectDuration')} value={time(diagnostics?.connectMs)} />
+        <StatusChip label={t('remoteSecureChannelDuration')} value={time(diagnostics?.secureChannelMs)} />
+        <StatusChip label={t('remoteCapabilityProbeDuration')} value={time(diagnostics?.capabilityProbeMs)} />
+        <StatusChip label={t('remoteHostRequestDuration')} value={time(diagnostics?.hostRequestMs)} />
+        <StatusChip label={t('remoteMeasurementTime')} value={diagnostics ? new Date(diagnostics.measuredAt).toLocaleTimeString() : '—'} />
+      </div>
+      <div className={styles.actions}>
+        <Button variant="outlined" size="s" disabled={diagnostics === null || measurement === 'measuring'}
+          onClick={() => void measure()}>
+          {t(measurement === 'measuring' ? 'remoteMeasuring' : 'remoteMeasureConnection')}
+        </Button>
+        <Button variant="outlined" size="s" disabled={diagnostics === null} onClick={() => void exportDiagnostics()}>
+          {t('remoteExportDiagnostics')}
+        </Button>
+      </div>
+      {measurement === 'failed' && <div role="status" className={styles.description}>{t('remoteMeasureFailed')}</div>}
+    </details>
   )
 }
 
@@ -663,6 +840,7 @@ const transportLabel = (t: Translate, transport: string | null): string => {
   if (transport === 'lan') return t('remoteTransportLan')
   if (transport === 'p2p') return t('remoteTransportP2p')
   if (transport === 'turn') return t('remoteTransportTurn')
+  if (transport === 'ssh') return 'SSH'
   return t('remoteTransportUnknown')
 }
 

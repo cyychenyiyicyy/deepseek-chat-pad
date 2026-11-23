@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-21T05:00:34.635Z",
+  "generatedAt": "2026-11-23T15:20:16.386Z",
   "root": "C:\\Users\\Administrator\\Desktop\\harness workspace\\projects\\deepseek-tablet\\android",
   "summary": {
     "pass": 8,
@@ -10,7 +10,7 @@
     {
       "level": "PASS",
       "name": "java.structure",
-      "detail": "11 个 Java 文件括号/字面量全部配平"
+      "detail": "20 个 Java 文件括号/字面量全部配平"
     },
     {
       "level": "PASS",
@@ -20,12 +20,12 @@
     {
       "level": "PASS",
       "name": "res.references",
-      "detail": "8 个 XML 的资源引用全部有定义"
+      "detail": "9 个 XML 的资源引用全部有定义"
     },
     {
       "level": "PASS",
       "name": "xml.wellformed",
-      "detail": "8 个 XML 标签全部配平"
+      "detail": "9 个 XML 标签全部配平"
     },
     {
       "level": "PASS",
@@ -35,12 +35,12 @@
     {
       "level": "PASS",
       "name": "manifest.security",
-      "detail": "仅 INTERNET/ACCESS_NETWORK_STATE/REQUEST_INSTALL_PACKAGES，明文只放行回环，FileProvider 范围精确"
+      "detail": "网络、应用更新、保活、录音和 Android 9 下载权限符合预期，明文只放行回环，FileProvider 范围精确"
     },
     {
       "level": "PASS",
       "name": "features",
-      "detail": "49 项需求断言全部命中"
+      "detail": "82 项需求断言全部命中"
     },
     {
       "level": "PASS",

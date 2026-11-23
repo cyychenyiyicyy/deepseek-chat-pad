@@ -316,7 +316,7 @@ export class RpcMux {
     call.reject(new RemoteLinkError(
       typeof payload.code === 'string' && payload.code.length > 0 ? payload.code : LinkErrorCodes.INTERNAL_ERROR,
       typeof payload.message === 'string' && payload.message.length > 0 ? payload.message : 'Host 返回了未命名的错误。',
-      { retryable: payload.retryable === true, details: payload.details },
+      { retryable: payload.retryable === true, details: payload.details, fromHost: true },
     ))
   }
 

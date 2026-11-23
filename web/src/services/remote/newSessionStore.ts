@@ -56,14 +56,17 @@ import { create } from 'zustand'
 
 import { createId } from '../../utils/id.js'
 import { translate } from '../../i18n/index.js'
+import { readNewSessionDelivery, readNewSessionFiles, writeNewSessionDelivery, writeNewSessionFiles } from '../../components/remote/workspace/attachmentDraftDb.js'
 import { outcomeToken, readRemoteTransport, uploadAttachment, workspaceUploadLimitBytes } from './upload.js'
 import { compressImageFile, isCompressibleImage } from './imageCompress.js'
+import { RemoteApiError } from './serverApi.js'
 import {
   applyPermissionPreset,
   applySessionModel,
   archiveSession,
   createSession,
   createWorkspace,
+  callEndpoint,
   describeRemoteError,
   fetchAgentPresets,
   fetchModelCatalog,
@@ -74,6 +77,7 @@ import {
   listDirectory,
   listSessions,
   normalizeWorkspacePath,
+  parseWorkspace,
   pinSession,
   renameSession,
   searchSessions,
@@ -93,13 +97,20 @@ import {
   type RemoteWorkspaceFrame,
   type RemoteWorkspaceList,
 } from './sessionsApi.js'
-import { sendRemoteMessage, useRemoteStore } from './store.js'
+import { remoteDraftOwner, remoteSessionSelectionVersion, useRemoteStore } from './store.js'
+import {
+  emptyWorkspacePreferences,
+  readWorkspacePreferences,
+  writeWorkspacePreferences,
+  type WorkspacePreferences,
+} from './workspacePreferences.js'
 import {
   deriveWorkspacesFromSessions,
   ensureWorkspaceStream,
   installWorkspaceSync,
   isMissingEndpointError,
   mergeWorkspaceInventory,
+  workspacePathKey,
   type WorkspaceFollowStatus,
   type WorkspaceSyncFailure,
 } from './workspaces.js'
@@ -276,6 +287,7 @@ export interface NewSessionState {
   rows: RemoteSessionRow[]
   archivedSessionIds: string[]
   pinnedSessionIds: string[]
+  pinnedAuthoritative: boolean
   /** 选中的工作区；`null` = 让 Host 用它自己的 cwd。 */
   selectedWorkspaceId: string | null
 
@@ -285,6 +297,7 @@ export interface NewSessionState {
    * 本地 state 会跟着丢；跟 `selectedWorkspaceId` 一样换连接时在 `loadInventory` 里复位。
    */
   listWorkspaceFilter: string | null
+  workspacePreferences: WorkspacePreferences
 
   permissionOptions: RemotePermissionOption[]
   permissionDefault: string
@@ -354,6 +367,8 @@ export interface NewSessionState {
   selectWorkspace(workspaceId: string | null): void
   /** 会话列表按工作区筛选（`null` = 全部）。 */
   selectListWorkspace(filter: string | null): void
+  pinWorkspace(workspaceId: string, pinned: boolean): void
+  groupWorkspace(workspaceId: string, name: string): void
   selectPermission(preset: string): void
   selectAgentPreset(preset: string): void
   /** 展开 / 收起一个短列表（`null` 全部收起）。 */
@@ -378,7 +393,10 @@ export interface NewSessionState {
    * Host 用默认模型接住 —— 旧版「停在失败页等重试 / 跳过」那条死路已删。
    * 返回 `false` = 会话没建出来（原因已写进 `error`，界面把草稿还给用户）。
    */
-  createAndSend(text: string): Promise<boolean>
+  createAndSend(text: string, options?: {
+    signal: AbortSignal
+    onDispatch(sessionId: string, before: Set<string>, requestId: string | undefined): void
+  }): Promise<boolean>
   /** [R17] 新对话页选了文件 → 本地草稿（不上传；`createAndSend` 建完会话才传）。 */
   addDraftFiles(files: readonly File[]): void
   /** [R17] 从草稿里移除一个附件。 */
@@ -395,7 +413,7 @@ export interface NewSessionState {
   togglePin(sessionId: string): Promise<void>
   /** 归档 / 取消归档（按当前 `archivedSessionIds` 自动判断方向）。 */
   toggleArchive(sessionId: string): Promise<void>
-  fork(sessionId: string): Promise<void>
+  fork(sessionId: string, atSeq?: number): Promise<string | null>
 }
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -420,19 +438,88 @@ const targetFor = (): RemoteCallTarget | null => {
 
 /** 当前这批数据属于哪一条连接（换了连接就要重来）。 */
 let inventoryTarget: RemoteCallTarget | null = null
+let workspacePreferencesOwner: string | null = null
+
+function saveWorkspacePreferences(preferences: WorkspacePreferences) {
+  if (inventoryTarget === null || targetFor() !== inventoryTarget) return
+  writeWorkspacePreferences(workspacePreferencesOwner, preferences)
+  useNewSessionStore.setState({ workspacePreferences: preferences })
+}
 /** `refresh()` 单飞。 */
-let refreshInFlight: Promise<void> | null = null
+let refreshInFlight: { target: RemoteCallTarget; task: Promise<void> } | null = null
 /** 搜索请求序号：慢的旧请求不许覆盖新结果。 */
 let searchSeq = 0
-/** 置顶全集是否已经由 RPC 给过（给过就不再从 `session/list` 猜）。 */
-let pinnedAuthoritative = false
+let panelVersion = 0
+let directorySeq = 0
 /** 这一代连接上 `workspace/follow` 的 baseline 是否已经到过（决定 `workspaceSource`）。 */
 let baselineReceived = false
-/**
- * [R17] 附件传失败时停在新对话页，已建出来的会话记在这里；`createAndSend` 重试时
- * 复用（不重复建）。`target` 对象不同（换过连接）就作废。成功发出后清空。
- */
-let pendingSendSession: { target: RemoteCallTarget; sessionId: string } | null = null
+/** First-send setup and upload receipts belong to the verified Host and the created session. */
+interface PendingFirstSend {
+  sessionId: string
+  configuration: string
+  receipts: Map<string, string>
+}
+
+type DraftHost = string | RemoteCallTarget
+const pendingFirstSends = new Map<DraftHost, PendingFirstSend | null>()
+let deliveryGeneration = 0
+
+async function restorePendingFirstSend(owner: DraftHost): Promise<PendingFirstSend | null> {
+  if (!pendingFirstSends.has(owner) && typeof owner === 'string' && typeof indexedDB !== 'undefined') {
+    const generation = deliveryGeneration
+    const saved = await readNewSessionDelivery(owner).catch(() => undefined)
+    if (generation === deliveryGeneration && !pendingFirstSends.has(owner)) {
+      pendingFirstSends.set(owner, saved ? { ...saved, receipts: new Map(saved.receipts) } : null)
+    }
+  }
+  return pendingFirstSends.get(owner) ?? null
+}
+
+async function savePendingFirstSend(owner: DraftHost, delivery: PendingFirstSend | null): Promise<void> {
+  pendingFirstSends.set(owner, delivery)
+  if (typeof owner !== 'string' || typeof indexedDB === 'undefined') return
+  const generation = deliveryGeneration
+  const isCurrent = () => generation === deliveryGeneration && pendingFirstSends.get(owner) === delivery
+  await writeNewSessionDelivery(owner, delivery === null ? null : { ...delivery, receipts: [...delivery.receipts] }, isCurrent)
+    .catch(() => undefined)
+}
+const draftFilesByHost = new Map<string | RemoteCallTarget, NewSessionDraftFile[]>()
+const draftFileReads = new Map<string, Promise<void>>()
+const draftHostKey = () => remoteDraftOwner() ?? targetFor()
+const assignDraftFiles = (key: string | RemoteCallTarget, draftFiles: NewSessionDraftFile[]): void => {
+  if (draftFiles.length === 0) draftFilesByHost.delete(key)
+  else draftFilesByHost.set(key, draftFiles)
+  if (key === draftHostKey()) useNewSessionStore.setState({ draftFiles })
+}
+
+const loadDraftFiles = (key = draftHostKey()): NewSessionDraftFile[] =>
+  key === null ? [] : draftFilesByHost.get(key) ?? []
+
+function restoreNewSessionFiles(owner = draftHostKey()): Promise<void> | undefined {
+  if (typeof owner !== 'string' || typeof indexedDB === 'undefined') return
+  const pending = draftFileReads.get(owner)
+  if (pending !== undefined) return pending
+  const read = readNewSessionFiles(owner).then((restored) => {
+    if (draftFileReads.get(owner) !== read || restored.length === 0) return
+    const drafts = loadDraftFiles(owner)
+    const ids = new Set(drafts.map((file) => file.id))
+    assignDraftFiles(owner, [...restored.filter((file) => !ids.has(file.id)), ...drafts])
+  }).catch(() => undefined)
+  draftFileReads.set(owner, read)
+  return read
+}
+
+function saveDraftFiles(draftFiles: NewSessionDraftFile[], key = draftHostKey()) {
+  if (key === null) return
+  assignDraftFiles(key, draftFiles)
+  if (typeof key !== 'string') return
+  const read = restoreNewSessionFiles(key)
+  if (read === undefined) return
+  const isCurrent = () => draftFileReads.get(key) === read
+  void read.then(async () => {
+    if (isCurrent()) await writeNewSessionFiles(key, loadDraftFiles(key), isCurrent)
+  }).catch(() => undefined)
+}
 
 /**
  * `workspace/follow` 的**一次性**读取器扩展点（备用通道）。
@@ -454,9 +541,19 @@ export const registerWorkspaceBaselineReader = (reader: WorkspaceBaselineReader 
 /** 把 `workspace/follow` 的常驻流接到本 store 上（幂等；不装就用派生列表）。 */
 const installWorkspaceStream = (): void => {
   installWorkspaceSync({
-    onBaseline: (list) => useNewSessionStore.getState().applyWorkspaceBaseline(list),
+    onBaseline: (list) => {
+      const target = targetFor()
+      if (target === null) return
+      bindInventoryTarget(target)
+      useNewSessionStore.getState().applyWorkspaceBaseline(list)
+    },
     onDelta: (frame) => useNewSessionStore.getState().applyWorkspaceFrame(frame),
-    onStatus: (status, failure) => useNewSessionStore.getState().setWorkspaceFollowStatus(status, failure),
+    onStatus: (status, failure) => {
+      const target = targetFor()
+      if (target === null) return
+      bindInventoryTarget(target)
+      useNewSessionStore.getState().setWorkspaceFollowStatus(status, failure)
+    },
   })
 }
 
@@ -466,7 +563,11 @@ const workspacePatch = (
   host: readonly RemoteWorkspace[],
   derived: readonly RemoteWorkspace[],
 ): Partial<NewSessionState> => {
-  const workspaces = mergeWorkspaceInventory(host, derived)
+  const hostIds = new Set(host.map((workspace) => workspace.workspaceId))
+  const fallback = baselineReceived
+    ? derived.filter((workspace) => hostIds.has(workspace.workspaceId)).map((workspace) => ({ ...workspace, sessionIds: [] }))
+    : derived
+  const workspaces = mergeWorkspaceInventory(host, fallback)
   const selected = state.selectedWorkspaceId
   const keepSelected = selected === null || workspaces.some((item) => item.workspaceId === selected)
   return {
@@ -474,6 +575,84 @@ const workspacePatch = (
     derivedWorkspaces: [...derived],
     workspaces,
     ...(keepSelected ? {} : { selectedWorkspaceId: null }),
+  }
+}
+
+export type WorkspaceChange =
+  | { kind: 'rename'; title: string }
+  | { kind: 'remove' }
+  | { kind: 'reorder'; beforeWorkspaceId?: string }
+
+function orderWorkspaces(workspaces: readonly RemoteWorkspace[], workspaceIds: readonly string[]): RemoteWorkspace[] {
+  const byId = new Map(workspaces.map((workspace) => [workspace.workspaceId, workspace]))
+  const ordered: RemoteWorkspace[] = []
+  for (const id of workspaceIds) {
+    const workspace = byId.get(id)
+    if (workspace === undefined) continue
+    ordered.push(workspace)
+    byId.delete(id)
+  }
+  return [...ordered, ...byId.values()]
+}
+
+export async function changeHostWorkspace(target: RemoteCallTarget, workspaceId: string, change: WorkspaceChange) {
+  const original = useNewSessionStore.getState()
+  if (targetFor() !== target || !original.hostWorkspaces.some((item) => item.workspaceId === workspaceId)) {
+    throw new RemoteApiError('NOT_FOUND', 'This workspace is no longer available on the connected Host.')
+  }
+  if (change.kind === 'rename') {
+    const title = change.title.trim()
+    if (!title || title.length > 80) throw new RemoteApiError('INVALID_ARGUMENT', 'Invalid workspace title.')
+    const result = await callEndpoint<{ workspace?: unknown }>(target, 'workspace/rename', { request: { workspaceId, title } })
+    if (targetFor() !== target) return
+    const workspace = parseWorkspace(result?.workspace)
+    if (workspace?.workspaceId !== workspaceId) throw new RemoteApiError('INVALID_MESSAGE', 'Invalid workspace response.')
+    useNewSessionStore.getState().applyWorkspaceFrame({ kind: 'upsert', workspace })
+  } else if (change.kind === 'remove') {
+    await callEndpoint(target, 'workspace/delete', { request: { workspaceId } })
+    if (targetFor() !== target) return
+    useNewSessionStore.getState().applyWorkspaceFrame({ kind: 'remove', workspaceId })
+    const preferences = useNewSessionStore.getState().workspacePreferences
+    const groups = { ...preferences.groups }
+    delete groups[workspaceId]
+    saveWorkspacePreferences({ ...preferences, groups, pinned: preferences.pinned.filter((id) => id !== workspaceId) })
+  } else {
+    const { beforeWorkspaceId } = change
+    const result = await callEndpoint<{ workspaceIds?: unknown }>(target, 'workspace/insertBefore', {
+      request: { workspaceId, ...(beforeWorkspaceId === undefined ? {} : { beforeWorkspaceId }) },
+    })
+    if (targetFor() !== target) return
+    if (!Array.isArray(result?.workspaceIds) || !result.workspaceIds.every((id: unknown) => typeof id === 'string')) {
+      throw new RemoteApiError('INVALID_MESSAGE', 'Invalid workspace order.')
+    }
+    useNewSessionStore.getState().applyWorkspaceFrame({ kind: 'order', workspaceIds: result.workspaceIds })
+  }
+}
+
+export async function reorderHostWorkspaceSession(
+  target: RemoteCallTarget, workspaceId: string, sessionId: string, beforeSessionId?: string,
+): Promise<void> {
+  const workspace = useNewSessionStore.getState().hostWorkspaces.find((item) => item.workspaceId === workspaceId)
+  if (targetFor() !== target || !workspace?.sessionIds.includes(sessionId) || beforeSessionId === sessionId ||
+      (beforeSessionId !== undefined && !workspace.sessionIds.includes(beforeSessionId))) {
+    throw new RemoteApiError('NOT_FOUND', 'The session or workspace is no longer available on the connected Host.')
+  }
+  const result = await callEndpoint<{ workspace?: unknown }>(target, 'workspace/insertSessionBefore', {
+    request: { workspaceId, sessionId, ...(beforeSessionId === undefined ? {} : { beforeSessionId }) },
+  })
+  if (targetFor() !== target) return
+  const updated = parseWorkspace(result?.workspace)
+  const position = updated?.sessionIds.indexOf(sessionId) ?? -1
+  if (updated?.workspaceId !== workspaceId || position < 0) {
+    throw new RemoteApiError('INVALID_MESSAGE', 'Invalid workspace session order.')
+  }
+  if (updated.sessionIds[position + 1] !== beforeSessionId) {
+    throw new RemoteApiError('UNAVAILABLE', translate('remoteWorkspaceSessionOrderUnavailable'))
+  }
+  const state = useNewSessionStore.getState()
+  // A concurrent authoritative stream update can have newer membership or metadata than this reply.
+  if (state.hostWorkspaces.find((item) => item.workspaceId === workspaceId) === workspace) {
+    state.applyWorkspaceFrame({ kind: 'upsert', workspace: updated })
   }
 }
 
@@ -521,19 +700,23 @@ const refreshRemoteSessions = (): void => {
  * `notice` 用来把「跳过了模型 / 权限没生效」这类**已完成但打了折扣**的事实带出去
  * （面板关了，用户还能在会话页看到它；不静默吞掉）。
  */
-const finishOpen = async (sessionId: string, notice: string | null): Promise<void> => {
+const openCreatedSession = async (
+  target: RemoteCallTarget, sessionId: string, panel: number,
+): Promise<boolean> => {
+  if (targetFor() !== target) return false
   useNewSessionStore.setState({
-    creating: false,
     lastCreatedSessionId: sessionId,
     sheet: null,
     // `modelApply` 不在这里清：调用方刚写进去的 `via` / `defaultSave` 是诊断信息，
     // 留给下一次 `openPanel()` / `closePanel()` 复位（它不影响任何 UI 判定）。
   })
   refreshRemoteSessions()
-  // 先刷列表再进会话：`openSession` 只依赖 id，但列表里有这一行体验才对。
-  await Promise.resolve(useRemoteStore.getState().refreshSessions()).catch(() => undefined)
-  await useRemoteStore.getState().openSession(sessionId)
-  useNewSessionStore.setState({ open: false, notice })
+  const opened = useRemoteStore.getState().openSession(sessionId)
+  const selection = remoteSessionSelectionVersion()
+  await opened
+  if (targetFor() !== target || panelVersion !== panel || remoteSessionSelectionVersion() !== selection ||
+    useRemoteStore.getState().activeSessionId !== sessionId) return false
+  return true
 }
 
 /**
@@ -596,8 +779,10 @@ const INITIAL_STATE = {
   rows: [] as RemoteSessionRow[],
   archivedSessionIds: [] as string[],
   pinnedSessionIds: [] as string[],
+  pinnedAuthoritative: false,
   selectedWorkspaceId: null,
   listWorkspaceFilter: null as string | null,
+  workspacePreferences: emptyWorkspacePreferences,
   permissionOptions: [] as RemotePermissionOption[],
   permissionDefault: '',
   selectedPermission: '',
@@ -672,35 +857,26 @@ export const modelSelectionToApply = (pick: ModelPick | null): RemoteModelSelect
  * 一次 `session/list` 顺带解决三件事：本地搜索的语料、派生工作区、置顶初值；
  * 权威那份工作区由 `workspace/follow` 的常驻流推进来（没到 / 老 Host 就是派生的，见文件头）。
  */
-const loadInventory = async (target: RemoteCallTarget): Promise<void> => {
-  if (inventoryTarget !== target) {
-    inventoryTarget = target
-    pinnedAuthoritative = false
-    baselineReceived = false
-    useNewSessionStore.setState({
-      capabilities: CAPABILITIES_ON,
-      workspaces: [],
-      hostWorkspaces: [],
-      derivedWorkspaces: [],
-      workspaceSource: 'derived',
-      workspaceFollow: 'idle',
-      rows: [],
-      archivedSessionIds: [],
-      pinnedSessionIds: [],
-      selectedWorkspaceId: null,
-      listWorkspaceFilter: null,
-      permissionOptions: [],
-      permissionDefault: '',
-      permissionLoaded: false,
-      agentPresets: [],
-      agentPresetsLoaded: false,
-      modelCatalog: null,
-      modelCatalogLoaded: false,
-      error: null,
-    })
-  }
+const bindInventoryTarget = (target: RemoteCallTarget): void => {
+  if (inventoryTarget === target) return
+  searchSeq += 1
+  directorySeq += 1
+  inventoryTarget = target
+  workspacePreferencesOwner = remoteDraftOwner()
+  baselineReceived = false
+  const { open, loading } = useNewSessionStore.getState()
+  useNewSessionStore.setState({
+    ...INITIAL_STATE, open, loading,
+    capabilities: CAPABILITIES_ON,
+    workspacePreferences: readWorkspacePreferences(workspacePreferencesOwner),
+    draftFiles: loadDraftFiles(),
+  })
+}
 
+const loadInventory = async (target: RemoteCallTarget): Promise<void> => {
+  bindInventoryTarget(target)
   const rows = await listSessions(target)
+  if (targetFor() !== target) return
   const state = useNewSessionStore.getState()
   const derived = deriveWorkspacesFromSessions(rows)
   let host = state.hostWorkspaces
@@ -709,7 +885,7 @@ const loadInventory = async (target: RemoteCallTarget): Promise<void> => {
     derivedWorkspaces: derived,
     capabilities: { ...state.capabilities, workspace: true },
   }
-  if (!pinnedAuthoritative) {
+  if (!state.pinnedAuthoritative) {
     patch.pinnedSessionIds = rows.filter((row) => row.pinned === true).map((row) => row.sessionId)
   }
 
@@ -720,27 +896,27 @@ const loadInventory = async (target: RemoteCallTarget): Promise<void> => {
      */
     try {
       const baseline = await workspaceBaselineReader(target)
+      if (targetFor() !== target) return
       if (baseline !== null) {
         host = baseline.items
         baselineReceived = true
         patch.archivedSessionIds = baseline.archivedSessionIds
-        if (baseline.pinnedSessionIds.length > 0) {
+        if (baseline.pinnedReported === true || baseline.pinnedSessionIds.length > 0) {
           patch.pinnedSessionIds = baseline.pinnedSessionIds
-          pinnedAuthoritative = true
+          patch.pinnedAuthoritative = true
         }
       }
     } catch (error) {
+      if (targetFor() !== target) return
       if (isMissingEndpointError(error)) patch.workspaceFollow = 'unsupported'
       else patch.error = errorText(error)
     }
   } else {
     installWorkspaceStream()
-    // `listSessions()` 刚刚把连接对象记进观察者：现在 ensure 一定拿得到 target
     ensureWorkspaceStream()
   }
 
-  patch.hostWorkspaces = host
-  patch.workspaces = mergeWorkspaceInventory(host, derived)
+  Object.assign(patch, workspacePatch(useNewSessionStore.getState(), host, derived))
   patch.workspaceSource = baselineReceived ? 'follow' : 'derived'
   patch.workspaceFollow = patch.workspaceFollow ?? useNewSessionStore.getState().workspaceFollow
   useNewSessionStore.setState(patch)
@@ -756,6 +932,7 @@ const loadInventory = async (target: RemoteCallTarget): Promise<void> => {
 const loadPermissionCatalog = async (target: RemoteCallTarget): Promise<void> => {
   try {
     const catalog = await fetchPermissionCatalog(target)
+    if (targetFor() !== target) return
     useNewSessionStore.setState({
       permissionOptions: catalog.options,
       permissionDefault: catalog.defaultPreset,
@@ -763,6 +940,7 @@ const loadPermissionCatalog = async (target: RemoteCallTarget): Promise<void> =>
       capabilities: { ...useNewSessionStore.getState().capabilities, permission: catalog.options.length > 0 },
     })
   } catch (error) {
+    if (targetFor() !== target) return
     if (isMissingEndpointError(error)) {
       useNewSessionStore.setState({
         permissionOptions: [],
@@ -779,12 +957,14 @@ const loadPermissionCatalog = async (target: RemoteCallTarget): Promise<void> =>
 const loadAgentPresets = async (target: RemoteCallTarget): Promise<void> => {
   try {
     const presets = await fetchAgentPresets(target)
+    if (targetFor() !== target) return
     useNewSessionStore.setState({
       agentPresets: presets,
       agentPresetsLoaded: true,
       capabilities: { ...useNewSessionStore.getState().capabilities, agentPreset: presets.length > 0 },
     })
   } catch (error) {
+    if (targetFor() !== target) return
     if (isMissingEndpointError(error)) {
       useNewSessionStore.setState({
         agentPresets: [],
@@ -805,6 +985,7 @@ const loadAgentPresets = async (target: RemoteCallTarget): Promise<void> => {
 const loadModelCatalog = async (target: RemoteCallTarget): Promise<void> => {
   try {
     const catalog = await fetchModelCatalog(target)
+    if (targetFor() !== target) return
     useNewSessionStore.setState({
       modelCatalog: catalog,
       modelCatalogLoaded: true,
@@ -814,6 +995,7 @@ const loadModelCatalog = async (target: RemoteCallTarget): Promise<void> => {
       },
     })
   } catch (error) {
+    if (targetFor() !== target) return
     if (isMissingEndpointError(error)) {
       useNewSessionStore.setState({
         modelCatalog: null,
@@ -835,8 +1017,10 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
   ...INITIAL_STATE,
 
   openPanel: (): void => {
+    panelVersion += 1
     useNewSessionStore.setState({
       open: true,
+      lastCreatedSessionId: null,
       error: null,
       notice: null,
       actionError: null,
@@ -846,16 +1030,21 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       directoryError: null,
       modelApply: initialModelApply,
     })
+    void restoreNewSessionFiles()
     void useNewSessionStore.getState().refresh()
   },
 
   closePanel: (): void => {
+    panelVersion += 1
+    directorySeq += 1
     useNewSessionStore.setState({
       open: false,
       menuSessionId: null,
       renameTarget: null,
       sheet: null,
       modelApply: initialModelApply,
+      directoryLoading: false,
+      creating: false,
     })
   },
 
@@ -866,18 +1055,20 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       useNewSessionStore.setState({ capabilities: CAPABILITIES_OFF, loading: false })
       return
     }
-    if (refreshInFlight !== null) {
-      await refreshInFlight
+    if (refreshInFlight?.target === target) {
+      await refreshInFlight.task
       return
     }
     useNewSessionStore.setState({ loading: true })
     const task = (async (): Promise<void> => {
       try {
         await loadInventory(target)
+        if (targetFor() !== target) return
         useNewSessionStore.setState({
           capabilities: { ...useNewSessionStore.getState().capabilities, create: true },
         })
       } catch (error) {
+        if (targetFor() !== target) return
         const missing = isMissingEndpointError(error)
         /*
          * 注意**不要**动 `capabilities.workspace`：这里失败的是 `session/list`（清单）或
@@ -898,13 +1089,13 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
         loadAgentPresets(target),
         loadModelCatalog(target),
       ])
-      useNewSessionStore.setState({ loading: false })
+      if (targetFor() === target) useNewSessionStore.setState({ loading: false })
     })()
-    refreshInFlight = task
+    refreshInFlight = { target, task }
     try {
       await task
     } finally {
-      if (refreshInFlight === task) refreshInFlight = null
+      if (refreshInFlight?.task === task) refreshInFlight = null
     }
   },
 
@@ -937,9 +1128,9 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       capabilities: { ...state.capabilities, workspace: true },
       error: null,
     }
-    if (list.pinnedSessionIds.length > 0) {
+    if (list.pinnedReported === true || list.pinnedSessionIds.length > 0) {
       patch.pinnedSessionIds = list.pinnedSessionIds
-      pinnedAuthoritative = true
+      patch.pinnedAuthoritative = true
     }
     useNewSessionStore.setState(patch)
   },
@@ -953,6 +1144,19 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
   applyWorkspaceFrame: (frame: RemoteWorkspaceFrame): void => {
     if (frame.kind === 'ignore') return
     const state = useNewSessionStore.getState()
+    if (frame.kind === 'pinned') {
+      useNewSessionStore.setState({ pinnedSessionIds: frame.sessionIds, pinnedAuthoritative: true })
+      return
+    }
+    if (frame.kind === 'archived') {
+      useNewSessionStore.setState({ archivedSessionIds: frame.sessionIds })
+      return
+    }
+    if (frame.kind === 'order') {
+      useNewSessionStore.setState(workspacePatch(state,
+        orderWorkspaces(state.hostWorkspaces, frame.workspaceIds), state.derivedWorkspaces))
+      return
+    }
     const host = frame.kind === 'remove'
       ? state.hostWorkspaces.filter((item) => item.workspaceId !== frame.workspaceId)
       : state.hostWorkspaces.some((item) => item.workspaceId === frame.workspace.workspaceId)
@@ -970,6 +1174,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
   setWorkspaceFollowStatus: (status: WorkspaceFollowStatus): void => {
     const state = useNewSessionStore.getState()
     if (status === 'unsupported') {
+      baselineReceived = false
       useNewSessionStore.setState({
         workspaceFollow: 'unsupported',
         // 这条连接上没有 follow：权威来源就是派生的那份（哪怕上一代连接留下过 baseline）
@@ -983,30 +1188,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
   },
 
   probeCapabilities: async (): Promise<void> => {
-    /*
-     * 为什么要「等一下」：`store.ts` 里 `phase:'ready'` 是在握手完成后立刻写的，而连接对象
-     * 要等第一次业务调用（`$events` / `session/list`）才会被本模块观察者记下来。
-     * 空态按钮的可见性依赖 `capabilities.create`，所以这里按 300ms 一拍最多等 6 秒：
-     *   - 拿到 target 且行也拉到了 → 成功收工；
-     *   - 拿到 target 但端点不存在（`capabilities.create` 已被关掉）→ 立刻收工，别再打；
-     *   - 全程拿不到 target（连接还没就绪 / 已断开）→ 静默放弃，按钮不显示。
-     */
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (useNewSessionStore.getState().rows.length > 0) return
-      // 连接没了（断开 / 还没连上）就别空转
-      if (useRemoteStore.getState().phase !== 'ready') return
-      if (targetFor() === null) {
-        // 连接刚就绪、第一帧业务调用还没把连接对象记下来：继续等
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, 300)
-        })
-        continue
-      }
-      await useNewSessionStore.getState().refresh()
-      if (useNewSessionStore.getState().rows.length > 0) return
-      // 拉过一次还是没行，且能力已被判定缺失（`METHOD_NOT_FOUND` 之类）→ 别再打
-      if (!useNewSessionStore.getState().capabilities.create) return
-    }
+    if (targetFor() !== null) await useNewSessionStore.getState().refresh()
   },
 
   selectWorkspace: (workspaceId: string | null): void => {
@@ -1015,6 +1197,22 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
 
   selectListWorkspace: (filter: string | null): void => {
     useNewSessionStore.setState({ listWorkspaceFilter: filter })
+  },
+
+  pinWorkspace: (workspaceId, pinned): void => {
+    const { workspaces, workspacePreferences } = useNewSessionStore.getState()
+    if (!workspaces.some((item) => item.workspaceId === workspaceId)) return
+    const remaining = workspacePreferences.pinned.filter((id) => id !== workspaceId)
+    saveWorkspacePreferences({ ...workspacePreferences, pinned: pinned ? [workspaceId, ...remaining] : remaining })
+  },
+
+  groupWorkspace: (workspaceId, name): void => {
+    const { workspaces, workspacePreferences } = useNewSessionStore.getState()
+    if (!workspaces.some((item) => item.workspaceId === workspaceId)) return
+    const group = name.trim().slice(0, 80)
+    const groups = { ...workspacePreferences.groups, [workspaceId]: group }
+    if (!group) delete groups[workspaceId]
+    saveWorkspacePreferences({ ...workspacePreferences, groups })
   },
 
   selectPermission: (preset: string): void => {
@@ -1078,11 +1276,15 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
     const target = targetFor()
     if (target === null) return
     if (!useNewSessionStore.getState().capabilities.directory) return
+    const sequence = ++directorySeq
+    const stillBrowsing = () => targetFor() === target && sequence === directorySeq
     useNewSessionStore.setState({ directoryLoading: true, directoryError: null })
     try {
       const listing = await listDirectory(target, path)
+      if (!stillBrowsing()) return
       useNewSessionStore.setState({ directory: listing, directoryLoading: false })
     } catch (error) {
+      if (!stillBrowsing()) return
       if (isMissingEndpointError(error)) {
         // Host 没有这个端点：整块隐藏，表单还能手填路径
         useNewSessionStore.setState({
@@ -1100,6 +1302,8 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
   submitWorkspacePath: async (): Promise<RemoteWorkspace | null> => {
     const target = targetFor()
     if (target === null) return null
+    const panel = panelVersion
+    const isCurrent = () => targetFor() === target && panelVersion === panel
     let path: string
     try {
       path = normalizeWorkspacePath(useNewSessionStore.getState().pathDraft)
@@ -1110,7 +1314,15 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
     useNewSessionStore.setState({ creating: true, pathError: null, error: null })
     try {
       const { workspace } = await createWorkspace(target, path)
+      if (!isCurrent()) return null
       const state = useNewSessionStore.getState()
+      const rememberedPath = workspace.path || path
+      const previousDirectories = state.workspacePreferences.recentDirectories
+      saveWorkspacePreferences({
+        ...state.workspacePreferences,
+        recentDirectories: [rememberedPath, ...previousDirectories.filter((recent) =>
+          workspacePathKey(recent) !== workspacePathKey(rememberedPath))].slice(0, 8),
+      })
       /*
        * 新建出来的工作区进 `hostWorkspaces`（和 follow 的权威行放在一起）：
        * 下一次 `loadInventory` / 增量帧合并时它不会被派生结果挤掉，选中状态也不会丢。
@@ -1130,6 +1342,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       })
       return workspace
     } catch (error) {
+      if (!isCurrent()) return null
       if (isMissingEndpointError(error)) {
         // 没有 `workspace/create` ≠ 没有工作区列表：只收起「新建工作区」这一行（老 Host）
         useNewSessionStore.setState({
@@ -1148,13 +1361,15 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
     return await useNewSessionStore.getState().submitWorkspacePath()
   },
 
-  createAndSend: async (text: string): Promise<boolean> => {
+  createAndSend: async (text, options): Promise<boolean> => {
     const trimmed = text.trim()
-    const drafts = useNewSessionStore.getState().draftFiles
-    // [R17] 附件也可以单独发（与聊天页同口径：空文本 + 有附件是合法消息）
-    if (trimmed.length === 0 && drafts.length === 0) return false
     const target = targetFor()
-    if (target === null) {
+    const draftHost = draftHostKey() ?? target
+    const panel = panelVersion
+    const selection = remoteSessionSelectionVersion()
+    const canContinue = () => !options?.signal.aborted && targetFor() === target && panelVersion === panel &&
+      remoteSessionSelectionVersion() === selection
+    if (target === null || draftHost === null) {
       useNewSessionStore.setState({
         error: describeRemoteError({ code: 'NOT_CONNECTED' }).text,
         capabilities: CAPABILITIES_OFF,
@@ -1167,31 +1382,36 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       useNewSessionStore.setState({ error: translate('newSessionCreateUnsupported') })
       return false
     }
+    const transport = readRemoteTransport()
 
-    /*
-     * [R17] 重试复用：附件传失败时停在新对话页，会话其实已经建出来了 —— 记在
-     * `pendingSendSession`，重试直接接着这个会话传（不重复建）。换过连接（target
-     * 对象不同）就作废重建。成功发出后清掉。
-     */
-    const reuseTarget = pendingSendSession !== null && pendingSendSession.target === target
-      ? pendingSendSession
-      : null
-    let sessionId: string | null = reuseTarget !== null ? reuseTarget.sessionId : null
+    const configuration = JSON.stringify([
+      state.selectedWorkspaceId, state.selectedAgentPreset, state.selectedPermission, state.modelPick,
+    ])
 
     useNewSessionStore.setState({
       creating: true,
       error: null,
       notice: null,
-      ...(reuseTarget !== null ? {} : { modelApply: initialModelApply }),
+      modelApply: initialModelApply,
       sheet: null,
     })
     try {
+      const restored = restoreNewSessionFiles(draftHost)
+      const pending = typeof draftHost === 'string'
+        ? await Promise.all([restorePendingFirstSend(draftHost), restored]).then(result => result[0])
+        : pendingFirstSends.get(draftHost) ?? null
+      if (!canContinue() || draftHostKey() !== draftHost) return false
+      const drafts = loadDraftFiles(draftHost)
+      if (trimmed.length === 0 && drafts.length === 0) return false
+      let destination = pending?.configuration === configuration ? pending : null
       let notice: string | null = null
-      if (sessionId === null) {
+      if (destination === null) {
         const created = await createSession(target, {
           ...(state.selectedWorkspaceId === null ? {} : { workspaceId: state.selectedWorkspaceId }),
           ...(state.selectedAgentPreset.length === 0 ? {} : { agentPreset: state.selectedAgentPreset }),
         })
+        if (!canContinue()) return false
+        destination = { sessionId: created.sessionId, configuration, receipts: new Map() }
 
         // ── ① 权限预设：只能通过 `/permission <preset>` 生效（input-B §2.10），必须在进会话前设好，
         //      免得第一轮就跑在错的权限下。失败不该让「新建」失败 —— 记成 notice。
@@ -1200,6 +1420,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
           try {
             await applyPermissionPreset(target, created.sessionId, wanted)
           } catch (error) {
+            if (!canContinue()) return false
             notice = `${describeRemoteError(error).text}（${translate('newSessionPermissionNotApplied')}）`
             if (isMissingEndpointError(error)) {
               useNewSessionStore.setState({
@@ -1208,6 +1429,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
             }
           }
         }
+        if (!canContinue()) return false
         if (state.selectedAgentPreset.length > 0 && created.agentPreset !== state.selectedAgentPreset) {
           notice = translate('newSessionPresetNotApplied')
         }
@@ -1221,7 +1443,9 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
           useNewSessionStore.setState({ modelApply: { status: 'applying' } })
           try {
             const applied = await applySessionModel(target, created.sessionId, selection)
+            if (!canContinue()) return false
             const mismatch = await verifyAppliedModel(target, created.sessionId, applied.selection)
+            if (!canContinue()) return false
             // `defaultSave` 失败 ≠ 会话模型没切：只是「新对话默认」没存上，单独提示一句。
             const defaultSaveFailed = applied.defaultSave?.status === 'failed'
             useNewSessionStore.setState({
@@ -1233,6 +1457,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
             })
             notice = mismatch ?? notice ?? (defaultSaveFailed ? translate('newSessionDefaultSaveFailed') : null)
           } catch (error) {
+            if (!canContinue()) return false
             if (isMissingEndpointError(error)) {
               useNewSessionStore.setState({
                 capabilities: { ...useNewSessionStore.getState().capabilities, model: false },
@@ -1242,18 +1467,24 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
             notice = `${errorText(error)}（${translate('newSessionModelFallback')}）`
           }
         }
-        pendingSendSession = { target, sessionId: created.sessionId }
-        sessionId = created.sessionId
+        await savePendingFirstSend(draftHost, destination)
+        if (!canContinue()) return false
       }
 
       /*
        * ── ②b 附件（R17）：两条上传通道都是**会话级**的（`uploadAttachment(target,
        *      sessionId, …)`），所以只能在这一刻传 —— dsh-Go 也是建完会话才把 `_drafts`
        *      落上去的。失败停在新对话页：红字 + 草稿都在、文本由调用方还回去，
-       *      `pendingSendSession` 已记下会话，重试不重复建。
+       *      保留目标会话及已成功的上传，供同一主机重试。
        */
       const blocks: RemotePromptAttachment[] = []
+      const { sessionId, receipts } = destination
       for (const draft of drafts) {
+        const receipt = receipts.get(draft.id)
+        if (receipt !== undefined) {
+          blocks.push({ type: 'file', receiptId: receipt })
+          continue
+        }
         try {
           /*
            * 图片先压再传（与聊天页 `workspacePaneStore.uploadOne` 同一条策略）：
@@ -1264,7 +1495,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
           let name = draft.name
           let mediaType = draft.mediaType
           if (isCompressibleImage({ type: draft.mediaType ?? draft.file.type, name: draft.name })) {
-            const cap = Math.floor(workspaceUploadLimitBytes(readRemoteTransport()) * 0.85)
+            const cap = Math.floor(workspaceUploadLimitBytes(transport) * 0.85)
             const compressed = await compressImageFile(draft.file, cap)
             if (compressed.compressed) {
               payload = compressed.blob
@@ -1273,13 +1504,20 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
             }
           }
           const bytes = new Uint8Array(await payload.arrayBuffer())
-          const outcome = await uploadAttachment(target, sessionId!, {
+          if (!canContinue()) return false
+          const outcome = await uploadAttachment(target, sessionId, {
             name,
             bytes,
             ...(mediaType === undefined ? {} : { mediaType }),
           })
-          blocks.push({ type: 'file', receiptId: outcomeToken(outcome) })
+          const receiptId = outcomeToken(outcome)
+          if (!canContinue()) return false
+          receipts.set(draft.id, receiptId)
+          await savePendingFirstSend(draftHost, destination)
+          if (!canContinue()) return false
+          blocks.push({ type: 'file', receiptId })
         } catch (error) {
+          if (!canContinue()) return false
           useNewSessionStore.setState({
             creating: false,
             error: translate('newSessionAttachmentFailed', {
@@ -1291,25 +1529,33 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
         }
       }
 
-      // ── ③ 刷列表 → 进会话 → 关新建页（`finishOpen` 一手包，notice 随它带出去）。
-      await finishOpen(sessionId!, notice)
-
-      // ── ④ 把第一条消息发出去。`finishOpen` 已经 `await openSession`（follow 快照到手），
-      //      所以这里发是安全的；失败不回滚会话 —— 错误写在时间线那一行上，会话是真实存在的。
-      try {
-        if (blocks.length > 0) {
-          // 与聊天页的附件路径同一条：`sendRemoteMessage` = store.sendFlow（收据随消息发）
-          await sendRemoteMessage(trimmed, blocks)
-        } else {
-          await useRemoteStore.getState().send(trimmed)
-        }
-      } catch {
-        // `sendFlow` 自己把失败写进时间线与 `store.error`，这里不再重复提示
+      // Keep the composer open through the first send so a rejection can restore its draft.
+      if (!canContinue() || !(await openCreatedSession(target, sessionId, panel))) return false
+      if (options?.signal.aborted) return false
+      const openedSelection = remoteSessionSelectionVersion()
+      const before = options && new Set(useRemoteStore.getState().items.map((item) => item.id))
+      const delivery = useRemoteStore.getState().sendToSession(target, sessionId, trimmed, blocks)
+      if (options && before) {
+        const pending = useRemoteStore.getState().items.findLast((item) =>
+          item.kind === 'message' && item.role === 'user' && item.sessionId === sessionId && !before.has(item.id))
+        options.onDispatch(sessionId, before, pending?.kind === 'message' ? pending.requestRpcId : undefined)
       }
-      pendingSendSession = null
-      useNewSessionStore.setState({ draftFiles: [] })
+      const sent = await delivery
+      const stillOpen = targetFor() === target && panelVersion === panel &&
+        remoteSessionSelectionVersion() === openedSelection
+      if (!sent) {
+        if (stillOpen) useNewSessionStore.setState({ error: useRemoteStore.getState().error?.message ?? translate('remoteNotConnected') })
+        return false
+      }
+      const sentIds = new Set(drafts.map((draft) => draft.id))
+      if (pendingFirstSends.get(draftHost) === destination) {
+        saveDraftFiles(loadDraftFiles(draftHost).filter((draft) => !sentIds.has(draft.id)), draftHost)
+        await savePendingFirstSend(draftHost, null)
+      }
+      if (stillOpen) useNewSessionStore.setState({ open: false, notice })
       return true
     } catch (error) {
+      if (targetFor() !== target || panelVersion !== panel) return false
       if (isMissingEndpointError(error)) {
         useNewSessionStore.setState({
           creating: false,
@@ -1319,11 +1565,13 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       }
       useNewSessionStore.setState({ creating: false, error: errorText(error) })
       return false
+    } finally {
+      if (targetFor() === target && panelVersion === panel) useNewSessionStore.setState({ creating: false })
     }
   },
 
   addDraftFiles: (files: readonly File[]): void => {
-    const current = useNewSessionStore.getState().draftFiles
+    const current = loadDraftFiles()
     const added = files
       .filter((file) => file.size > 0 || file.name.length > 0)
       .map((file) => ({
@@ -1334,14 +1582,12 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
         file,
       }))
     if (added.length === 0) return
-    useNewSessionStore.setState({
-      draftFiles: [...current, ...added],
-      error: null,
-    })
+    saveDraftFiles([...current, ...added])
+    useNewSessionStore.setState({ error: null })
   },
 
   removeDraftFile: (id: string): void => {
-    useNewSessionStore.setState((current) => ({ draftFiles: current.draftFiles.filter((item) => item.id !== id) }))
+    saveDraftFiles(loadDraftFiles().filter((item) => item.id !== id))
   },
 
   runSearch: async (query: string): Promise<void> => {
@@ -1354,12 +1600,12 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
     const current = useNewSessionStore.getState().search
     useNewSessionStore.setState({ search: { query, searching: true, hits: current.hits, local: current.local } })
 
+    const target = targetFor()
     const finish = (hits: RemoteSearchHit[], local: boolean): void => {
-      if (seq !== searchSeq) return
+      if (seq !== searchSeq || targetFor() !== target) return
       useNewSessionStore.setState({ search: { query, searching: false, hits, local } })
     }
 
-    const target = targetFor()
     if (target !== null && useNewSessionStore.getState().capabilities.search) {
       try {
         const result = await searchSessions(target, trimmed)
@@ -1367,7 +1613,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
         return
       } catch {
         // 索引没开（gateway/internal）、没这个端点、参数被拒 —— 一律降级到本地
-        if (seq === searchSeq) {
+        if (seq === searchSeq && targetFor() === target) {
           useNewSessionStore.setState({
             capabilities: { ...useNewSessionStore.getState().capabilities, search: false },
           })
@@ -1423,6 +1669,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
     useNewSessionStore.setState({ busySessionId: rename.sessionId, actionError: null })
     try {
       const committed = await renameSession(target, rename.sessionId, title)
+      if (targetFor() !== target) return
       const state = useNewSessionStore.getState()
       useNewSessionStore.setState({
         busySessionId: null,
@@ -1431,7 +1678,7 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       })
       refreshRemoteSessions()
     } catch (error) {
-      manageFailed(error)
+      if (targetFor() === target) manageFailed(error)
     }
   },
 
@@ -1444,11 +1691,11 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       const result = pinned
         ? await unpinSession(target, sessionId)
         : await pinSession(target, sessionId)
-      pinnedAuthoritative = true
-      useNewSessionStore.setState({ busySessionId: null, pinnedSessionIds: result.sessionIds })
+      if (targetFor() !== target) return
+      useNewSessionStore.setState({ busySessionId: null, pinnedSessionIds: result.sessionIds, pinnedAuthoritative: true })
       refreshRemoteSessions()
     } catch (error) {
-      manageFailed(error)
+      if (targetFor() === target) manageFailed(error)
     }
   },
 
@@ -1461,26 +1708,53 @@ export const useNewSessionStore = create<NewSessionState>(() => ({
       const result = archived
         ? await unarchiveSession(target, sessionId)
         : await archiveSession(target, sessionId)
+      if (targetFor() !== target) return
       useNewSessionStore.setState({ busySessionId: null, archivedSessionIds: result.sessionIds })
       refreshRemoteSessions()
     } catch (error) {
-      manageFailed(error)
+      if (targetFor() === target) manageFailed(error)
     }
   },
 
-  fork: async (sessionId: string): Promise<void> => {
+  fork: async (sessionId: string, atSeq?: number): Promise<string | null> => {
     const target = targetFor()
-    if (target === null) return
+    if (target === null || useNewSessionStore.getState().busySessionId !== null) return null
+    if (atSeq !== undefined && (!Number.isSafeInteger(atSeq) || atSeq < 0)) return null
+    const selection = remoteSessionSelectionVersion()
+    const panel = panelVersion
     useNewSessionStore.setState({ busySessionId: sessionId, menuSessionId: null, actionError: null })
     try {
-      const forkedId = await forkSession(target, sessionId)
-      useNewSessionStore.setState({ busySessionId: null })
+      const forkedId = await forkSession(target, sessionId, atSeq)
+      if (targetFor() !== target) return null
       refreshRemoteSessions()
-      // 派生出来的会话通常是空会话：直接进去接着聊（与 dsh-Go 一致）
-      await Promise.resolve(useRemoteStore.getState().refreshSessions()).catch(() => undefined)
-      await useRemoteStore.getState().openSession(forkedId)
+      if (remoteSessionSelectionVersion() !== selection || panelVersion !== panel ||
+        useNewSessionStore.getState().open) return null
+      const opened = useRemoteStore.getState().openSession(forkedId)
+      const openedSelection = remoteSessionSelectionVersion()
+      await opened
+      return targetFor() === target && remoteSessionSelectionVersion() === openedSelection &&
+        panelVersion === panel && useRemoteStore.getState().activeSessionId === forkedId ? forkedId : null
     } catch (error) {
-      manageFailed(error)
+      if (targetFor() === target) manageFailed(error)
+      return null
+    } finally {
+      if (targetFor() === target && useNewSessionStore.getState().busySessionId === sessionId) {
+        useNewSessionStore.setState({ busySessionId: null })
+      }
     }
   },
 }))
+
+useRemoteStore.subscribe((state, previous) => {
+  if (state.lastSession === null && previous.lastSession !== null) {
+    deliveryGeneration++
+    pendingFirstSends.clear()
+    draftFileReads.clear()
+    draftFilesByHost.clear()
+    useNewSessionStore.setState({ draftFiles: [] })
+  }
+  if (state.phase !== previous.phase || state.hostId !== previous.hostId || state.activeServerUrl !== previous.activeServerUrl) {
+    useNewSessionStore.setState({ draftFiles: loadDraftFiles() })
+    if (useNewSessionStore.getState().open) void restoreNewSessionFiles()
+  }
+})

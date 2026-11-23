@@ -20,6 +20,7 @@ import {
 } from '../../../services/remote/filesApi.js'
 import { useNewSessionStore } from '../../../services/remote/newSessionStore.js'
 import { describeRemoteError, lastRemoteTarget, workspaceReferenceToken } from '../../../services/remote/sessionsApi.js'
+import type { RemoteCallTarget } from '../../../services/remote/sessionsApi.js'
 import {
   isUploadUnavailable,
   outcomeReference,
@@ -33,7 +34,9 @@ import {
   type UploadUnavailableReason,
 } from '../../../services/remote/upload.js'
 import { compressImageFile, isCompressibleImage } from '../../../services/remote/imageCompress.js'
-import { useRemoteStore } from '../../../services/remote/store.js'
+import { remoteDraftOwner, useRemoteStore } from '../../../services/remote/store.js'
+import { workspaceDocumentPreview } from '../../../services/remote/workspaceDocument.js'
+import { clearAttachmentDrafts, deleteAttachmentDraft, readAttachmentDrafts, writeAttachmentDraft } from './attachmentDraftDb.js'
 
 /**
  * 工作区文件面板 + 会话附件上传的**界面状态**（zustand，只在界面层用）。
@@ -120,7 +123,16 @@ export interface BinaryPreview {
   head?: string
 }
 
-export type PreviewState = TextPreview | ImagePreview | BinaryPreview
+export type DocumentPreview = {
+  kind: 'document'
+  path: string
+} & (
+  | { status: 'loading' }
+  | { status: 'error'; error: string }
+  | { status: 'ready'; bytes: Uint8Array; missingFonts: string[] }
+)
+
+export type PreviewState = TextPreview | ImagePreview | BinaryPreview | DocumentPreview
 
 /** `openAt()` 的三种结论（见接口注释）。 */
 export type OpenAtResult = 'ok' | 'missing' | 'unavailable'
@@ -128,7 +140,10 @@ export type OpenAtResult = 'ok' | 'missing' | 'unavailable'
 /** 输入区里待发送的附件。 */
 export interface DraftAttachment {
   id: string
+  owner: string
+  sessionId: string
   name: string
+  pickedAt?: number
   size: number
   mediaType?: string
   status: 'uploading' | 'done' | 'error'
@@ -146,6 +161,8 @@ export interface DraftAttachment {
   error?: string
   /** 重试用的原始字节（失败时留着；成功后释放）。 */
   bytes?: Uint8Array
+  /** Local file remains available until the upload payload has been read. */
+  file?: File
   /** 正在客户端压缩（图片），界面据此说「压缩中…」而不是干等。 */
   compressing?: boolean
   /** 压缩前的原始体积（有值 = 这张图被压过，界面可以标「已压缩 6.1MB → 1.2MB」）。 */
@@ -184,6 +201,8 @@ export interface WorkspacePaneState {
   preview: PreviewState | null
   /** 输入区附件条。 */
   attachments: DraftAttachment[]
+  attachmentTarget: RemoteCallTarget | null
+  restoringAttachments: boolean
   /** 附件区的一句话错误（上传失败原因）。 */
   uploadError: string | null
 
@@ -212,7 +231,6 @@ export interface WorkspacePaneState {
   pickFiles(files: readonly File[]): Promise<void>
   retryAttachment(id: string): Promise<void>
   removeAttachment(id: string): void
-  clearAttachments(): void
 }
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -221,6 +239,22 @@ export interface WorkspacePaneState {
 
 /** 当前可用的连接目标（`NULL` = 还没连上 / 连接换代）。 */
 const targetOrNull = () => (useRemoteStore.getState().phase === 'ready' ? lastRemoteTarget() : null)
+
+export const workspaceAttachmentOwner = () => remoteDraftOwner()
+
+let scopeVersion = 0
+let previewVersion = 0
+let documentRead: AbortController | undefined
+let openPathVersion = 0
+let draftReads = new Set<string>()
+let lastFilePickedAt = 0
+
+const scopeIsCurrent = (target: RemoteCallTarget, sessionId: string, version: number): boolean =>
+  scopeVersion === version && targetOrNull() === target &&
+  useWorkspacePane.getState().scopeId === sessionId &&
+  useRemoteStore.getState().activeSessionId === sessionId
+
+const attachmentDraftKey = (owner: string, sessionId: string) => JSON.stringify([owner, sessionId])
 
 /** 会话的工作区路径：先看 `workspace/follow` 的路径，再退回行的 `cwd`。 */
 const rootForSession = (sessionId: string): { path: string; source: 'workspace' | 'cwd' | 'unknown' } => {
@@ -275,6 +309,8 @@ export const describeFileError = (error: unknown): string => {
 
 /** 预览被替换 / 关闭时把 blob URL 还回去（内存纪律：任务书点名要求）。 */
 const releasePreview = (preview: PreviewState | null): void => {
+  documentRead?.abort()
+  documentRead = undefined
   if (preview !== null && preview.kind === 'image' && preview.url !== undefined) {
     URL.revokeObjectURL(preview.url)
   }
@@ -303,11 +339,18 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
   error: null,
   preview: null,
   attachments: [],
+  attachmentTarget: null,
+  restoringAttachments: false,
   uploadError: null,
 
   bind: async (sessionId: string | null): Promise<void> => {
     const state = useWorkspacePane.getState()
-    if (sessionId === state.scopeId) return
+    const target = targetOrNull()
+    const targetChanged = state.attachmentTarget !== target
+    if (sessionId === state.scopeId && !targetChanged) return
+    scopeVersion += 1
+    const version = scopeVersion
+    previewVersion += 1
     // 换会话：目录缓存、预览、展开状态全丢（它们是上一个会话的工作区）
     releasePreview(state.preview)
     /*
@@ -316,6 +359,8 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
      * 编码一遍才发现 `fileUploads/upload` 不认（0.5.22 上必然如此）。
      */
     const root = sessionId === null ? { path: '', source: 'unknown' as const } : rootForSession(sessionId)
+    const owner = workspaceAttachmentOwner()
+    const restoring = sessionId !== null && target !== null && owner !== null && !draftReads.has(attachmentDraftKey(owner, sessionId))
     useWorkspacePane.setState({
       scopeId: sessionId,
       rootPath: root.path,
@@ -325,8 +370,18 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
       preview: null,
       error: null,
       uploadError: null,
+      restoringAttachments: restoring,
+      ...(targetChanged ? { attachmentTarget: target,
+        attachments: state.attachments.map((item) => item.status === 'uploading'
+          ? { ...item, status: 'error', compressing: false, progress: 0, error: '上传连接已断开，请重试' }
+          : item),
+        filesSupported: null, uploadSupported: null,
+        uploadUnavailableReason: null, uploadUnavailableCode: null } : {}),
     })
-    if (sessionId !== null && state.open && state.filesSupported !== false) await useWorkspacePane.getState().refresh('')
+    if (restoring) {
+      void restoreAttachmentDrafts(target, owner, sessionId, version)
+    }
+    if (sessionId !== null && state.open) await useWorkspacePane.getState().refresh('')
   },
 
   resolveRoot: (): void => {
@@ -351,6 +406,7 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
   closePane: (): void => {
     // 关闭抽屉 = 预览用完：图片的 blob URL 立刻还回去（再打开重新读，几十 KiB 换个内存干净）
     const state = useWorkspacePane.getState()
+    previewVersion += 1
     releasePreview(state.preview)
     useWorkspacePane.setState({ open: false, error: null, preview: null })
   },
@@ -364,12 +420,18 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
       useWorkspacePane.setState({ error: '还没连上远端主机' })
       return
     }
+    const version = scopeVersion
+    const loadingNode = { ...(state.nodes[path] ?? emptyNode()), loading: true, error: null }
+    const currentRequest = () => scopeIsCurrent(target, scope, version) &&
+      useWorkspacePane.getState().nodes[path] === loadingNode
+    if (!scopeIsCurrent(target, scope, version)) return
     useWorkspacePane.setState((current) => ({
-      nodes: { ...current.nodes, [path]: { ...(current.nodes[path] ?? emptyNode()), loading: true, error: null } },
+      nodes: { ...current.nodes, [path]: loadingNode },
       error: null,
     }))
     try {
       const listing = await listWorkspaceFiles(target, scope, path)
+      if (!currentRequest()) return
       useWorkspacePane.setState((current) => ({
         filesSupported: true,
         nodes: {
@@ -384,8 +446,11 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
         },
       }))
     } catch (error) {
+      if (!currentRequest()) return
       if (isMissingEndpoint(error)) {
         // Host 没有这个端点：整块 UI 收起来（入口按钮也跟着消失），不弹红条
+        releasePreview(useWorkspacePane.getState().preview)
+        previewVersion += 1
         useWorkspacePane.setState({ filesSupported: false, nodes: {}, expanded: {}, preview: null })
         return
       }
@@ -417,13 +482,33 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
       useWorkspacePane.setState({ error: '还没连上远端主机' })
       return
     }
+    const version = scopeVersion
+    if (!scopeIsCurrent(target, scope, version)) return
+    openPathVersion += 1
+    const request = ++previewVersion
+    const currentRequest = () => previewVersion === request && scopeIsCurrent(target, scope, version)
     releasePreview(state.preview)
     const kind: WorkspaceFileKind = fileKindOf(path)
+    if (kind === 'pdf' || kind === 'office') {
+      const operation = new AbortController()
+      documentRead = operation
+      useWorkspacePane.setState({ preview: { kind: 'document', path, status: 'loading' } })
+      try {
+        const document = await workspaceDocumentPreview(target, scope, path, operation.signal)
+        if (currentRequest()) useWorkspacePane.setState({ preview: { kind: 'document', path, status: 'ready', ...document } })
+      } catch (error) {
+        if (currentRequest()) useWorkspacePane.setState({ preview: { kind: 'document', path, status: 'error', error: describeFileError(error) } })
+      } finally {
+        if (documentRead === operation) documentRead = undefined
+      }
+      return
+    }
     if (kind === 'binary') {
       // 二进制：先 stat 拿大小（拿不到就只显示占位），绝不去读正文
       useWorkspacePane.setState({ preview: { kind: 'binary', path, status: 'ready' } })
       try {
         const stat = await statWorkspaceFile(target, scope, path)
+        if (!currentRequest()) return
         useWorkspacePane.setState((current) => ({
           preview: current.preview !== null && current.preview.path === path && current.preview.kind === 'binary'
             ? { ...current.preview, ...(stat.bytes === undefined ? {} : { bytes: stat.bytes }) }
@@ -438,6 +523,7 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
       useWorkspacePane.setState({ preview: { kind: 'image', path, status: 'loading' } })
       try {
         const image = await readWorkspaceImage(target, scope, path)
+        if (!currentRequest()) return
         // 只把这一张图拷进 ArrayBuffer 交 Blob，避免把整个底层缓冲（可能带别的东西）挂上去
         const buffer = image.bytes.buffer.slice(
           image.bytes.byteOffset,
@@ -448,6 +534,7 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
           preview: { kind: 'image', path, status: 'ready', url, mimeType: image.mimeType, bytes: image.bytes.byteLength },
         })
       } catch (error) {
+        if (!currentRequest()) return
         useWorkspacePane.setState({
           preview: { kind: 'image', path, status: 'error', error: describeFileError(error) },
         })
@@ -469,6 +556,7 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
     })
     try {
       const range = await readWorkspaceBytesRange(target, scope, path, 0, TEXT_PREVIEW_BYTES)
+      if (!currentRequest()) return
       useWorkspacePane.setState({
         preview: {
           kind: 'text',
@@ -484,6 +572,7 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
         },
       })
     } catch (error) {
+      if (!currentRequest()) return
       if (!isMissingEndpoint(error)) {
         useWorkspacePane.setState({
           preview: {
@@ -504,6 +593,7 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
       // 老 Host 没有 `readBytes`：退回 `read` 的单页（没有「加载更多」）
       try {
         const page = await readWorkspaceText(target, scope, path)
+        if (!currentRequest()) return
         useWorkspacePane.setState({
           preview: {
             kind: 'text',
@@ -518,6 +608,7 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
           },
         })
       } catch (fallbackError) {
+        if (!currentRequest()) return
         useWorkspacePane.setState({
           preview: {
             kind: 'text',
@@ -548,6 +639,12 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
     const target = targetOrNull()
     const scope = state.scopeId
     if (target === null || scope === null) return 'unavailable'
+    const version = scopeVersion
+    if (!scopeIsCurrent(target, scope, version)) return 'unavailable'
+    const previewAtStart = previewVersion
+    const request = ++openPathVersion
+    const currentRequest = () => openPathVersion === request && previewVersion === previewAtStart &&
+      scopeIsCurrent(target, scope, version)
     /*
      * 先 `stat` 一次再读：`readBytes` 对不存在的文件只会回一个笼统的错误，
      * 而「文件已不存在」是这一条路径最常见的失败（模型改了名 / 用户删了）。
@@ -556,16 +653,19 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
     try {
       await statWorkspaceFile(target, scope, path)
     } catch (error) {
+      if (!currentRequest()) return 'unavailable'
       if (isNotFoundError(error)) return 'missing'
       // 其它错误（权限 / 太大 / 通道抽风）不在这里拦：交给 openFile 报它自己的原因
     }
-    releasePreview(state.preview)
+    if (!currentRequest()) return 'unavailable'
+    releasePreview(useWorkspacePane.getState().preview)
     useWorkspacePane.setState({ open: true, error: null, preview: null })
     await useWorkspacePane.getState().openFile(path)
     return 'ok'
   },
 
   closePreview: (): void => {
+    previewVersion += 1
     releasePreview(useWorkspacePane.getState().preview)
     useWorkspacePane.setState({ preview: null })
   },
@@ -583,10 +683,15 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
     const target = targetOrNull()
     const scope = state.scopeId
     if (target === null || scope === null) return
+    const version = scopeVersion
+    const request = previewVersion
+    const currentRequest = () => previewVersion === request && scopeIsCurrent(target, scope, version)
+    if (!currentRequest()) return
     useWorkspacePane.setState({ preview: { ...preview, loadingMore: true } })
     try {
       const limit = Math.min(TEXT_PREVIEW_BYTES, TEXT_PREVIEW_MAX_BYTES - preview.bytesRead)
       const range = await readWorkspaceBytesRange(target, scope, preview.path, preview.bytesRead, limit)
+      if (!currentRequest()) return
       // 用累计的原始字节拼，再用整体重解：多字节字符被分块切断时不会出现半个字
       const merged = new Uint8Array(preview.bytes.byteLength + range.data.byteLength)
       merged.set(preview.bytes, 0)
@@ -607,6 +712,7 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
         }
       })
     } catch (error) {
+      if (!currentRequest()) return
       useWorkspacePane.setState((current) => {
         const now = current.preview
         if (now === null || now.kind !== 'text' || now.path !== preview.path) return {}
@@ -616,14 +722,21 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
   },
 
   pickFiles: async (files: readonly File[]): Promise<void> => {
-    if (files.length === 0) return
+    const target = targetOrNull()
+    const owner = workspaceAttachmentOwner()
+    const { scopeId, attachmentTarget } = useWorkspacePane.getState()
+    if (files.length === 0 || owner === null || target === null || target !== attachmentTarget || scopeId === null ||
+      scopeId !== useRemoteStore.getState().activeSessionId) return
     // 先占位（每个文件一条「上传中」），再按顺序上传：单帧上传并发没有收益，反而抢带宽
     const queued: DraftAttachment[] = []
     const tooLarge: DraftAttachment[] = []
     for (const file of files) {
       const entry: DraftAttachment = {
         id: attachmentId(),
+        owner,
+        sessionId: scopeId,
         name: file.name,
+        pickedAt: (lastFilePickedAt = Math.max(Date.now(), lastFilePickedAt + 1)),
         size: file.size,
         ...(file.type.length === 0 ? {} : { mediaType: file.type }),
         status: 'uploading',
@@ -639,25 +752,32 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
         tooLarge.push(entry)
         continue
       }
-      queued.push(entry)
+      queued.push({ ...entry, file })
     }
     useWorkspacePane.setState((current) => ({
       attachments: [...current.attachments, ...queued],
       uploadError: tooLarge.length > 0 ? '有文件超过本条连接的上传上限，已标红' : null,
     }))
+    for (const entry of queued) {
+      if (entry.file !== undefined) void writeAttachmentDraft(entry).catch(() => undefined)
+    }
     for (let index = 0; index < files.length; index += 1) {
       const entry = queued[index]
       const file = files[index]
       if (entry === undefined || file === undefined) continue
       if (entry.status === 'error') continue
-      await uploadOne(entry.id, file)
+      await uploadOne(target, entry, file)
     }
   },
 
   retryAttachment: async (id: string): Promise<void> => {
     const state = useWorkspacePane.getState()
     const entry = state.attachments.find((item) => item.id === id)
-    if (entry === undefined || entry.bytes === undefined) return
+    const target = targetOrNull()
+    if (entry?.status !== 'error' || (entry.bytes === undefined && entry.file === undefined) ||
+      entry.owner !== workspaceAttachmentOwner() || entry.sessionId !== state.scopeId ||
+      entry.sessionId !== useRemoteStore.getState().activeSessionId ||
+      target === null || state.attachmentTarget !== target) return
     const bytes = entry.bytes
     useWorkspacePane.setState((current) => ({
       attachments: current.attachments.map((item) =>
@@ -677,19 +797,49 @@ export const useWorkspacePane = create<WorkspacePaneState>(() => ({
       ),
       uploadError: null,
     }))
-    await uploadBytes(id, { name: entry.name, bytes, ...(entry.mediaType === undefined ? {} : { mediaType: entry.mediaType }) }, entry.size)
+    if (bytes !== undefined) {
+      await uploadBytes(target, entry, { name: entry.name, bytes, ...(entry.mediaType === undefined ? {} : { mediaType: entry.mediaType }) }, entry.size)
+    } else if (entry.file !== undefined) {
+      await uploadOne(target, entry, entry.file)
+    }
   },
 
   removeAttachment: (id: string): void => {
     useWorkspacePane.setState((current) => ({
       attachments: current.attachments.filter((item) => item.id !== id),
     }))
+    void deleteAttachmentDraft(id).catch(() => undefined)
   },
 
-  clearAttachments: (): void => {
-    useWorkspacePane.setState({ attachments: [], uploadError: null })
-  },
 }))
+
+useRemoteStore.subscribe((state, previous) => {
+  if (state.lastSession === null && previous.lastSession !== null) {
+    useWorkspacePane.setState({ attachments: [], restoringAttachments: false })
+    draftReads = new Set()
+    void clearAttachmentDrafts().catch(() => undefined)
+  }
+})
+
+async function restoreAttachmentDrafts(target: RemoteCallTarget, owner: string, sessionId: string, version: number) {
+  const readKey = attachmentDraftKey(owner, sessionId)
+  const reads = draftReads
+  const currentScope = () => reads === draftReads && scopeIsCurrent(target, sessionId, version) && workspaceAttachmentOwner() === owner
+  try {
+    const loaded = await readAttachmentDrafts(owner, sessionId)
+    if (!currentScope()) return
+    reads.add(readKey)
+    useWorkspacePane.setState((current) => {
+      const existing = new Set(current.attachments.map((item) => item.id))
+      const missing = loaded.filter((item) => item.owner === owner && item.sessionId === sessionId && !existing.has(item.id))
+      return missing.length ? { attachments: [...missing, ...current.attachments] } : current
+    })
+  } catch {
+    // Attachment selection still works when the local draft store is unavailable.
+  } finally {
+    if (currentScope()) useWorkspacePane.setState({ restoringAttachments: false })
+  }
+}
 
 /* ────────────────────────────────────────────────────────────────────────
  * 四、上传（内部）
@@ -715,7 +865,9 @@ const patchAttachment = (id: string, patch: Partial<DraftAttachment>): void => {
   }))
 }
 
-const uploadOne = async (id: string, file: File): Promise<void> => {
+const uploadOne = async (target: RemoteCallTarget, entry: DraftAttachment, file: File): Promise<void> => {
+  const { id } = entry
+  if (target !== targetOrNull() || !useWorkspacePane.getState().attachments.some((item) => item.id === id)) return
   let payload: Blob = file
   let name = file.name
   let mediaType = file.type
@@ -728,8 +880,9 @@ const uploadOne = async (id: string, file: File): Promise<void> => {
   if (isCompressibleImage(file)) {
     patchAttachment(id, { compressing: true, progress: 0 })
     try {
-      const target = Math.floor(workspaceUploadLimitBytes(readRemoteTransport()) * 0.85)
-      const result = await compressImageFile(file, target)
+      const targetBytes = Math.floor(workspaceUploadLimitBytes(readRemoteTransport()) * 0.85)
+      const result = await compressImageFile(file, targetBytes)
+      if (target !== targetOrNull()) return
       if (result.compressed) {
         payload = result.blob
         name = result.name
@@ -748,17 +901,19 @@ const uploadOne = async (id: string, file: File): Promise<void> => {
     } catch {
       // 压缩是优化：任何意外都退回原图，不影响上传
     } finally {
-      patchAttachment(id, { compressing: false })
+      if (target === targetOrNull()) patchAttachment(id, { compressing: false })
     }
   }
   let bytes: Uint8Array
   try {
     bytes = new Uint8Array(await payload.arrayBuffer())
   } catch {
-    patchAttachment(id, { status: 'error', progress: 0, error: '读不到这个文件（本地读取失败）' })
+    if (target === targetOrNull()) {
+      patchAttachment(id, { status: 'error', progress: 0, error: '读不到这个文件（本地读取失败）' })
+    }
     return
   }
-  await uploadBytes(id, { name, bytes, ...(mediaType.length === 0 ? {} : { mediaType }) }, size)
+  await uploadBytes(target, entry, { name, bytes, ...(mediaType.length === 0 ? {} : { mediaType }) }, size)
 }
 
 /** 上传失败 → 一句人话（附件的错误码映射；`UPLOAD_UNAVAILABLE` 再带上原因）。 */
@@ -791,20 +946,19 @@ const describeUploadError = (error: unknown): string => {
  * `uploadSupported` 置 `false`，并把原因写进 `uploadUnavailableReason` 供按钮/附件条显示。
  */
 const uploadBytes = async (
-  id: string,
+  target: RemoteCallTarget,
+  { id, sessionId }: DraftAttachment,
   payload: { name: string; bytes: Uint8Array; mediaType?: string },
   size: number,
 ): Promise<void> => {
-  const target = targetOrNull()
-  const scope = useWorkspacePane.getState().scopeId
-  if (target === null || scope === null) {
-    patchAttachment(id, { status: 'error', error: '还没连上远端主机', bytes: payload.bytes })
-    return
-  }
-  patchAttachment(id, { bytes: payload.bytes, size })
+  const currentUpload = () => target === targetOrNull() &&
+    useWorkspacePane.getState().attachments.some((item) => item.id === id && item.status === 'uploading')
+  if (!currentUpload()) return
+  patchAttachment(id, { bytes: payload.bytes, file: undefined, size })
   try {
-    const outcome = await uploadAttachment(target, scope, payload, {
+    const outcome = await uploadAttachment(target, sessionId, payload, {
       onProgress: (progress) => {
+        if (!currentUpload()) return
         patchAttachment(id, {
           progress: progressOf(progress.phase, progress.sentBytes, progress.totalBytes),
           phase: progress.phase,
@@ -824,14 +978,18 @@ const uploadBytes = async (
         : { remotePath: outcome.path, receiptId: undefined, ...(reference === null ? {} : { reference }) }),
       ...(outcome.name === undefined ? {} : { name: outcome.name }),
     }
+    if (!currentUpload()) return
     useWorkspacePane.setState((current) => ({
       uploadSupported: true,
       uploadUnavailableReason: null,
       uploadUnavailableCode: null,
-      uploadError: null,
+      uploadError: current.scopeId === sessionId ? null : current.uploadError,
       attachments: current.attachments.map((item) => (item.id === id ? { ...item, ...done } : item)),
     }))
+    const saved = useWorkspacePane.getState().attachments.find((item) => item.id === id)
+    if (saved !== undefined) void writeAttachmentDraft(saved).catch(() => undefined)
   } catch (error) {
+    if (!currentUpload()) return
     if (isUploadUnavailable(error)) {
       // 两条通道都不可用：把「+」标成不可用并给出原因（不静默消失）
       const reason = describeUploadError(error)
@@ -839,13 +997,13 @@ const uploadBytes = async (
         uploadSupported: false,
         uploadUnavailableReason: reason,
         uploadUnavailableCode: uploadErrorReasonOf(error) ?? 'both-unavailable',
-        uploadError: reason,
-        attachments: useWorkspacePane.getState().attachments.filter((item) => item.id !== id),
+        ...(useWorkspacePane.getState().scopeId === sessionId ? { uploadError: reason } : {}),
       })
+      patchAttachment(id, { status: 'error', progress: 0, error: reason, bytes: payload.bytes })
       return
     }
     const text = describeUploadError(error)
-    useWorkspacePane.setState({ uploadError: text })
+    if (useWorkspacePane.getState().scopeId === sessionId) useWorkspacePane.setState({ uploadError: text })
     patchAttachment(id, { status: 'error', progress: 0, error: text, bytes: payload.bytes })
   }
 }
@@ -860,9 +1018,6 @@ export const readyReceipts = (attachments: readonly DraftAttachment[]): string[]
     return []
   })
 
-/** 还有附件在传（发送按钮要等它们）。 */
-export const hasUploadingAttachment = (attachments: readonly DraftAttachment[]): boolean =>
-  attachments.some((item) => item.status === 'uploading')
 
 /** 这次选择里最坏的那个文件会不会超过上限（给 `pickFiles` 做本地提示用；不发网络）。 */
 export const uploadTooLargeHint = (size: number, transport: string = readRemoteTransport()): boolean => {

@@ -48,17 +48,19 @@ export class RemoteLinkError extends Error {
   readonly code: string
   readonly details: unknown
   readonly retryable: boolean | undefined
+  readonly fromHost: boolean
 
   constructor(
     code: string,
     message: string,
-    options: { details?: unknown; retryable?: boolean; cause?: unknown } = {},
+    options: { details?: unknown; retryable?: boolean; cause?: unknown; fromHost?: boolean } = {},
   ) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause })
     this.name = 'RemoteLinkError'
     this.code = code
     this.details = options.details
     this.retryable = options.retryable
+    this.fromHost = options.fromHost === true
   }
 }
 

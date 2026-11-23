@@ -412,6 +412,24 @@ check('C3：clearToolImageCache 之后重新请求（换连接时用）', async 
   assertEqual(fake.calls.length, 2, '清缓存后重新请求')
 })
 
+check('C4：切主机后即使附件 ID 与会话 ID 一样，也分别请求并隔离迟到的图片', async () => {
+  clearToolImageCache()
+  const image = { attachmentId: 'shared', sessionId: 's-1' }
+  const a = fakeTarget({ 'session/attachment': attachmentReply('shared') }, { delayMs: 30 })
+  const bData = Buffer.from([...PNG_BYTES, 42]).toString('base64')
+  const b = fakeTarget({ 'session/attachment': { ok: true, value: { attachment: { attachmentId: 'shared', mediaType: 'image/png' }, data: bData } } })
+  connect(a)
+  assertEqual(await loadToolImage(image), PNG_DATA_URL, 'A 图进入缓存')
+  const late = catchError(() => loadToolImage(image, undefined, { force: true }), 'A 的迟到结果')
+  await Promise.resolve()
+  connect(b)
+  const expected = `data:image/png;base64,${bData}`
+  assertEqual(await loadToolImage(image), expected, 'B 请求自己的图片')
+  assertTrue(isRemoteAborted(await late), '丢弃不再属于当前主机的 A 结果')
+  assertEqual(await loadToolImage(image), expected, 'B 缓存保持正确')
+  assertEqual(b.calls.length, 1, '对 B 的重复请求命中自己的缓存')
+})
+
 /* ── 跑 ───────────────────────────────────────────────────────────────── */
 
 const main = async (): Promise<void> => {

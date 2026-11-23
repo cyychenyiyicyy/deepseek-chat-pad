@@ -74,7 +74,7 @@ export interface DrawerRow {
   marker: RowMarker | null
 }
 
-export type DrawerBlockKind = 'pinned' | 'day' | 'archived' | 'filtered'
+export type DrawerBlockKind = 'pinned' | 'day' | 'workspace' | 'archived' | 'filtered'
 
 /**
  * 块标题（eyebrow）的 i18n key —— 字面量联合：组件 `t()` 直接受，
@@ -104,6 +104,7 @@ export interface DrawerBlock {
 export interface DrawerBlocksInput {
   sessions: readonly DrawerSessionInput[]
   pinnedIds: readonly string[]
+  pinnedAuthoritative?: boolean
   archivedIds: readonly string[]
   /** [R8] 缓存里还有、服务端这次没给的行 */
   ghostIds?: readonly string[]
@@ -112,6 +113,8 @@ export interface DrawerBlocksInput {
   /** 活动会话的待确认不计（用户已经在这个会话里；与 [R9] 红点同一口径） */
   activeSessionId: string | null
   filter: DrawerFilter
+  /** The selected Workspace's sessionIds are already in the Host's order. */
+  preserveOrder?: boolean
   /** 时钟注入（分桶按它算；跨午夜重渲染自然翻篇） */
   now: number
 }
@@ -209,7 +212,7 @@ export const buildDrawerRows = (input: DrawerRowsInput): DrawerRow[] => {
       id: session.id,
       title: session.title ?? '',
       updatedAt: toMillis(session.updatedAt) ?? 0,
-      pinned: pinnedSet.has(session.id) || session.pinned === true,
+      pinned: pinnedSet.has(session.id) || (input.pinnedAuthoritative !== true && session.pinned === true),
       archived,
       ghost,
       running,
@@ -261,12 +264,13 @@ export const buildDrawerBlocks = (input: DrawerBlocksInput): DrawerBlock[] => {
   if (pinnedRows.length > 0) {
     blocks.push({ kind: 'pinned', labelKey: 'remoteDrawerPinned', rows: pinnedRows })
   }
-  const dayRows = rows.filter((row) => !row.pinned && !row.archived)
-  // `rows` 已按 updatedAt 倒序排过，`filter` 保序 ⇒ 桶内自然保持倒序
-  for (const bucket of DAY_ORDER) {
-    const bucketRows = dayRows.filter((row) => dayBucketOf(row.updatedAt, input.now) === bucket)
-    if (bucketRows.length > 0) {
-      blocks.push({ kind: 'day', bucket, labelKey: DAY_LABEL_KEYS[bucket], rows: bucketRows })
+  const regularRows = rows.filter((row) => !row.pinned && !row.archived)
+  if (input.preserveOrder) {
+    if (regularRows.length > 0) blocks.push({ kind: 'workspace', rows: regularRows })
+  } else {
+    for (const bucket of DAY_ORDER) {
+      const bucketRows = regularRows.filter((row) => dayBucketOf(row.updatedAt, input.now) === bucket)
+      if (bucketRows.length > 0) blocks.push({ kind: 'day', bucket, labelKey: DAY_LABEL_KEYS[bucket], rows: bucketRows })
     }
   }
   const archivedRows = rows.filter((row) => row.archived)

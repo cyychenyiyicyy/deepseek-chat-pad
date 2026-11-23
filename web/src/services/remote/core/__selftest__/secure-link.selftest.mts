@@ -31,9 +31,12 @@ import {
   SecureMessageCodec,
   createControlFrame,
   createEvent,
+  createRelayDataFrame,
   decodeControlFrame,
   decodeMessage,
+  decodeRelayDataFrame,
   encodeControlFrame,
+  encodeRelayDataFrame,
   type ConnectRequestPayload,
   type ControlFrameType,
   type HelloPayload,
@@ -197,13 +200,26 @@ class FakeHost {
   private readonly codecIn = new SecureMessageCodec()
   private noise: NoiseIkSession | undefined
   private counter = 0
+  private relayAttached = false
 
   constructor(
     private readonly bridge: BridgeSocket,
     private readonly heartbeatIntervalMs = 25_000,
+    private readonly independentRelay?: BridgeSocket,
   ) {
     bridge.onText(text => {
       void this.onControlText(text)
+    })
+    independentRelay?.onText(text => {
+      const frame = decodeRelayDataFrame(text)
+      if (frame.type === 'relay.attach') {
+        assertEqual(frame.payload, { connectionId: CONNECTION_ID, deviceId: CLIENT_DEVICE_ID,
+          peerDeviceId: HOST_DEVICE_ID, ticket: 'fixture-relay-ticket' }, 'relay attach authority')
+        this.relayAttached = true
+        independentRelay.sendText(encodeRelayDataFrame(createRelayDataFrame('relay.ready', { connectionId: CONNECTION_ID, epoch: 1 })))
+      } else if (frame.type === 'relay') {
+        this.onRelay(frame.payload as unknown as RelayPayload)
+      }
     })
   }
 
@@ -218,12 +234,14 @@ class FakeHost {
     const bytes = new TextEncoder().encode(JSON.stringify(envelope))
     for (const fragment of this.codecOut.encode(bytes)) {
       const ciphertext = noise.encrypt(fragment)
-      this.sendControl('relay', {
+      const payload = {
         connectionId: CONNECTION_ID,
         targetDeviceId: CLIENT_DEVICE_ID,
         counter: this.counter,
         ciphertext: toBase64Url(ciphertext),
-      })
+      }
+      if (this.independentRelay) this.independentRelay.sendText(encodeRelayDataFrame(createRelayDataFrame('relay', payload)))
+      else this.sendControl('relay', payload)
       this.counter += 1
       this.relayFramesSent += 1
     }
@@ -278,10 +296,14 @@ class FakeHost {
       case 'connect.request': {
         const payload = frame.payload as ConnectRequestPayload
         assert(payload.hostDeviceId === HOST_DEVICE_ID, 'connect.request 的 hostDeviceId 不对')
-        this.sendControl('connect.accepted', { connectionId: CONNECTION_ID })
+        this.sendControl('connect.accepted', {
+          connectionId: CONNECTION_ID,
+          ...(this.independentRelay ? { relayEndpoint: 'wss://relay.selftest.invalid/ws/v1/relay', relayTicket: 'fixture-relay-ticket', relayEpoch: 1 } : {}),
+        })
         return
       }
       case 'transport.selected':
+        if (this.independentRelay) assert(this.relayAttached, 'relay must be ready before selection')
         this.transportSelections.push(frame.payload as TransportSelectedPayload)
         return
       case 'secure.handshake':
@@ -375,10 +397,12 @@ interface Harness {
 async function createHarness(options: Partial<SecureLinkOptions> & {
   heartbeatIntervalMs?: number
   hostOptions?: { heartbeatIntervalMs?: number; capabilitiesOverride?: string[] }
+  independentRelay?: boolean
 } = {}): Promise<Harness> {
   const clientKeys = generateKeyPair()
   const { page, host: hostSide } = createMemoryBridgePair()
-  const host = new FakeHost(hostSide, options.hostOptions?.heartbeatIntervalMs ?? 25_000)
+  const relay = options.independentRelay ? createMemoryBridgePair() : undefined
+  const host = new FakeHost(hostSide, options.hostOptions?.heartbeatIntervalMs ?? 25_000, relay?.host)
   host.clientPublicKey = clientKeys.publicKey
   if (options.hostOptions?.capabilitiesOverride !== undefined) {
     host.capabilitiesOverride = options.hostOptions.capabilitiesOverride
@@ -397,6 +421,7 @@ async function createHarness(options: Partial<SecureLinkOptions> & {
     onStreamEvent: (streamId, payload) => streamEvents.push({ streamId, payload }),
     onFrame: frame => frames.push(frame),
     ...options,
+    ...(relay ? { relayBridge: () => relay.page } : {}),
   }, page)
   return { link, host, page, states, streamEvents, frames }
 }
@@ -408,6 +433,18 @@ async function readyHarness(options?: Parameters<typeof createHarness>[0]): Prom
 }
 
 // ── 用例 ──────────────────────────────────────────────────────────────────
+
+test('independent relay attaches before Noise and carries the encrypted RPC', async () => {
+  const { link, host } = await readyHarness({ independentRelay: true })
+  try {
+    host.onRpc = request => request.params
+    assertEqual(await link.rpc('echo', { value: 'encrypted' }), { value: 'encrypted' }, 'independent relay round-trip')
+    assert(!host.controlTypes.includes('relay'), 'ciphertext must not enter the control socket')
+    assertEqual(host.relayFramesReceived, 1, 'node socket carries the ciphertext')
+  } finally {
+    link.close()
+  }
+})
 
 test('1. 分片重组：>48 KiB 明文双向传输（并在途分片可数）', async () => {
   const { link, host } = await readyHarness()

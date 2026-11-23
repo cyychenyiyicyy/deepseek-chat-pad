@@ -11,8 +11,9 @@
 
 .overlay {
   position: fixed;
-  inset: 0;
-  z-index: 40;
+  inset: var(--app-viewport-top, 0px) 0 0;
+  height: var(--app-viewport-height, 100dvh);
+  z-index: 850;
   display: flex;
   justify-content: flex-end;
   background-color: rgb(0 0 0 / 28%);
@@ -36,10 +37,19 @@
 
 /* 平板 / 桌面：右栏（比新建会话面板窄一点：文件树不需要那么宽） */
 .panelSide {
-  width: min(380px, 92vw);
+  width: min(390px, 92vw);
   height: 100%;
   border-top-left-radius: 20px;
   border-bottom-left-radius: 20px;
+}
+
+.panelDocked {
+  flex: 0 0 clamp(280px, 25%, 360px);
+  min-width: 0;
+  border-left: 1px solid var(--dsw-alias-border-l2);
+  background-color: var(--dsw-specific-sidebar-fill);
+  box-shadow: none;
+  animation: none;
 }
 
 /* 手机：全屏 */
@@ -54,7 +64,8 @@
   align-items: center;
   gap: 6px;
   box-sizing: border-box;
-  padding: 12px 10px 10px 16px;
+  min-height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
+  padding: var(--ds-top-offset) 8px 0 16px;
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 
@@ -111,8 +122,9 @@
   align-items: center;
   gap: 4px;
   min-width: 0;
-  max-width: 60%;
-  padding: 3px 8px;
+  max-width: 68%;
+  min-height: 40px;
+  padding: 4px 10px;
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 100px;
   background: transparent;
@@ -394,6 +406,27 @@
   max-height: 58vh;
   object-fit: contain;
   border-radius: 6px;
+}
+
+.documentPager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 4px;
+}
+
+.documentPager button {
+  min-height: 40px;
+}
+
+.documentCanvas {
+  width: min(100%, 780px);
+  height: auto;
+  align-self: center;
+  border-radius: 6px;
+  background: #fff;
 }
 
 .binaryIcon {

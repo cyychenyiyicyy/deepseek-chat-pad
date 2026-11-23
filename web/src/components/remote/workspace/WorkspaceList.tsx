@@ -1,6 +1,8 @@
 import clsx from 'clsx'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslate } from '../../../i18n/index.js'
+import { useNewSessionStore } from '../../../services/remote/newSessionStore.js'
+import { workspaceSections } from '../../../services/remote/workspacePreferences.js'
 import {
   IconBrowseOutline16,
   IconCheckOutline16,
@@ -105,6 +107,8 @@ export const WorkspaceList = ({
   testId?: string
 }) => {
   const t = useTranslate()
+  const preferences = useNewSessionStore((state) => state.workspacePreferences)
+  const sections = workspaceSections(items, preferences)
   const [feedback, setFeedback] = useState<CopyFeedback | null>(null)
   const timerRef = useRef<number | null>(null)
 
@@ -129,85 +133,98 @@ export const WorkspaceList = ({
 
   return (
     <div className={styles.list} role="group" aria-label={label} data-testid={testId}>
-      {items.map((item) => {
-        const sessionCount = item.sessionCount
-        const showCount = sessionCount !== undefined && (sessionCount > 0 || item.countKnown === true)
-        const copied = feedback !== null && feedback.workspaceId === item.workspaceId
-        return (
-          <div
-            key={item.workspaceId}
-            className={clsx(
-              styles.row,
-              item.current === true && styles.rowCurrent,
-              item.disabled === true && styles.rowDisabled,
-            )}
-            data-workspace-id={item.workspaceId}
-            data-current={item.current === true ? '1' : undefined}
-            data-no-sessions={item.countKnown === true && sessionCount === 0 ? '1' : undefined}
-          >
-            <span className={styles.icon} aria-hidden>
-              <IconBrowseOutline16 />
-            </span>
-            <div className={styles.text}>
-              <button
-                type="button"
-                className={styles.titleButton}
-                aria-pressed={item.current === true}
-                aria-current={item.current === true ? 'true' : undefined}
-                disabled={item.disabled === true}
-                onClick={() => {
-                  if (item.disabled === true) return
-                  onSelect?.(item)
-                }}
-              >
-                <span className={styles.title}>{item.title}</span>
-                {showCount ? (
-                  <span className={styles.count}>
-                    {sessionCount === 0
-                      ? t('workspaces.noSessions')
-                      : t('workspaces.sessionCount', { count: sessionCount ?? 0 })}
-                  </span>
-                ) : null}
-                {item.current === true ? (
-                  <span className={styles.current}>
-                    <span className={styles.currentGlyph} aria-hidden>
-                      <IconCheckOutline16 />
-                    </span>
-                    {t('workspaces.current')}
-                  </span>
-                ) : null}
-              </button>
-              {/*
-                路径是**独立按钮**：点它只复制，不选中（否则想复制路径的人会被带去切工作区）。
-                `title` 给全长，行内按 CSS 省略。
-              */}
-              {item.path.length === 0 ? null : (
-                <button
-                  type="button"
-                  className={clsx(styles.pathButton, copied && styles.pathButtonActive)}
-                  title={item.path}
-                  aria-label={`${t('workspaces.copyPath')}: ${item.path}`}
-                  onClick={() => copy(item)}
-                >
-                  <span className={styles.path}>{item.path}</span>
-                  <span className={styles.copyGlyph} aria-hidden>
-                    <IconCopyOutline16 />
-                  </span>
-                  {copied ? (
-                    <span className={styles.copyHint} role="status">
-                      {feedback?.ok === true ? t('workspaces.copied') : t('workspaces.copyFailed')}
-                    </span>
-                  ) : null}
-                </button>
-              )}
-              {item.hint === undefined ? null : <div className={styles.hint}>{item.hint}</div>}
+      {sections.flatMap((section) => {
+        const title = section.kind === 'pinned' ? t('remoteWorkspacePinnedSection')
+          : section.name ?? (sections.length > 1 ? t('remoteWorkspaceOtherSection') : null)
+        return [
+          title === null ? null : (
+            <div className={styles.sectionTitle} key={section.kind === 'group' ? `group:${title}` : section.kind}>
+              {title}
             </div>
-          </div>
-        )
+          ),
+          ...section.items.map(renderItem),
+        ]
       })}
       {items.length === 0 && emptyHint !== undefined ? (
         <div className={styles.empty}>{emptyHint}</div>
       ) : null}
     </div>
   )
+
+  function renderItem(item: WorkspaceListItem) {
+    const sessionCount = item.sessionCount
+    const showCount = sessionCount !== undefined && (sessionCount > 0 || item.countKnown === true)
+    const copied = feedback !== null && feedback.workspaceId === item.workspaceId
+    return (
+      <div
+        key={`workspace:${item.workspaceId}`}
+        className={clsx(
+          styles.row,
+          item.current === true && styles.rowCurrent,
+          item.disabled === true && styles.rowDisabled,
+        )}
+        data-workspace-id={item.workspaceId}
+        data-current={item.current === true ? '1' : undefined}
+        data-no-sessions={item.countKnown === true && sessionCount === 0 ? '1' : undefined}
+      >
+        <span className={styles.icon} aria-hidden>
+          <IconBrowseOutline16 />
+        </span>
+        <div className={styles.text}>
+          <button
+            type="button"
+            className={styles.titleButton}
+            aria-pressed={item.current === true}
+            aria-current={item.current === true ? 'true' : undefined}
+            disabled={item.disabled === true}
+            onClick={() => {
+              if (item.disabled === true) return
+              onSelect?.(item)
+            }}
+          >
+            <span className={styles.title}>{item.title}</span>
+            {showCount ? (
+              <span className={styles.count}>
+                {sessionCount === 0
+                  ? t('workspaces.noSessions')
+                  : t('workspaces.sessionCount', { count: sessionCount ?? 0 })}
+              </span>
+            ) : null}
+            {item.current === true ? (
+              <span className={styles.current}>
+                <span className={styles.currentGlyph} aria-hidden>
+                  <IconCheckOutline16 />
+                </span>
+                {t('workspaces.current')}
+              </span>
+            ) : null}
+          </button>
+          {/*
+            路径是**独立按钮**：点它只复制，不选中（否则想复制路径的人会被带去切工作区）。
+            `title` 给全长，行内按 CSS 省略。
+          */}
+          {item.path.length === 0 ? null : (
+            <button
+              type="button"
+              className={clsx(styles.pathButton, copied && styles.pathButtonActive)}
+              title={item.path}
+              aria-label={`${t('workspaces.copyPath')}: ${item.path}`}
+              onClick={() => copy(item)}
+            >
+              <span className={styles.path}>{item.path}</span>
+              <span className={styles.copyGlyph} aria-hidden>
+                <IconCopyOutline16 />
+              </span>
+              {copied ? (
+                <span className={styles.copyHint} role="status">
+                  {feedback?.ok === true ? t('workspaces.copied') : t('workspaces.copyFailed')}
+                </span>
+              ) : null}
+            </button>
+          )}
+          {item.hint === undefined ? null : <div className={styles.hint}>{item.hint}</div>}
+        </div>
+      </div>
+    )
+  }
 }

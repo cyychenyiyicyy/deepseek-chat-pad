@@ -3,7 +3,7 @@ import { useTranslate } from '../../../i18n/index.js'
 import { formatSize, getExtension } from '../../../services/attachments.js'
 import { IconCloseFill14, IconRefreshOutline16 } from '../../base/icons.js'
 import { FileIcon } from '../../files/FileIcon.js'
-import { hasUploadingAttachment, useWorkspacePane, type DraftAttachment } from './workspacePaneStore.js'
+import { useWorkspacePane, type DraftAttachment } from './workspacePaneStore.js'
 import styles from './AttachmentTray.module.css'
 
 /**
@@ -20,8 +20,10 @@ import styles from './AttachmentTray.module.css'
  *  - 本地（读不到文件 / 超过上限）；
  *  - Host / 通道（`UPLOAD_*` / 两条通道都不可用）——`workspacePaneStore` 已经翻成人话。
  */
-export const AttachmentTray = ({ compact = false }: { compact?: boolean }) => {
-  const attachments = useWorkspacePane((state) => state.attachments)
+export const AttachmentTray = ({ compact = false, attachments }: {
+  compact?: boolean
+  attachments: readonly DraftAttachment[]
+}) => {
   const uploadError = useWorkspacePane((state) => state.uploadError)
   if (attachments.length === 0 && uploadError === null) return null
   return (
@@ -33,7 +35,6 @@ export const AttachmentTray = ({ compact = false }: { compact?: boolean }) => {
     </div>
   )
 }
-
 const AttachmentChip = ({ attachment }: { attachment: DraftAttachment }) => {
   const t = useTranslate()
   const ext = getExtension(attachment.name)
@@ -74,7 +75,7 @@ const AttachmentChip = ({ attachment }: { attachment: DraftAttachment }) => {
           </span>
         ) : null}
       </span>
-      {failed ? (
+      {failed && (attachment.bytes !== undefined || attachment.file !== undefined) ? (
         <button
           type="button"
           className={styles.chipAction}
@@ -95,6 +96,3 @@ const AttachmentChip = ({ attachment }: { attachment: DraftAttachment }) => {
     </div>
   )
 }
-
-/** 有没有附件正在上传（发送按钮据此禁用：receiptId 还没到手）。 */
-export const attachmentsBusy = (): boolean => hasUploadingAttachment(useWorkspacePane.getState().attachments)

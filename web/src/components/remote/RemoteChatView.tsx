@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useIsMobile } from '../../app/viewport.js'
 import { useTranslate } from '../../i18n/index.js'
 import { setSiderCollapsed, useSettings } from '../../services/settings.js'
@@ -10,12 +10,17 @@ import type {
   ChatMessage,
   ToolActivity,
 } from '../../services/remote/adapter.js'
-import { useRemoteStore, sendRemoteMessage, hydrateCachedTimeline } from '../../services/remote/store.js'
+import { historyEntriesFromRecords } from '../../services/remote/adapter.js'
+import { useRemotePaging, useRemoteStore, hydrateCachedTimeline, remoteDraftOwner, remoteSessionSelectionVersion } from '../../services/remote/store.js'
+import { RemoteVoiceInput } from './composer/RemoteVoiceInput.js'
+import { loadToolImage } from '../../services/remote/filesApi.js'
+import { forkPointBeforePrompt, isVisibleRemoteMessage, messageActionPoints } from '../../services/remote/messageActions.js'
+import { TERMINAL_CAPABILITY, type TerminalScope } from '../../services/remote/terminal.js'
 import {
   timelineHintState,
   timelineViewState,
 } from '../../services/remote/cache.js'
-import type { RemotePromptAttachment } from '../../services/remote/sessionsApi.js'
+import { describeRemoteError, lastRemoteTarget, pageHistory, type RemotePromptAttachment } from '../../services/remote/sessionsApi.js'
 import {
   commandLineOf,
   filterCommands,
@@ -35,7 +40,6 @@ import {
   patchMode,
   patchTimelineScroll,
   resolveActiveSession,
-  resolveDraftRestore,
   resolveTimelineScroll,
 } from '../../services/remote/uiState.js'
 import { Button } from '../base/Button.js'
@@ -48,6 +52,9 @@ import {
   IconNewChatOutline20,
 } from '../base/icons.js'
 import { Markdown } from '../markdown/Markdown.js'
+import { CopyButton } from '../messages/CopyButton.js'
+import { ReadAloudButton } from '../messages/ReadAloudButton.js'
+import { stopReadAloud, useReadAloud } from '../../services/speech/readAloud.js'
 import { openSettings } from '../settings/settingsDialogState.js'
 import { openMobileSider } from '../sider/mobileSiderState.js'
 import { ApprovalCard } from './ApprovalCard.js'
@@ -70,18 +77,28 @@ import {
   type ComposerSignals,
   type PromptMode,
 } from './composer/composerState.js'
-import { dispatchPrompt, supportsPromptMode } from './composer/promptMode.js'
+import { supportsPromptMode } from './composer/promptMode.js'
 // [R14 多 Host] 顶栏的「当前电脑 + 切换下拉」（组件内部自己判显隐，这里只挂一个点）
 import { HostSwitcher } from './HostSwitcher.js'
 import { NewSessionPage } from './new-session/NewSessionPage.js'
+import type { NewVoiceCall } from './RemoteVoiceCall.js'
 import { PlanProgressDock } from './plan/PlanProgressDock.js'
 import { useRemoteAvailability, useRemoteMode } from './RemoteModeSwitch.js'
-import { ToolCard } from './tool/ToolCard.js'
+import { RemoteImageStrip, ToolCard } from './tool/ToolCard.js'
 import { AttachmentButton } from './workspace/AttachmentButton.js'
 import { AttachmentTray } from './workspace/AttachmentTray.js'
-import { WorkspacePane } from './workspace/WorkspacePane.js'
-import { hasUploadingAttachment, readyReceipts, useWorkspacePane } from './workspace/workspacePaneStore.js'
+import { readyReceipts, useWorkspacePane, workspaceAttachmentOwner } from './workspace/workspacePaneStore.js'
 import styles from './RemoteChatView.module.css'
+
+const RemoteTerminal = lazy(() => import('./RemoteTerminal.js'))
+const RemoteJobs = lazy(() => import('./RemoteJobs.js'))
+const RemotePromptTools = lazy(() => import('./RemotePromptTools.js'))
+const RemoteSessionGoal = lazy(() => import('./RemoteSessionGoal.js'))
+const RemoteFeedback = lazy(() => import('./RemoteFeedback.js'))
+const RemoteConversationExport = lazy(() => import('./RemoteConversationExport.js'))
+const RemoteVoiceCall = lazy(() => import('./RemoteVoiceCall.js'))
+const RemoteSessionDetails = lazy(() => import('./RemoteSessionDetails.js'))
+type SessionTool = 'terminal' | 'jobs' | 'skills' | 'references' | 'goal' | 'feedback' | 'export' | 'voice' | 'details'
 
 /**
  * 远程会话页：顶栏（transport 徽标 + 模式切换）+ 时间线 + 审批卡片 + 吸底输入框。
@@ -140,7 +157,21 @@ export const RemoteChatView = () => {
   const transport = useRemoteStore((state) => state.transport)
   const sessions = useRemoteStore((state) => state.sessions)
   const activeSessionId = useRemoteStore((state) => state.activeSessionId)
+  const hasMoreHistory = useRemotePaging((state) => state.hasMore)
+  const loadingOlder = useRemotePaging((state) => state.loadingOlder)
+  const allowsTerminal = useRemoteStore((state) => state.capabilities.includes(TERMINAL_CAPABILITY))
+  const [sessionTool, setSessionTool] = useState<{ kind: SessionTool; scope: TerminalScope; messageId?: string } | null>(null)
+  const [newVoiceCall, setNewVoiceCall] = useState<NewVoiceCall | null>(null)
+  const closeNewVoiceCall = useCallback(() => setNewVoiceCall(null), [])
+  const hostId = useRemoteStore((state) => state.hostId ?? state.lastSession?.hostDeviceId ?? null)
+  const serverUrl = useRemoteStore((state) => state.activeServerUrl ?? state.lastSession?.serverUrl ?? null)
+  const owner = JSON.stringify([serverUrl, hostId])
   const items = useRemoteStore((state) => state.items)
+  const remoteCapabilities = useRemoteStore((state) => state.capabilities)
+  const canReadAloud = useSettings((state) => Boolean(state.apiKey))
+  useEffect(() => () => {
+    if (useReadAloud.getState().messageId?.startsWith('remote:')) stopReadAloud()
+  }, [serverUrl, hostId, activeSessionId])
   const streaming = useRemoteStore((state) => state.streaming)
   /** [R8 缓存] 内容来源 / 首次拉取是否结束：加载态三态与顶部提示全靠它 */
   const cacheStatus = useRemoteStore((state) => state.cacheStatus)
@@ -173,7 +204,15 @@ export const RemoteChatView = () => {
   const autoEnteredRef = useRef(false)
   /** 工作区文件能力（W3）：Host 回过 `METHOD_NOT_FOUND` 后入口整块隐藏（`null` = 还没探过） */
   const filesSupported = useWorkspacePane((state) => state.filesSupported)
-  const attachments = useWorkspacePane((state) => state.attachments)
+  const workspaceOpen = useWorkspacePane((state) => state.open)
+  const allAttachments = useWorkspacePane((state) => state.attachments)
+  const restoringAttachments = useWorkspacePane((state) => state.restoringAttachments)
+  const attachmentOwner = workspaceAttachmentOwner()
+  const attachments = useMemo(
+    () => allAttachments.filter((attachment) =>
+      attachment.owner === attachmentOwner && attachment.sessionId === activeSessionId),
+    [activeSessionId, allAttachments, attachmentOwner],
+  )
   // 原生桥探测：只在远程会话页挂载时发生（启动路径上没有任何探测）
   const { availability, retry } = useRemoteAvailability()
 
@@ -188,32 +227,72 @@ export const RemoteChatView = () => {
    * 的前提（等连接就绪再恢复，用户先看到的就是一屏空白）。
    */
   const bootUi = useMemo(() => loadBootUiState(), [])
-  const restoredSessionId = resolveActiveSession({ primary: bootUi.primary, fallback: bootUi.fallback })
-  const bootDraft = useMemo(
-    () =>
-      resolveDraftRestore({
-        primary: bootUi.primary,
-        fallback: bootUi.fallback,
-        sessionId: restoredSessionId,
-      }),
-    [bootUi, restoredSessionId],
-  )
-
-  const [draft, setDraft] = useState(bootDraft.text)
+  const [bootOwner] = useState(owner)
+  const restoredSessionId = owner === bootOwner
+    ? resolveActiveSession({ primary: bootUi.primary, fallback: bootUi.fallback, owner })
+    : null
+  const [drafts, setDrafts] = useState(() => new Map(Object.entries(
+    (bootUi.primary ?? bootUi.fallback)?.drafts ?? {},
+  )))
+  const [initialHostId] = useState(hostId)
+  const [initialServerUrl] = useState(serverUrl)
+  const draftsRef = useRef(drafts)
+  const writeDraft = useCallback((key: string, text: string, legacyKey: string | null = null) => {
+    const next = new Map(draftsRef.current)
+    if (legacyKey !== null) {
+      next.delete(legacyKey)
+      patchDraft(legacyKey, '')
+    }
+    if (text === '') next.delete(key)
+    else next.set(key, text)
+    draftsRef.current = next
+    setDrafts(next)
+    patchDraft(key, text)
+  }, [])
+  const draftSessionId = view === 'new-session' ? null : activeSessionId ?? restoredSessionId
+  const savedSession = useRemoteStore((state) => state.lastSession)
+  const draftPeer = useMemo(() => remoteDraftOwner(true), [phase, savedSession, hostId, serverUrl])
+  const [initialDraftPeer] = useState(draftPeer)
+  const previousScopedDraftKey = JSON.stringify([serverUrl, hostId, draftSessionId])
+  const draftKey = draftPeer !== null ? JSON.stringify([draftPeer, draftSessionId]) :
+    hostId === null ? draftSessionId ?? '' : previousScopedDraftKey
+  const previousDraftKey = JSON.stringify([hostId, draftSessionId])
+  const canRestoreLegacy = hostId !== null && hostId === initialHostId && serverUrl === initialServerUrl && draftPeer === initialDraftPeer
+  const legacyDraftKey = !canRestoreLegacy ? null : drafts.has(previousScopedDraftKey) && draftKey !== previousScopedDraftKey ? previousScopedDraftKey
+    : drafts.has(previousDraftKey) ? previousDraftKey
+    : draftSessionId === restoredSessionId ? restoredSessionId ?? '' : null
+  const draft = drafts.get(draftKey) ?? (legacyDraftKey === null ? '' : drafts.get(legacyDraftKey) ?? '')
+  const setDraft = useCallback((text: string) => writeDraft(draftKey, text, legacyDraftKey),
+    [draftKey, legacyDraftKey, writeDraft])
+  const restoreDraft = useCallback((text: string) => {
+    if (!draftsRef.current.has(draftKey)) setDraft(text)
+  }, [draftKey, setDraft])
   /** 时间线要滚回的位置（`null` = 没有要恢复的；用掉一次就清空） */
   const pendingScrollRef = useRef<number | null>(
     resolveTimelineScroll({
       primary: bootUi.primary,
       fallback: bootUi.fallback,
       sessionId: restoredSessionId,
+      owner: bootOwner,
     }),
   )
   /** 草稿 / 滚动位置该记在哪个会话名下（会话还没开起来时用恢复目标） */
-  const sessionKeyRef = useRef<string | null>(restoredSessionId)
-  const draftRef = useRef(draft)
   const scrollSavedAtRef = useRef(0)
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const acceptDictation = (transcript: string) => {
+    const input = textareaRef.current
+    if (!input) return
+    const text = input.value
+    const start = input.selectionStart
+    const end = input.selectionEnd
+    setDraft(text.slice(0, start) + transcript + text.slice(end))
+    requestAnimationFrame(() => {
+      if (textareaRef.current !== input || !input.isConnected) return
+      input.focus({ preventScroll: true })
+      input.setSelectionRange(start + transcript.length, start + transcript.length)
+    })
+  }
   const stickyRef = useRef(true)
   const scrollTopRef = useRef(0)
   const olderPendingRef = useRef(false)
@@ -238,8 +317,51 @@ export const RemoteChatView = () => {
   const [sendMode, setSendMode] = useState<PromptMode>('steer')
   /** 停止请求 10s 没回执：主按钮从停止还原成发送 */
   const [stopTimedOut, setStopTimedOut] = useState(false)
+  const [sendingKeys, setSendingKeys] = useState<ReadonlySet<string>>(() => new Set())
+  const sendsInProgress = useRef(new Set<string>())
 
   const ready = phase === 'ready'
+  const openSessionTool = (kind: SessionTool, messageId?: string) => {
+    const target = lastRemoteTarget()
+    if (!target || !activeSessionId) return
+    const selection = remoteSessionSelectionVersion()
+    setSessionTool({ kind, messageId, scope: {
+      target,
+      sessionId: activeSessionId,
+      current: () => {
+        const state = useRemoteStore.getState()
+        return state.phase === 'ready' && state.activeSessionId === activeSessionId &&
+          remoteSessionSelectionVersion() === selection && !useNewSessionStore.getState().open
+      },
+    } })
+  }
+
+  const openNewVoiceCall = () => {
+    const target = lastRemoteTarget()
+    if (!target) return
+    let selection = remoteSessionSelectionVersion()
+    const ownsSelection = () => useRemoteStore.getState().phase === 'ready' &&
+      lastRemoteTarget() === target && remoteSessionSelectionVersion() === selection
+    const current = () => ownsSelection() && useNewSessionStore.getState().open
+    setNewVoiceCall({
+      target,
+      current,
+      start: async (text, signal, onDispatch) => {
+        if (!current()) return false
+        const sent = await useNewSessionStore.getState().createAndSend(text, {
+          signal,
+          onDispatch: (sessionId, before, requestId) => {
+            selection = remoteSessionSelectionVersion()
+            onDispatch({ before, requestId, scope: {
+              target, sessionId,
+              current: () => ownsSelection() && useRemoteStore.getState().activeSessionId === sessionId,
+            } })
+          },
+        })
+        return sent
+      },
+    })
+  }
 
   /*
    * [R10] 掉线自愈的文案（**中性**）：连接断了不等于凭据失效 —— 后台待久了服务端会踢掉连接
@@ -354,33 +476,32 @@ export const RemoteChatView = () => {
    * ② 连上之后再把会话真正打开（`openSession` 才会挂 follow 流、落定快照）。
    *    `restoreIntentRef` 只能用一次：之后用户点哪个会话就是哪个，绝不把他拽回旧会话。
    */
-  const restoreIntentRef = useRef<string | null>(restoredSessionId)
+  const restoreIntentRef = useRef(true)
 
   useEffect(() => {
     if (restoredSessionId === null) return
     hydrateCachedTimeline(restoredSessionId)
-    patchActiveSession(restoredSessionId)
   }, [restoredSessionId])
 
   useEffect(() => {
-    if (!ready) return
-    const target = restoreIntentRef.current
-    if (target === null) return
+    if (owner !== bootOwner) restoreIntentRef.current = false
+    if (!ready || !restoreIntentRef.current || restoredSessionId === null) return
+    const target = restoredSessionId
     if (activeSessionId !== null && activeSessionId !== target) {
       // 用户自己开了别的会话：这次恢复意图作废
-      restoreIntentRef.current = null
+      restoreIntentRef.current = false
       return
     }
     // 列表还没到就等它（effect 依赖 sessions）；列表里没有这个会话就别去点它，
     // 那只会换来一条「会话不存在」的报错 —— 而它大概真的已经被删了
     if (sessions.length === 0) return
     if (!sessions.some((session) => session.id === target)) {
-      restoreIntentRef.current = null
+      restoreIntentRef.current = false
       return
     }
-    restoreIntentRef.current = null
+    restoreIntentRef.current = false
     fireAndForget(() => useRemoteStore.getState().openSession(target))
-  }, [ready, activeSessionId, sessions])
+  }, [ready, activeSessionId, sessions, owner, bootOwner, restoredSessionId])
 
   /*
    * ── [S1 无感重载] 草稿 / 原生中转箱 ──────────────────────────────────
@@ -392,13 +513,6 @@ export const RemoteChatView = () => {
    * 真正救命的是下面 `visibilitychange → hidden` 时的 `flushUiState()`：
    * 系统回收渲染进程发生在**切走之后**，那是最后一次能写的机会。
    */
-  const draftSessionKey = activeSessionId ?? restoredSessionId
-  useEffect(() => {
-    sessionKeyRef.current = draftSessionKey
-    draftRef.current = draft
-    patchDraft(draftSessionKey, draft)
-  }, [draft, draftSessionKey])
-
   /*
    * 「重载后回哪个会话」必须跟着**当前会话**走。
    *
@@ -407,20 +521,21 @@ export const RemoteChatView = () => {
    * 保留上一次的选择，重新连上时仍然回到那里。
    */
   useEffect(() => {
-    if (activeSessionId !== null) patchActiveSession(activeSessionId)
-  }, [activeSessionId])
+    if (activeSessionId !== null) patchActiveSession(activeSessionId, owner)
+  }, [activeSessionId, owner])
 
   /*
    * [R15] 任何路径打开了会话（列表点击 / 通知直达 / 派生完进新会话），都要把「新对话」
    * 整页让出来：`openSession` 只改 `activeSessionId`，视图归 `newSessionStore.open` 管 ——
    * 不补这一刀，新对话页会一直挡在内容区前面（真机反馈：会话列表点了没反应）。
    * 列表那一侧行点击已经先关了一次；这里兜住其余入口。`closePanel` 幂等、不动 notice / 草稿，
-   * `createAndSend` 的建会话路径走到这里也只是提前一拍关掉（`finishOpen` 自己还要关一次）。
+   * 新建时保留输入区，等首条消息的发送结果。
    */
   useEffect(() => {
     if (activeSessionId === null) return
-    if (!useNewSessionStore.getState().open) return
-    useNewSessionStore.getState().closePanel()
+    const panel = useNewSessionStore.getState()
+    if (!panel.open || (panel.creating && panel.lastCreatedSessionId === activeSessionId)) return
+    panel.closePanel()
   }, [activeSessionId])
 
   useEffect(() => {
@@ -429,8 +544,10 @@ export const RemoteChatView = () => {
     patchMode(useRemoteMode.getState().mode)
     const unsubscribe = useRemoteMode.subscribe((state) => patchMode(state.mode))
     const flush = (): void => {
-      patchDraft(sessionKeyRef.current, draftRef.current)
-      patchTimelineScroll(sessionKeyRef.current, scrollTopRef.current)
+      const state = useRemoteStore.getState()
+      const currentOwner = JSON.stringify([state.activeServerUrl ?? state.lastSession?.serverUrl ?? null,
+        state.hostId ?? state.lastSession?.hostDeviceId ?? null])
+      patchTimelineScroll(state.activeSessionId, scrollTopRef.current, currentOwner)
       flushUiState()
     }
     const onVisibility = (): void => {
@@ -456,7 +573,7 @@ export const RemoteChatView = () => {
    */
   useEffect(() => {
     void useWorkspacePane.getState().bind(ready ? activeSessionId : null)
-  }, [ready, activeSessionId])
+  }, [ready, activeSessionId, attachmentOwner])
 
   /*
    * 能力探测（W1/W6）挂在这里，而不是挂在「新建会话」那一页里。
@@ -525,9 +642,9 @@ export const RemoteChatView = () => {
     const now = Date.now()
     if (activeSessionId !== null && now - scrollSavedAtRef.current > SCROLL_SAVE_INTERVAL_MS) {
       scrollSavedAtRef.current = now
-      patchTimelineScroll(activeSessionId, el.scrollTop)
+      patchTimelineScroll(activeSessionId, el.scrollTop, owner)
     }
-    if (el.scrollTop < LOAD_OLDER_THRESHOLD && !olderPendingRef.current && items.length > 0) {
+    if (hasMoreHistory && el.scrollTop < LOAD_OLDER_THRESHOLD && !olderPendingRef.current && items.length > 0) {
       olderPendingRef.current = true
       fireAndForget(() => useRemoteStore.getState().loadOlder())
     }
@@ -545,30 +662,42 @@ export const RemoteChatView = () => {
    * 所以这里不再拦 `streaming`：原来那句 `if (!ready || streaming) return`
    * 正是「工作中发不出去」的根因。
    *
-   * 附件路径暂时只能是 `queue`：`sendRemoteMessage` 还没有 mode 参数（见 `promptMode.ts`）。
+   * 文字和附件走同一个会话发送入口。
    */
   const send = useCallback(
     (mode: PromptMode) => {
-      if (!ready) return
+      const target = lastRemoteTarget()
+      const remote = useRemoteStore.getState()
+      if (!ready || target === null || activeSessionId === null ||
+          remote.hostId !== hostId || remote.activeSessionId !== activeSessionId ||
+          sendsInProgress.current.has(draftKey)) return
       const text = draft.trim()
-      const receipts = readyReceipts(useWorkspacePane.getState().attachments)
+      const workspace = useWorkspacePane.getState()
+      if (workspace.restoringAttachments || workspaceAttachmentOwner() !== attachmentOwner || workspace.scopeId !== activeSessionId ||
+        workspace.attachmentTarget !== target) return
+      const current = workspace.attachments.filter((attachment) =>
+        attachment.owner === attachmentOwner && attachment.sessionId === activeSessionId)
+      if (current.some((attachment) => attachment.status !== 'done')) return
+      const receipts = readyReceipts(current)
       if (text.length === 0 && receipts.length === 0) return
       const blocks: RemotePromptAttachment[] = receipts.map((receiptId) => ({ type: 'file', receiptId }))
-      // 乐观清空：与本地输入框一致，发出去就不再占着输入框；失败原因由数据层写回时间线
+      sendsInProgress.current.add(draftKey)
+      setSendingKeys(new Set(sendsInProgress.current))
       setDraft('')
-      useWorkspacePane.getState().clearAttachments()
-      if (blocks.length > 0) {
-        // 附件入口（`sendRemoteMessage` = `store.sendFlow`）第三参就是 mode：
-        // 数据层没接 mode 时传 undefined，退回 Host 默认的 queue
-        const supportsMode = supportsPromptMode(useRemoteStore.getState())
-        fireAndForget(() => sendRemoteMessage(text, blocks, supportsMode ? mode : undefined))
-        return
-      }
-      const applied = dispatchPrompt(useRemoteStore.getState(), text, mode)
-      // sender 形状不认识（数据层重构过）：把草稿还回去，别吞用户输入
-      if (applied === null) setDraft(text)
+      void remote.sendToSession(target, activeSessionId, text, blocks, mode).then((sent) => {
+        if (!sent) {
+          restoreDraft(draft)
+          return
+        }
+        for (const attachment of current) {
+          workspace.removeAttachment(attachment.id)
+        }
+      }).finally(() => {
+        sendsInProgress.current.delete(draftKey)
+        setSendingKeys(new Set(sendsInProgress.current))
+      })
     },
-    [draft, ready],
+    [activeSessionId, attachmentOwner, draft, draftKey, hostId, ready, restoreDraft, setDraft],
   )
 
   /*
@@ -619,7 +748,7 @@ export const RemoteChatView = () => {
         }
       })()
     },
-    [executeCommand],
+    [executeCommand, setDraft],
   )
 
   // 结果行几秒后自己消失（它只是「刚才那条命令回了什么」，不是时间线内容）
@@ -638,9 +767,134 @@ export const RemoteChatView = () => {
     const end = line.length
     // 受控组件：值更新后再落光标，放在下一帧
     window.requestAnimationFrame(() => el.setSelectionRange(end, end))
-  }, [])
+  }, [setDraft])
+
+  const usePromptTool = (text: string, fresh: boolean, path?: string) => {
+    if (fresh) {
+      const state = useNewSessionStore.getState()
+      const normalize = (value: string) => value.replaceAll('\\', '/')
+      const workspace = path && state.workspaces.find((item) => item.sessionIds.includes(activeSessionId ?? '') &&
+        item.path && normalize(path).startsWith(normalize(item.path).replace(/\/?$/u, '/')))
+      const peer = remoteDraftOwner()
+      if (!peer) return
+      const freshKey = JSON.stringify([peer, null])
+      const priorScopedKey = JSON.stringify([serverUrl, hostId, null])
+      const oldKey = JSON.stringify([hostId, null])
+      const legacyKey = canRestoreLegacy && draftsRef.current.has(priorScopedKey) ? priorScopedKey : canRestoreLegacy ? oldKey : null
+      const previous = draftsRef.current.get(freshKey) ?? (legacyKey ? draftsRef.current.get(legacyKey) : undefined) ?? ''
+      state.openPanel()
+      if (workspace) state.selectWorkspace(workspace.workspaceId)
+      writeDraft(freshKey, text + previous, legacyKey)
+      window.requestAnimationFrame(() => {
+        if (useNewSessionStore.getState().open && remoteDraftOwner() === peer) textareaRef.current?.focus()
+      })
+      return
+    }
+    const input = textareaRef.current
+    if (sessionTool?.kind === 'skills') {
+      insertCommand(text + draft)
+      return
+    }
+    const start = input?.selectionStart ?? draft.length
+    const end = input?.selectionEnd ?? start
+    const lead = start > 0 && !/\s/u.test(draft[start - 1] ?? '') ? ' ' : ''
+    const inserted = lead + text
+    setDraft(draft.slice(0, start) + inserted + draft.slice(end))
+    window.requestAnimationFrame(() => {
+      if (input !== textareaRef.current) return
+      input?.focus()
+      input?.setSelectionRange(start + inserted.length, start + inserted.length)
+    })
+  }
 
   const lastIndex = items.length - 1
+  const actionPoints = useMemo(() => messageActionPoints(items), [items])
+  const messageActionInFlight = useRef(false)
+  const [messageActionBusy, setMessageActionBusy] = useState(false)
+  const sessionActionBusy = useNewSessionStore((state) => state.busySessionId !== null)
+  const canForkMessage = ready && cacheStatus.timelineSettled && !cacheStatus.timelineFailed
+
+  const forkMessage = async (kind: 'branch' | 'edit' | 'regenerate', item: ChatMessage) => {
+    if (!canForkMessage || hostId === null || activeSessionId !== item.sessionId || messageActionInFlight.current) return
+    const target = lastRemoteTarget()
+    const peer = remoteDraftOwner()
+    const selection = remoteSessionSelectionVersion()
+    if (target === null || peer === null) return
+    const isCurrent = () => lastRemoteTarget() === target &&
+      remoteSessionSelectionVersion() === selection && !useNewSessionStore.getState().open &&
+      useRemoteStore.getState().activeSessionId === item.sessionId
+    if (!isCurrent()) return
+
+    messageActionInFlight.current = true
+    setMessageActionBusy(true)
+    try {
+      let cut = kind === 'branch' ? actionPoints.branch.get(item.id) : undefined
+      if (kind !== 'branch' && item.nativeSeq !== undefined && item.nativeSeq > 0) {
+        const history = await pageHistory(target, item.sessionId, {
+          beforeSeq: item.nativeSeq, throughSeq: item.nativeSeq - 1,
+        })
+        if (!isCurrent()) return
+        cut = forkPointBeforePrompt(historyEntriesFromRecords(history.records), item.nativeSeq)
+      }
+      if (cut === undefined) {
+        showToast(t('remoteMessageNoEarlierHistory'))
+        return
+      }
+
+      const original = stripDsml(item.text)
+      const images: RemotePromptAttachment[] = []
+      if (kind === 'regenerate') {
+        for (const image of item.images ?? []) {
+          if (!isCurrent()) return
+          const source = await loadToolImage(image, item.sessionId)
+          const data = source?.match(/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/u)
+          if (data === undefined || data === null) throw new Error(t('remoteMessageImageUnavailable'))
+          images.push({ type: 'image', mediaType: data[1], data: data[2], ...(image.name ? { name: image.name } : {}) })
+        }
+      }
+      if (!isCurrent()) return
+      const forkId = await useNewSessionStore.getState().fork(item.sessionId, cut)
+      if (forkId === null) return
+      if (kind === 'edit') {
+        if (lastRemoteTarget() !== target || remoteDraftOwner() !== peer) return
+        writeDraft(JSON.stringify([peer, forkId]), original)
+        window.requestAnimationFrame(() => {
+          if (remoteDraftOwner() === peer && useRemoteStore.getState().activeSessionId === forkId) textareaRef.current?.focus()
+        })
+        showToast(t(item.hasFiles || item.images?.length ? 'remoteMessageForkReattach' : 'remoteMessageForked'))
+      } else if (kind === 'regenerate') {
+        await useRemoteStore.getState().sendToSession(target, forkId, original, images)
+      } else {
+        showToast(t('remoteMessageForked'))
+      }
+    } catch (error) {
+      if (isCurrent()) showToast(describeRemoteError(error).text)
+    } finally {
+      messageActionInFlight.current = false
+      setMessageActionBusy(false)
+    }
+  }
+  const lastMessage = useMemo(() => items.findLast(
+    (item) => item.kind === 'message' && !item.context && !item.usageOnly && stripDsml(item.text).trim() !== '',
+  ), [items])
+  const recoverMessage = ready && !streaming && queueLength === 0 &&
+    cacheStatus.timelineSettled && !cacheStatus.timelineFailed && lastMessage?.kind === 'message' &&
+    lastMessage.role === 'user' && !lastMessage.id.startsWith('local:') ? lastMessage.id : null
+  const retryDelivery = (item: ChatMessage) => {
+    const target = lastRemoteTarget()
+    if (target === null || item.sessionId !== activeSessionId || item.requestRpcId === undefined) return
+    fireAndForget(() => useRemoteStore.getState().retryPrompt(target, item.sessionId, item.requestRpcId!))
+  }
+  const reuseMessage = (text: string) => {
+    if (draft.trim().length > 0 || text.trim().length === 0) return
+    setDraft(text)
+    textareaRef.current?.focus()
+  }
+  const quoteMessage = (text: string) => {
+    const quote = text.trim().split(/\r?\n/).map((line) => `> ${line}`).join('\n')
+    const current = draft.trimEnd()
+    insertCommand(current.length > 0 ? `${current}\n\n${quote}\n\n` : `${quote}\n\n`)
+  }
 
   /*
    * [R8 缓存] 加载态三态（判定全是纯函数，见 `services/remote/cache.ts`）：
@@ -687,7 +941,8 @@ export const RemoteChatView = () => {
       draft,
       // [R17] 新对话页把「草稿附件数」当可发内容（空文本 + 有附件也是合法消息）
       attachments: view === 'new-session' ? newDraftFiles.length : readyReceipts(attachments).length,
-      attachmentsBusy: view === 'new-session' ? false : hasUploadingAttachment(attachments),
+      attachmentsBusy: view === 'new-session' ? false :
+        restoringAttachments || sendingKeys.has(draftKey) || attachments.some((attachment) => attachment.status !== 'done'),
       knownCommand: view === 'new-session' ? false : knownCommand,
       slashTyping: view === 'new-session' ? false : slashQuery(draft) !== null,
       ...(view === 'new-session' ? { newChat: true, creating: creatingSession } : {}),
@@ -701,6 +956,9 @@ export const RemoteChatView = () => {
       queueLength,
       draft,
       attachments,
+      restoringAttachments,
+      draftKey,
+      sendingKeys,
       knownCommand,
       view,
       creatingSession,
@@ -722,7 +980,7 @@ export const RemoteChatView = () => {
     /*
      * [R15] dsh-Go 的 `_ensureSession`：选好选项直接发，发出去了才建会话。
      * 乐观清空输入框；建不出来（原因已在页面那行红字上）就把草稿还回去。
-     * `finishOpen` 会把这一页关掉，所以「权限没生效 / 模型没应用」这类打了折扣的
+     * 首条消息发送后会把这一页关掉，所以「权限没生效 / 模型没应用」这类打了折扣的
      * notice 在这里 toast 出来 —— 页面已经切走了，留在页面里没人看得见。
      */
     if (view === 'new-session') {
@@ -734,7 +992,7 @@ export const RemoteChatView = () => {
       setDraft('')
       void Promise.resolve(useNewSessionStore.getState().createAndSend(text)).then((sent) => {
         if (!sent) {
-          setDraft(text)
+          restoreDraft(draft)
           return
         }
         const notice = useNewSessionStore.getState().notice
@@ -749,7 +1007,7 @@ export const RemoteChatView = () => {
       return
     }
     send(intent === 'steer' ? 'steer' : 'queue')
-  }, [draft, ready, view, canCreateSession, creatingSession, newDraftFiles, runCommand, send, signals])
+  }, [draft, ready, view, canCreateSession, creatingSession, newDraftFiles, restoreDraft, runCommand, send, setDraft, signals])
 
   /**
    * 生成中：主按钮变停止（`session/cancel`）。
@@ -791,10 +1049,17 @@ export const RemoteChatView = () => {
    * 附件入口不出现：附件收据是「当前会话」作用域的（`workspacePaneStore.bind`），
    * 而这一页还没有会话 —— 传了也是发不出去的收据。
    */
+  const newCallDialog = newVoiceCall && (
+    <Suspense key="new-voice-call" fallback={null}>
+      <RemoteVoiceCall draft={newVoiceCall} onClose={closeNewVoiceCall} />
+    </Suspense>
+  )
   if (view === 'new-session') {
     return (
       <div className={styles.view}>
         <NewSessionPage
+          modalOpen={newVoiceCall !== null}
+          onVoiceCall={canReadAloud && ready && canCreateSession && !creatingSession ? openNewVoiceCall : undefined}
           footer={
             <div className={styles.footer}>
               {/* [R17] 附件草稿条：新对话页的文件只入草稿，建完会话才上传 */}
@@ -825,10 +1090,11 @@ export const RemoteChatView = () => {
                      * [R17] 附件入口：上传通道是会话级的，这里还没有会话 ——
                      * 选中的文件只进草稿，`createAndSend` 建完会话再传。
                      */
-                    <AttachmentButton
-                      disabled={!ready || !canCreateSession}
-                      onFiles={(files) => useNewSessionStore.getState().addDraftFiles(files)}
-                    />
+                    <>
+                      <AttachmentButton key={draftKey} disabled={!ready || !canCreateSession}
+                        onFiles={(files) => useNewSessionStore.getState().addDraftFiles(files)} />
+                      {canReadAloud && ready && canCreateSession && <RemoteVoiceInput key={'new-voice:' + draftKey} onText={acceptDictation} />}
+                    </>
                   }
                   onSubmit={submit}
                   onStop={stop}
@@ -839,6 +1105,7 @@ export const RemoteChatView = () => {
             </div>
           }
         />
+        {newCallDialog}
       </div>
     )
   }
@@ -852,7 +1119,7 @@ export const RemoteChatView = () => {
       <div className={styles.header}>
         {isMobile ? (
           <IconButton
-            size="m"
+            size="xl"
             tone="primary"
             icon={<IconMenuOutline20 />}
             aria-label={t('remoteListButton')}
@@ -872,11 +1139,22 @@ export const RemoteChatView = () => {
             onClick={() => setSiderCollapsed(!siderCollapsed)}
           />
         )}
+        <div className={styles.heading}>
+          <div className={styles.title} title={activeSessionId === null ? undefined : activeTitle}>
+            {activeSessionId === null ? t('remoteModeRemote') : activeTitle}
+          </div>
+          <div className={styles.connectionStatus}>
+            <span className={clsx(styles.connectionDot, ready && styles.connectionLive)} aria-hidden />
+            {transportLabel(t, transport, ready)}
+          </div>
+        </div>
         {ready && subagentParentId !== null ? (
           /* [R16] 子代理会话的来路（dsh-Go `header_agents.dart` 的「‹ 上级对话」） */
           <button
             type="button"
             className={styles.subagentBack}
+            aria-label={t('remoteSubagentBack')}
+            title={subagentParentTitle || t('remoteSubagentBack')}
             onClick={() => {
               if (subagentParentId === null) return
               fireAndForget(() => useRemoteStore.getState().openSession(subagentParentId))
@@ -890,7 +1168,6 @@ export const RemoteChatView = () => {
             </span>
           </button>
         ) : null}
-        <div className={styles.title}>{ready && activeSessionId !== null ? activeTitle : ''}</div>
         {/*
           工作区抽屉入口（W3）。门禁：`filesSupported === false`（Host 回 `METHOD_NOT_FOUND`）
           时**整个按钮消失**；`null`（还没探过）时先画出来 —— 端点没有专属 capability，
@@ -898,10 +1175,16 @@ export const RemoteChatView = () => {
         */}
         {ready && activeSessionId !== null && filesSupported !== false ? (
           <IconButton
-            size="xs"
+            size="xl"
             tooltip={t('workspacePaneOpen')}
+            aria-label={t('workspacePaneOpen')}
+            aria-expanded={workspaceOpen}
             icon={<IconDataOutline16 />}
-            onClick={() => void useWorkspacePane.getState().openPane()}
+            onClick={() => {
+              const workspace = useWorkspacePane.getState()
+              if (workspace.open) workspace.closePane()
+              else void workspace.openPane()
+            }}
           />
         ) : null}
         {/*
@@ -915,6 +1198,17 @@ export const RemoteChatView = () => {
             title={controlTitle}
             usage={usage}
             onInsertCommand={insertCommand}
+            actions={[
+              { label: t('remoteSessionDetails'), open: () => openSessionTool('details') },
+              { label: t('remoteExportConversation'), open: () => openSessionTool('export') },
+              { label: t('remoteSessionGoal'), open: () => openSessionTool('goal') },
+              { label: t('remoteSkills'), open: () => openSessionTool('skills') },
+              { label: t('remoteReferences'), open: () => openSessionTool('references') },
+              { label: t('remoteJobs'), open: () => openSessionTool('jobs') },
+              ...(canReadAloud && window.isSecureContext && typeof navigator.mediaDevices?.getUserMedia === 'function'
+                ? [{ label: t('remoteVoiceCall'), open: () => openSessionTool('voice') }] : []),
+              ...(allowsTerminal ? [{ label: t('remoteTerminal'), open: () => openSessionTool('terminal') }] : []),
+            ]}
           />
         ) : null}
         {/*
@@ -922,9 +1216,6 @@ export const RemoteChatView = () => {
           这里说「连的是哪台」，两件事挨着看最省事。没连过 / 没有任何 Host 时组件自己返回 null。
         */}
         <HostSwitcher />
-        <span className={clsx(styles.badge, ready ? styles.badgeLive : styles.badgeIdle)}>
-          {transportLabel(t, transport, ready)}
-        </span>
       </div>
 
       {!bridgeReady ? (
@@ -1078,10 +1369,12 @@ export const RemoteChatView = () => {
                   </button>
                 </div>
               ) : null}
-              {items.length > 0 ? (
+              {ready && hasMoreHistory ? (
                 <button
                   type="button"
                   className={styles.loadOlder}
+                  disabled={loadingOlder}
+                  aria-busy={loadingOlder}
                   onClick={() => fireAndForget(() => useRemoteStore.getState().loadOlder())}
                 >
                   {t('remoteLoadOlder')}
@@ -1095,8 +1388,34 @@ export const RemoteChatView = () => {
                    * 查不到就返回 null（不产生空行）。这一轮没有 `present` 声明时整块不渲染。
                    * 分组按 `items` 引用记忆过一次，所以这里每行调一次也只是一次查表。
                    */
-                  <Fragment key={item.id}>
-                    <RemoteRow item={item} items={items} live={streaming && index === lastIndex} />
+                  <Fragment key={JSON.stringify([hostId, item.sessionId, item.id])}>
+                    <RemoteRow
+                      item={item}
+                      items={items}
+                      live={streaming && index === lastIndex}
+                      quote={ready && item.sessionId === activeSessionId &&
+                        (item.kind !== 'message' || item.sendState !== 'unconfirmed') ? quoteMessage : undefined}
+                      reuse={draft.trim() === '' && item.kind === 'message' && item.role === 'user' &&
+                        (item.id === recoverMessage || item.sendState === 'failed')
+                        ? reuseMessage : undefined}
+                      retry={canForkMessage && item.kind === 'message' && item.sessionId === activeSessionId &&
+                        item.sendState === 'unconfirmed' && item.pendingPrompt !== undefined
+                        ? () => retryDelivery(item) : undefined}
+                      branch={canForkMessage && item.kind === 'message' && actionPoints.branch.has(item.id)
+                        ? () => void forkMessage('branch', item) : undefined}
+                      edit={canForkMessage && isVisibleRemoteMessage(item) && item.role === 'user' &&
+                        item.nativeSeq !== undefined
+                        ? () => void forkMessage('edit', item) : undefined}
+                      regenerate={canForkMessage && !streaming && queueLength === 0 &&
+                        actionPoints.regenerate?.replyId === item.id
+                        ? () => void forkMessage('regenerate', actionPoints.regenerate!.prompt) : undefined}
+                      feedback={ready && item.sessionId === activeSessionId && item.kind === 'message' &&
+                        item.role === 'assistant' && item.nativeSeq !== undefined && !/^message:\d+:[a-z0-9]*$/u.test(item.id)
+                        ? () => openSessionTool('feedback', item.id) : undefined}
+                      readAloudId={canReadAloud && item.sessionId === activeSessionId && item.kind === 'message' &&
+                        item.role === 'assistant' ? 'remote:' + JSON.stringify([serverUrl, hostId, item.sessionId, item.id]) : undefined}
+                      actionBusy={messageActionBusy || sessionActionBusy}
+                    />
                     <ArtifactTurnTail index={index} groups={artifactGroups} />
                   </Fragment>
                 ))
@@ -1140,7 +1459,7 @@ export const RemoteChatView = () => {
 
             <div className={styles.inputWrapper}>
               {/* 附件条（W3）：上传中 / 已完成 / 失败重试都在这里，进输入框上方 */}
-              <AttachmentTray compact />
+              <AttachmentTray compact attachments={attachments} />
               <textarea
                 ref={textareaRef}
                 className={styles.textarea}
@@ -1207,7 +1526,10 @@ export const RemoteChatView = () => {
                 leading={
                   /* 「+」选文件 → fileUploads/upload → 收据随消息发出（W3）。
                      生成中也允许先选文件：这些消息本来就是插话/排队发的。 */
-                  <AttachmentButton disabled={!ready || activeSessionId === null} />
+                  <>
+                    <AttachmentButton key={draftKey} disabled={!ready || activeSessionId === null} />
+                    {canReadAloud && ready && activeSessionId !== null && <RemoteVoiceInput key={'voice:' + draftKey} onText={acceptDictation} />}
+                  </>
                 }
                 onSubmit={submit}
                 onStop={stop}
@@ -1218,8 +1540,27 @@ export const RemoteChatView = () => {
           </div>
         </>
       )}
-      {/* 工作区文件抽屉（W3）：自己 portal；未展开 / 不支持时内部直接 return null */}
-      <WorkspacePane />
+      {sessionTool && sessionTool.scope.current() && lastRemoteTarget() === sessionTool.scope.target && (
+        <Suspense fallback={null}>
+          {sessionTool.kind === 'terminal' && <RemoteTerminal scope={sessionTool.scope} onClose={() => setSessionTool(null)} />}
+          {sessionTool.kind === 'jobs' && <RemoteJobs scope={sessionTool.scope} onClose={() => setSessionTool(null)} />}
+          {sessionTool.kind === 'voice' && <RemoteVoiceCall scope={sessionTool.scope} onClose={() => setSessionTool(null)} />}
+          {sessionTool.kind === 'goal' && <RemoteSessionGoal scope={sessionTool.scope} onClose={() => setSessionTool(null)} />}
+          {sessionTool.kind === 'details' && <RemoteSessionDetails items={items} sessionId={sessionTool.scope.sessionId}
+            title={activeTitle} onClose={() => setSessionTool(null)} onGoal={() => openSessionTool('goal')} />}
+          {sessionTool.kind === 'export' && <RemoteConversationExport scope={sessionTool.scope} items={items}
+            title={controlTitle || sessions.find((row) => row.id === activeSessionId)?.title || t('untitledChat')}
+            capabilities={remoteCapabilities} onClose={() => setSessionTool(null)} />}
+          {sessionTool.kind === 'feedback' && sessionTool.messageId !== undefined && (
+            <RemoteFeedback scope={sessionTool.scope} messageId={sessionTool.messageId} onClose={() => setSessionTool(null)} />
+          )}
+          {(sessionTool.kind === 'skills' || sessionTool.kind === 'references') && (
+            <RemotePromptTools scope={sessionTool.scope} tool={sessionTool.kind} onUse={usePromptTool}
+              allowCurrentSkill={subagentParentId === null} onClose={() => setSessionTool(null)} />
+          )}
+        </Suspense>
+      )}
+      {newCallDialog}
     </div>
   )
 }
@@ -1260,8 +1601,24 @@ const NewSessionDrafts = () => {
   )
 }
 
-const RemoteRow = ({ item, items, live }: { item: ChatItem; items: ChatItem[]; live: boolean }) => {
-  if (item.kind === 'message') return <MessageRow item={item} live={live} />
+interface MessageRowActions {
+  quote?: (text: string) => void
+  reuse?: (text: string) => void
+  retry?: () => void
+  branch?: () => void
+  edit?: () => void
+  regenerate?: () => void
+  feedback?: () => void
+  readAloudId?: string
+  actionBusy: boolean
+}
+
+const RemoteRow = ({ item, items, live, ...actions }: {
+  item: ChatItem
+  items: ChatItem[]
+  live: boolean
+} & MessageRowActions) => {
+  if (item.kind === 'message') return <MessageRow item={item} live={live} {...actions} />
   if (item.kind === 'tool') return <ToolRow item={item} />
   // 审批卡就长在时间线里（不折进工具卡、也不吸在输入区上方）：命令原文、风险与按钮同一处
   if (item.kind === 'approval') return <ApprovalRow item={item} items={items} />
@@ -1273,13 +1630,19 @@ const RemoteRow = ({ item, items, live }: { item: ChatItem; items: ChatItem[]; l
 }
 
 /** 正文用现有的 Markdown 组件；用户行保持纯文本，避免被当成 markdown 解析 */
-const MessageRow = ({ item, live }: { item: ChatMessage; live: boolean }) => {
+const MessageRow = ({ item, live, quote, reuse, retry, branch, edit, regenerate, feedback, readAloudId, actionBusy }: {
+  item: ChatMessage
+  live: boolean
+} & MessageRowActions) => {
   const t = useTranslate()
   // 上下文 / 只有 usage 的 assistant 行不属于对话正文
   if (item.context === true || item.usageOnly === true) return null
   const isUser = item.role === 'user'
   const text = stripDsml(item.text)
   const reasoning = item.reasoning === undefined ? '' : stripDsml(item.reasoning)
+  const images = item.images
+    ?.filter((image) => image.sessionId === undefined || image.sessionId === item.sessionId)
+    .map((image) => ({ ...image, sessionId: item.sessionId })) ?? []
   return (
     <div className={clsx(styles.row, isUser && styles.rowUser)}>
       {reasoning.length > 0 ? (
@@ -1295,7 +1658,7 @@ const MessageRow = ({ item, live }: { item: ChatMessage; live: boolean }) => {
       ) : null}
       <div className={clsx(styles.bubble, isUser ? styles.bubbleUser : styles.bubbleAssistant)}>
         {isUser ? (
-          <div className={styles.plainText}>{text}</div>
+          <div className={styles.plainText}>{text || (item.hasFiles ? t('remoteMessageFile') : '')}</div>
         ) : (
           <Markdown
             className="ds-assistant-message-main-content"
@@ -1305,15 +1668,51 @@ const MessageRow = ({ item, live }: { item: ChatMessage; live: boolean }) => {
             disableLink={false}
           />
         )}
-        {item.images !== undefined && item.images.length > 0 ? (
-          <div className={styles.meta}>
-            {t('remoteImagesHint', { count: item.images.length })}
+        {images.length > 0 ? <RemoteImageStrip images={images} lazy /> : null}
+        {item.sendState === 'unconfirmed' ? (
+          <div className={styles.sendError} role="status">
+            {t('remotePromptUnconfirmed')}
+            {item.sendError ? ` ${item.sendError}` : ''}
           </div>
-        ) : null}
-        {item.sendError === undefined ? null : (
-          <div className={styles.sendError}>{item.sendError}</div>
+        ) : item.sendError && <div className={styles.sendError}>{item.sendError}</div>}
+        {retry && (
+          <button type="button" className={styles.reuseMessage} onClick={retry}>
+            {t('remotePromptRetry')}
+          </button>
         )}
       </div>
+      {item.role === 'system' || item.streaming || (text.trim() === '' && !edit && !branch && !regenerate) ? null : (
+        <div className={styles.messageActions}>
+          {text.trim() !== '' && <CopyButton text={text} />}
+          {readAloudId && <ReadAloudButton messageId={readAloudId} text={text} />}
+          {quote === undefined || text.trim() === '' ? null : (
+            <button type="button" className={styles.reuseMessage} onClick={() => quote(text)}>
+              {t('remoteQuoteMessage')}
+            </button>
+          )}
+          {reuse === undefined ? null : (
+            <button type="button" className={styles.reuseMessage} onClick={() => reuse(text)}>
+              {t('remoteReuseMessage')}
+            </button>
+          )}
+          {branch && (
+            <button type="button" className={styles.reuseMessage} disabled={actionBusy} onClick={branch}>
+              {t('remoteMessageBranch')}
+            </button>
+          )}
+          {edit && (
+            <button type="button" className={styles.reuseMessage} disabled={actionBusy} onClick={edit}>
+              {t('remoteMessageEdit')}
+            </button>
+          )}
+          {regenerate && (
+            <button type="button" className={styles.reuseMessage} disabled={actionBusy} onClick={regenerate}>
+              {t('remoteMessageRegenerate')}
+            </button>
+          )}
+          {feedback && <button type="button" className={styles.reuseMessage} onClick={feedback}>{t('remoteFeedback')}</button>}
+        </div>
+      )}
     </div>
   )
 }

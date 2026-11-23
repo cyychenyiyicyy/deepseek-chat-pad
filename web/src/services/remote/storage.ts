@@ -35,7 +35,7 @@ export interface RemoteServer {
  * 只用于展示与排障（设置页写「上次用的是哪种方式」）；凭据类型不随它变 ——
  * 三种方式最终都换回同一种「设备 token pair」。
  */
-export type LoginMethod = 'password' | 'oauth' | 'qr'
+export type LoginMethod = 'password' | 'oauth' | 'qr' | 'pairing'
 
 export interface RemoteAccount {
   email: string
@@ -74,6 +74,8 @@ export interface PinnedHost {
 export const SERVER_STORAGE_KEY = 'dsp.remote.servers.v1'
 export const ACCOUNT_STORAGE_KEY = 'dsp.remote.accounts.v1'
 export const PINNED_HOST_STORAGE_KEY = 'dsp.remote.pinned-hosts.v1'
+const ADAPTIVE_TRANSPORT_KEY = 'dsp.remote.adaptive-transport.v1'
+const COMPACT_HISTORY_KEY = 'dsp.remote.compact-history.v1'
 
 interface ListEnvelope<T> {
   v: number
@@ -98,6 +100,32 @@ const store = (): Storage | null => {
   } catch {
     return null
   }
+}
+
+export function loadAdaptiveTransport(): boolean {
+  try { return store()?.getItem(ADAPTIVE_TRANSPORT_KEY) === 'true' } catch { return false }
+}
+
+export function saveAdaptiveTransport(enabled: boolean): boolean {
+  try {
+    const storage = store()
+    if (!storage) return false
+    storage.setItem(ADAPTIVE_TRANSPORT_KEY, String(enabled))
+    return true
+  } catch { return false }
+}
+
+export function loadCompactHistory(): boolean {
+  try { return store()?.getItem(COMPACT_HISTORY_KEY) === 'true' } catch { return false }
+}
+
+export function saveCompactHistory(enabled: boolean): boolean {
+  try {
+    const storage = store()
+    if (!storage) return false
+    storage.setItem(COMPACT_HISTORY_KEY, String(enabled))
+    return true
+  } catch { return false }
 }
 
 const readItems = <T>(key: string, guard: (value: unknown) => value is T): T[] => {

@@ -31,8 +31,11 @@ import {
   SecureMessageCodec,
   acceptNegotiatedCapabilities,
   createControlFrame,
+  createRelayDataFrame,
   decodeControlFrame,
+  decodeRelayDataFrame,
   encodeControlFrame,
+  encodeRelayDataFrame,
   type ConnectAcceptedPayload,
   type ControlErrorPayload,
   type ControlFrame,
@@ -41,8 +44,12 @@ import {
   type HelloAckPayload,
   type RelayPayload,
   type SecureHandshakePayload,
+  type SelectedTransport,
+  type SignalIcePayload,
+  type SignalPayload,
 } from '../../../vendor/dsh-remote/protocol/index.js'
 import type { BridgeSocket } from './bridgeSocket.js'
+import { RtcTransport, RtcUnavailable, type RtcMode } from './rtcTransport.js'
 import {
   LinkErrorCodes,
   RemoteLinkError,
@@ -51,8 +58,9 @@ import {
   readErrorCode,
 } from './errors.js'
 
-/** hello 里宣告的能力：P0 只走控制通道 relay（不做 WebRTC / LAN / 独立 Relay attach）。 */
+/** relay is the baseline for servers without WebRTC support. */
 export const CLIENT_HELLO_CAPABILITIES: readonly string[] = ['transport.relay']
+const RTC_CAPABILITIES = ['transport.lan', 'transport.p2p', 'transport.turn']
 
 /** 等 hello.ack 的预算（Server 侧 hello 超时是 5 s，这里留一倍余量）。 */
 const DEFAULT_HELLO_TIMEOUT_MS = 10_000
@@ -110,6 +118,8 @@ export interface SecureChannelOptions {
   helloTimeoutMs?: number
   connectTimeoutMs?: number
   handshakeTimeoutMs?: number
+  rtc?: { mode: RtcMode; iceServers: (connectionId: string) => Promise<RTCIceServer[]>; timeoutMs?: number }
+  relayBridge?: (url: string) => BridgeSocket
   /** 阶段推进通知（`bridge-open` / `control-ready` / `secure`）。 */
   onPhase?: (phase: Exclude<SecureChannelPhase, 'idle' | 'closed'>, detail?: string) => void
   /** 每收到一个合法 Control 帧回调一次（心跳统计用，不含业务明文）。 */
@@ -153,6 +163,15 @@ export class SecureChannel {
   private closeError: RemoteLinkError | undefined
   private startPromise: Promise<void> | undefined
   private closed = false
+  private rtc: RtcTransport | undefined
+  private transportMode: SelectedTransport = 'relay'
+  private rtcWaiter: Deferred<SelectedTransport> | undefined
+  private rtcTimeoutMs = 0
+  private rtcTransports: SelectedTransport[] = []
+  private pendingRtcFrames: Uint8Array[] = []
+  private relayAssignment: { url: string; ticket: string; epoch?: number } | undefined
+  private relayBridge: BridgeSocket | undefined
+  private relayWaiter: Deferred<void> | undefined
 
   private helloWaiter: Deferred<void> | undefined
   private acceptedWaiter: Deferred<string> | undefined
@@ -195,6 +214,15 @@ export class SecureChannel {
 
   get connection(): string | undefined {
     return this.connectionId
+  }
+
+  get transport(): SelectedTransport {
+    return this.transportMode
+  }
+
+  private get helloCapabilities(): readonly string[] {
+    return [...CLIENT_HELLO_CAPABILITIES, ...(this.options.rtc ? RTC_CAPABILITIES : []),
+      ...(this.options.relayBridge ? ['transport.relay.attach'] : [])]
   }
 
   /** hello.ack 协商出来的能力集合（§10.3：只能使用这个集合里的能力）。 */
@@ -305,15 +333,26 @@ export class SecureChannel {
         this.fail(failure)
         throw failure
       }
-      const payload: RelayPayload = {
-        connectionId,
-        targetDeviceId: this.options.hostDeviceId,
-        counter: this.counter,
-        ciphertext: toBase64Url(ciphertext),
+      try {
+        if (this.rtc === undefined) {
+          const payload: RelayPayload = {
+            connectionId,
+            targetDeviceId: this.options.hostDeviceId,
+            counter: this.counter,
+            ciphertext: toBase64Url(ciphertext),
+          }
+          if (this.relayBridge) this.sendRelayData('relay', { ...payload })
+          else this.sendControl('relay', payload)
+          this.relayFramesSent += 1
+        } else {
+          this.rtc.send(ciphertext)
+        }
+      } catch (error) {
+        const failure = asRemoteLinkError(error, LinkErrorCodes.TRANSPORT_CLOSED)
+        this.fail(failure)
+        throw failure
       }
       this.counter += 1
-      this.sendControl('relay', payload)
-      this.relayFramesSent += 1
     }
     this.plaintextBytesSent += plaintext.byteLength
   }
@@ -352,7 +391,7 @@ export class SecureChannel {
         deviceId: this.options.clientDeviceId,
         accessToken: this.options.accessToken,
         protocols: [PROTOCOL_VERSION],
-        capabilities: [...CLIENT_HELLO_CAPABILITIES],
+        capabilities: [...this.helloCapabilities],
         ...(this.options.clientVersion === undefined ? {} : { clientVersion: this.options.clientVersion }),
       })
       await withTimeout(
@@ -362,13 +401,17 @@ export class SecureChannel {
       )
       this.helloWaiter = undefined
 
+      const rtc = this.options.rtc
+      const preferred: SelectedTransport[] = rtc?.mode === 'turn' ? ['turn'] : ['lan', 'p2p', 'turn']
+      const direct = rtc === undefined || this.connectionId !== undefined ? []
+        : preferred.filter(mode => this.negotiatedCapabilities.includes(`transport.${mode}`))
+      this.rtcTransports = direct
       if (this.connectionId === undefined) {
-        // §11 connect.request：P0 只声明 relay。
         const accepted = new Deferred<string>()
         this.acceptedWaiter = accepted
         this.sendControl('connect.request', {
           hostDeviceId: this.options.hostDeviceId,
-          preferredTransports: ['relay'],
+          preferredTransports: [...direct, 'relay'],
         })
         this.connectionId = await withTimeout(
           accepted.promise,
@@ -378,20 +421,142 @@ export class SecureChannel {
         this.acceptedWaiter = undefined
       }
 
+      if (rtc && direct.length > 0) {
+        const mode = direct.includes('lan') || direct.includes('p2p') ? 'direct' : 'turn'
+        this.transportMode = await this.openRtc(rtc, mode, direct)
+      } else if (this.relayAssignment) {
+        await this.openRelay(this.relayAssignment)
+      }
+
       // §11：Initiator 必须先发 transport.selected，再开始 Noise 握手。
       this.sendControl('transport.selected', {
         connectionId: this.connectionId,
         targetDeviceId: this.options.hostDeviceId,
-        transport: 'relay',
+        transport: this.transportMode,
       })
       this.setPhase('control-ready')
 
       await this.runHandshake()
+      for (const frame of this.pendingRtcFrames) this.receiveCiphertext(frame)
+      this.pendingRtcFrames = []
       this.setPhase('secure')
     } catch (error) {
       const failure = asRemoteLinkError(error, LinkErrorCodes.CONNECTION_FAILED)
       this.fail(failure)
       throw failure
+    }
+  }
+
+  private async openRelay(assignment: NonNullable<SecureChannel['relayAssignment']>): Promise<void> {
+    const connectionId = this.requireConnectionId()
+    const endpoint = new URL(assignment.url)
+    if (endpoint.protocol !== 'wss:' || endpoint.username || endpoint.password || endpoint.hash || !this.options.relayBridge) {
+      throw new RemoteLinkError(LinkErrorCodes.RELAY_UNAVAILABLE, 'Relay node URL is unavailable or invalid.')
+    }
+    const bridge = this.options.relayBridge(endpoint.href)
+    this.relayBridge = bridge
+    const ready = new Deferred<void>()
+    this.relayWaiter = ready
+    this.unsubscribes.push(bridge.onClose(() => {
+      this.fail(new RemoteLinkError(LinkErrorCodes.TRANSPORT_CLOSED, 'Relay data socket closed.'))
+    }))
+    this.unsubscribes.push(bridge.onBinary(bytes => this.handleUnexpectedBinary(bytes)))
+    this.unsubscribes.push(bridge.onText(text => {
+      try {
+        const frame = decodeRelayDataFrame(text, this.controlLimits)
+        switch (frame.type) {
+          case 'relay.ready':
+            if (frame.payload.connectionId !== connectionId || (assignment.epoch !== undefined && frame.payload.epoch !== assignment.epoch)) {
+              throw new RemoteLinkError(LinkErrorCodes.INVALID_MESSAGE, 'Relay node confirmed another connection.')
+            }
+            ready.resolve()
+            break
+          case 'ping':
+            this.sendRelayData('pong', frame.payload)
+            break
+          case 'relay':
+            this.onRelayFrame(frame.payload as unknown as RelayPayload)
+            break
+          case 'secure.handshake':
+            this.onHandshakeFrame(frame.payload as unknown as SecureHandshakePayload)
+            break
+          case 'relay.detach':
+            this.fail(new RemoteLinkError(LinkErrorCodes.TRANSPORT_CLOSED, 'Relay node detached the connection.'))
+            break
+          case 'error':
+            this.onControlError(frame.payload as unknown as ControlErrorPayload)
+            break
+        }
+      } catch (error) {
+        this.fail(asRemoteLinkError(error, LinkErrorCodes.INVALID_MESSAGE))
+      }
+    }))
+    const attaching = async () => {
+      await bridge.open()
+      this.sendRelayData('relay.attach', {
+        connectionId, deviceId: this.options.clientDeviceId, peerDeviceId: this.options.hostDeviceId, ticket: assignment.ticket,
+      })
+    }
+    try {
+      await withTimeout(Promise.all([attaching(), ready.promise]), 8000,
+        () => new RemoteLinkError(LinkErrorCodes.RELAY_UNAVAILABLE, 'Relay node attach timed out.'))
+    } finally {
+      this.relayWaiter = undefined
+    }
+  }
+
+  private sendRelayData(type: string, payload: Record<string, unknown>): void {
+    if (this.closed || !this.relayBridge) throw new RemoteLinkError(LinkErrorCodes.TRANSPORT_CLOSED, 'Relay data socket closed.')
+    this.relayBridge.sendText(encodeRelayDataFrame(createRelayDataFrame(type, payload), this.controlLimits))
+  }
+
+  private async openRtc(options: NonNullable<SecureChannelOptions['rtc']>, mode: RtcMode,
+    negotiated: readonly string[]): Promise<SelectedTransport> {
+    const connectionId = this.requireConnectionId()
+    const targetDeviceId = this.options.hostDeviceId
+    const waiter = new Deferred<SelectedTransport>()
+    this.rtcWaiter = waiter
+    const setup = async (): Promise<SelectedTransport> => {
+      const servers = await options.iceServers(connectionId)
+      if (this.closed) throw this.closeError ?? new RemoteLinkError(LinkErrorCodes.TRANSPORT_CLOSED, 'WebRTC negotiation closed.')
+      const iceServers = servers.flatMap(server => {
+        const urls = typeof server.urls === 'string' ? [server.urls] : server.urls
+        const usable = urls.filter(url => mode === 'direct' ? /^stuns?:/i.test(url) : /^turns?:/i.test(url))
+        return usable.length > 0 ? [{ ...server, urls: usable }] : []
+      })
+      if (mode === 'turn' && iceServers.length === 0) throw new RtcUnavailable('No TURN server is available.')
+      try {
+        this.rtc = new RtcTransport({
+          mode,
+          iceServers,
+          offer: sdp => this.sendControl('signal.offer', { connectionId, targetDeviceId, sdp }),
+          candidate: candidate => this.sendControl('signal.ice', { connectionId, targetDeviceId, candidate }),
+          ciphertext: bytes => {
+            if (this.noise?.complete) {
+              this.receiveCiphertext(bytes)
+            } else if (this.step2Waiter && this.pendingRtcFrames.length < 16) {
+              this.pendingRtcFrames.push(bytes)
+            } else {
+              throw new RemoteLinkError(LinkErrorCodes.SECURE_CHANNEL_FAILED, 'WebRTC ciphertext arrived before Noise was ready.')
+            }
+          },
+          failed: error => this.fail(error),
+        })
+        const path = await this.rtc.open()
+        if (negotiated.includes(path)) return path
+        if (path === 'lan' && negotiated.includes('p2p')) return 'p2p'
+        if (path === 'p2p' && negotiated.includes('lan')) return 'lan'
+        throw new RtcUnavailable('The WebRTC path was not negotiated.')
+      } catch (error) {
+        if (error instanceof RemoteLinkError) throw error
+        throw new RtcUnavailable('WebRTC could not negotiate a data channel.')
+      }
+    }
+    try {
+      const timeoutMs = Math.min(15_000, Math.max(options.timeoutMs ?? 4_000, this.rtcTimeoutMs))
+      return await withTimeout(Promise.race([setup(), waiter.promise]), timeoutMs, () => new RtcUnavailable('WebRTC connection timed out.'))
+    } finally {
+      this.rtcWaiter = undefined
     }
   }
 
@@ -496,7 +661,7 @@ export class SecureChannel {
         this.onControlError(frame.payload as ControlErrorPayload)
         return
       case 'relay':
-        this.onRelayFrame(frame.payload as RelayPayload)
+        if (this.rtc === undefined && this.relayBridge === undefined) this.onRelayFrame(frame.payload as RelayPayload)
         return
       case 'secure.handshake':
         this.onHandshakeFrame(frame.payload as SecureHandshakePayload)
@@ -510,10 +675,17 @@ export class SecureChannel {
       case 'transport.selected':
         // §11：Responder 也会上报一条，仅作通知；我们是 initiator，以自己的选择为准。
         return
+      case 'signal.answer': {
+        const signal = frame.payload as SignalPayload
+        if (this.isCurrentSignal(signal)) void this.rtc?.answer(signal.sdp)
+        return
+      }
+      case 'signal.ice': {
+        const signal = frame.payload as SignalIcePayload
+        if (this.isCurrentSignal(signal)) this.rtc?.candidate(signal.candidate)
+        return
+      }
       case 'signal.offer':
-      case 'signal.answer':
-      case 'signal.ice':
-        // 我们没宣告 WebRTC 能力，收到信令说明对端理解错了协商结果，按 §12 直接忽略。
         return
       default:
         throw new RemoteLinkError(
@@ -521,6 +693,10 @@ export class SecureChannel {
           `secure channel 收到不允许的 Control 帧类型：${String(frame.type)}`,
         )
     }
+  }
+
+  private isCurrentSignal(signal: { connectionId: string; targetDeviceId: string }): boolean {
+    return signal.connectionId === this.connectionId && signal.targetDeviceId === this.options.clientDeviceId
   }
 
   private onHelloAck(payload: HelloAckPayload): void {
@@ -556,7 +732,10 @@ export class SecureChannel {
     this.controlLimits = { maxControlFrameBytes, maxRelayFrameBytes }
     try {
       // §10.3：hello.ack.capabilities 是交集，Server 不能返回没宣告过的能力。
-      this.negotiatedCapabilities = acceptNegotiatedCapabilities([...CLIENT_HELLO_CAPABILITIES], payload.capabilities)
+      this.negotiatedCapabilities = acceptNegotiatedCapabilities([...this.helloCapabilities], payload.capabilities)
+      if (payload.webrtcEnabled === false) {
+        this.negotiatedCapabilities = this.negotiatedCapabilities.filter(capability => !RTC_CAPABILITIES.includes(capability))
+      }
     } catch (error) {
       throw new RemoteLinkError(
         LinkErrorCodes.CAPABILITY_NOT_SUPPORTED,
@@ -567,9 +746,10 @@ export class SecureChannel {
     if (!this.negotiatedCapabilities.includes('transport.relay')) {
       throw new RemoteLinkError(
         LinkErrorCodes.CAPABILITY_NOT_SUPPORTED,
-        'Server 没有协商出 transport.relay，P0 无法建立数据面。',
+        'Server 没有协商出必须的 transport.relay。',
       )
     }
+    this.rtcTimeoutMs = payload.webrtcFallbackTimeoutMs ?? 0
     waiter.resolve()
   }
 
@@ -581,15 +761,14 @@ export class SecureChannel {
     if (typeof payload.connectionId !== 'string' || payload.connectionId.length === 0) {
       throw new RemoteLinkError(LinkErrorCodes.INVALID_MESSAGE, 'connect.accepted 缺少 connectionId。')
     }
-    if (typeof payload.relayEndpoint === 'string' || typeof payload.relayTicket === 'string') {
-      // 我们没宣告 transport.relay.attach；一旦 Server 分配了独立 Relay 数据面，
-      // 继续用控制通道 relay 会与 Host 的 attach 期望错位，因此 fail-closed。
-      throw new RemoteLinkError(
-        LinkErrorCodes.RELAY_UNAVAILABLE,
-        'Server 分配了独立 Relay 数据面（relayEndpoint/relayTicket），P0 仅支持控制通道 relay。',
-      )
+    if ((payload.relayEndpoint !== undefined || payload.relayTicket !== undefined) && this.rtcTransports.length === 0) {
+      if (!this.options.relayBridge || !this.negotiatedCapabilities.includes('transport.relay.attach') || !payload.relayEndpoint || !payload.relayTicket) {
+        throw new RemoteLinkError(LinkErrorCodes.RELAY_UNAVAILABLE, 'Server returned an unsupported relay assignment.')
+      }
+      this.relayAssignment = { url: payload.relayEndpoint, ticket: payload.relayTicket, epoch: payload.relayEpoch }
     }
     this.acceptedWaiter = undefined
+    this.rtcTimeoutMs = payload.webrtcFallbackTimeoutMs ?? this.rtcTimeoutMs
     waiter.resolve(payload.connectionId)
   }
 
@@ -639,13 +818,19 @@ export class SecureChannel {
     if (typeof payload.ciphertext !== 'string') {
       throw new RemoteLinkError(LinkErrorCodes.INVALID_MESSAGE, 'relay 帧缺少 ciphertext。')
     }
+    const ciphertext = fromBase64Url(payload.ciphertext)
+    this.lastInboundCounter = payload.counter
+    this.relayFramesReceived += 1
+    this.receiveCiphertext(ciphertext)
+  }
+
+  private receiveCiphertext(ciphertext: Uint8Array): void {
     const noise = this.noise
     if (noise === undefined || !noise.complete) {
-      throw new RemoteLinkError(LinkErrorCodes.SECURE_CHANNEL_FAILED, 'Noise 未完成前收到了 relay 帧。')
+      throw new RemoteLinkError(LinkErrorCodes.SECURE_CHANNEL_FAILED, 'Noise 未完成前收到了加密数据。')
     }
     let message: Uint8Array | undefined
     try {
-      const ciphertext = fromBase64Url(payload.ciphertext)
       // 重放 / 过旧 / 认证失败都从这里抛出（Noise 内部状态才是权威依据，§13）。
       const plaintext = noise.decrypt(ciphertext)
       message = this.codecIn.decode(plaintext)
@@ -656,8 +841,6 @@ export class SecureChannel {
         { cause: error },
       )
     }
-    this.lastInboundCounter = payload.counter
-    this.relayFramesReceived += 1
     if (message === undefined) return // 还在等后续分片
     this.plaintextBytesReceived += message.byteLength
     for (const handler of this.messageHandlers) handler(message)
@@ -692,11 +875,9 @@ export class SecureChannel {
   }
 
   private handleUnexpectedBinary(bytes: Uint8Array): void {
-    // P0 的数据面是 Control 通道里的 relay JSON 帧；二进制帧只可能来自 WebRTC/独立 Relay，
-    // 我们没声明这些能力，收到即视为协议违规（§12.3 要求 fail-closed）。
     this.fail(new RemoteLinkError(
       LinkErrorCodes.INVALID_MESSAGE,
-      `未协商的数据面收到 ${bytes.byteLength} B 二进制帧（P0 只用控制通道 relay）。`,
+      `Relay WebSocket received a ${bytes.byteLength} B binary frame where JSON was expected.`,
     ))
   }
 
@@ -783,6 +964,10 @@ export class SecureChannel {
     this.helloWaiter?.reject(failure)
     this.acceptedWaiter?.reject(failure)
     this.step2Waiter?.reject(failure)
+    this.rtcWaiter?.reject(failure)
+    this.relayWaiter?.reject(failure)
+    this.rtc?.close()
+    this.pendingRtcFrames = []
     this.helloWaiter = undefined
     this.acceptedWaiter = undefined
     this.step2Waiter = undefined
@@ -792,6 +977,7 @@ export class SecureChannel {
     this.codecOut.reset()
     this.messageHandlers.clear()
     for (const unsubscribe of this.unsubscribes.splice(0)) unsubscribe()
+    try { this.relayBridge?.close() } catch { /* The relay socket may have closed already. */ }
     try {
       this.bridge.close()
     } catch {

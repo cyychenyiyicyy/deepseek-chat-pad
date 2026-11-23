@@ -1,46 +1,39 @@
 import clsx from 'clsx'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { useIsMobile } from '../../../app/viewport.js'
 import { useTranslate } from '../../../i18n/index.js'
 import { useNewSessionStore } from '../../../services/remote/newSessionStore.js'
 import { downloadFromUrl, downloadWorkspacePath } from '../../../services/remote/download.js'
-import { useRemoteStore } from '../../../services/remote/store.js'
-import type { RemoteWorkspace } from '../../../services/remote/sessionsApi.js'
+import { registerRemoteStreamSink, useRemoteStore } from '../../../services/remote/store.js'
+import { lastRemoteTarget, type RemoteStreamHandle, type RemoteWorkspace } from '../../../services/remote/sessionsApi.js'
+import { useSettings } from '../../../services/settings.js'
 import { useAnchoredPosition, useDismiss } from '../../base/anchored.js'
 import { IconButton } from '../../base/IconButton.js'
 import { IconChevronDownOutline14, IconCloseOutline16, IconDownloadOutline16, IconRefreshOutline16 } from '../../base/icons.js'
 import { FilePreview } from './FilePreview.js'
-import { baseNameOf, parentRelativePath } from '../../../services/remote/filesApi.js'
+import { baseNameOf, parentRelativePath, watchWorkspacePath } from '../../../services/remote/filesApi.js'
 import { WorkspaceList } from './WorkspaceList.js'
 import { buildWorkspaceItems } from './workspaceItems.js'
 import { useWorkspacePane } from './workspacePaneStore.js'
 import { WorkspaceTree } from './WorkspaceTree.js'
 import styles from './WorkspacePane.module.css'
 
-/**
- * 工作区文件抽屉（W3）。
- *
- * 形态与 `NewSessionPanel` 同一套约定：
- *   - **平板 / 桌面**：右侧一列（380px，左侧圆角 + 投影），会话页仍在左边可用；
- *   - **手机**：整屏 sheet（顶栏带返回 / 标题 / 关闭）。
- *
- * 结构：顶栏（标题 + 当前工作区路径 + 工作区切换 + 刷新 + 关闭）→ 路径面包屑 →
- * 目录树（懒加载，一次一目录）／文件预览（文本 / 图片 / 二进制占位）。
- *
- * 三个纪律：
- *  1. **能力门禁**：`filesSupported === false` 时**整个组件不渲染**（`RemoteChatView` 里连入口
- *     按钮都不画），所以这里不需要「不支持」的漂亮空态 —— 只有真正会发生的错误条；
- *  2. **切换工作区**是真切换：`workspaceFiles/*` 只按**会话**工作区起作用，所以选项背后是
- *     「那个工作区里最近的会话」，选中即 `openSession()`，文件作用域跟着走；
- *  3. **blob URL 必须释放**：预览被替换 / 关闭 / 换会话 / 卸载时都 `revokeObjectURL`。
- */
+const subscribeWidth = (onChange: () => void) => {
+  window.addEventListener('resize', onChange)
+  return () => window.removeEventListener('resize', onChange)
+}
+
+/** Workspace files for the active remote session. */
 export const WorkspacePane = () => {
   const t = useTranslate()
   const isMobile = useIsMobile()
+  const scale = useSettings((state) => state.uiScale)
+  const docked = useSyncExternalStore(subscribeWidth, () => window.innerWidth / scale >= 1200)
+  const newSessionOpen = useNewSessionStore((state) => state.open)
+  const ready = useRemoteStore((state) => state.phase === 'ready')
   const open = useWorkspacePane((state) => state.open)
   const supported = useWorkspacePane((state) => state.filesSupported)
-  const scopeId = useWorkspacePane((state) => state.scopeId)
   const rootPath = useWorkspacePane((state) => state.rootPath)
   const rootSource = useWorkspacePane((state) => state.rootSource)
   const error = useWorkspacePane((state) => state.error)
@@ -61,11 +54,58 @@ export const WorkspacePane = () => {
     captureEscape: true,
   })
 
-  const close = (): void => useWorkspacePane.getState().closePane()
+  const close = (): void => {
+    setSwitcherOpen(false)
+    useWorkspacePane.getState().closePane()
+  }
+  const visible = open && supported !== false && !newSessionOpen && ready
   const rootNode = nodes['']
+  const watchTarget = visible ? lastRemoteTarget() : null
+  const watchPath = preview?.path ?? ''
+
+  useEffect(() => {
+    if (watchTarget === null || activeSessionId === null) return undefined
+    let stopped = false
+    let stream: RemoteStreamHandle | undefined
+    let unsubscribe: (() => void) | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const current = () => !stopped && lastRemoteTarget() === watchTarget &&
+      useRemoteStore.getState().phase === 'ready' && useRemoteStore.getState().activeSessionId === activeSessionId
+    const refresh = () => {
+      if (!current()) return
+      const workspace = useWorkspacePane.getState()
+      if (!workspace.open || workspace.scopeId !== activeSessionId || (workspace.preview?.path ?? '') !== watchPath) return
+      if (watchPath === '') void workspace.refresh()
+      else void workspace.openFile(watchPath)
+    }
+    void watchWorkspacePath(watchTarget, activeSessionId, watchPath).then(async (opened) => {
+      if (!current()) {
+        await opened.close()
+        return
+      }
+      stream = opened
+      unsubscribe = registerRemoteStreamSink(opened.streamId, (frame) => {
+        if (!current() || frame.type !== 'frame' || !frame.hasValue ||
+          frame.value === null || typeof frame.value !== 'object' || !('kind' in frame.value)) return
+        if (frame.value.kind === 'ready') {
+          const workspace = useWorkspacePane.getState()
+          const loading = watchPath === '' ? workspace.nodes['']?.loading : workspace.preview?.status === 'loading'
+          if (loading) return
+        } else if (frame.value.kind !== 'change') return
+        clearTimeout(timer)
+        timer = setTimeout(refresh, 120)
+      })
+    }).catch(() => undefined)
+    return () => {
+      stopped = true
+      clearTimeout(timer)
+      unsubscribe?.()
+      if (stream !== undefined) void stream.close().catch(() => undefined)
+    }
+  }, [watchTarget, watchPath, activeSessionId])
 
   /**
-   * 下载当前预览（文本 / 图片）。
+   * 下载当前文件。
    *
    * 只做「取字节 → 交给原生 /__ds_download/save」这一件事，文案与失败原因都在
    * `services/remote/download.ts` 里统一处理（toast 一次），这里只管按钮的忙碌态。
@@ -74,9 +114,10 @@ export const WorkspacePane = () => {
   const [downloading, setDownloading] = useState(false)
   const downloadPreview = (): void => {
     const current = useWorkspacePane.getState().preview
-    if (current === null || downloading) return
-    setDownloading(true)
     const scopeId = useWorkspacePane.getState().scopeId
+    if (current === null || scopeId === null || downloading ||
+      scopeId !== useRemoteStore.getState().activeSessionId) return
+    setDownloading(true)
     const task =
       current.kind === 'image' && current.url !== undefined
         ? downloadFromUrl(current.url, baseNameOf(current.path), current.mimeType)
@@ -85,36 +126,31 @@ export const WorkspacePane = () => {
       .catch(() => undefined)
       .then(() => setDownloading(false))
   }
-  const downloadVisible =
-    preview !== null && (preview.kind === 'text' || preview.kind === 'image') && preview.status !== 'loading'
+  const downloadVisible = preview !== null && preview.status !== 'loading'
 
   // Esc 关闭（手机上等价于「返回」）；预览优先退到目录
   useEffect(() => {
-    if (!open) return undefined
+    if (!visible) return undefined
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return
+      if (event.key !== 'Escape' || event.defaultPrevented ||
+        document.querySelector('[role="dialog"][aria-modal="true"]:not([data-workspace-pane])')) return
+      if (switcherOpen) {
+        setSwitcherOpen(false)
+        return
+      }
       if (useWorkspacePane.getState().preview !== null) {
         useWorkspacePane.getState().closePreview()
         return
       }
-      close()
+      useWorkspacePane.getState().closePane()
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [open])
+  }, [visible, switcherOpen])
 
-  // 卸载（远程页被换掉）时把图片 blob URL 还回去
-  useEffect(
-    () => () => {
-      const state = useWorkspacePane.getState()
-      if (state.preview !== null && state.preview.kind === 'image' && state.preview.url !== undefined) {
-        URL.revokeObjectURL(state.preview.url)
-      }
-    },
-    [],
-  )
+  useEffect(() => () => useWorkspacePane.getState().closePane(), [])
 
-  if (!open || supported === false) return null
+  if (!visible) return null
 
   /*
    * 工作区切换（S2）：
@@ -157,132 +193,136 @@ export const WorkspacePane = () => {
   const displayPath = rootPath.length > 0 ? rootPath : t('workspacePaneUnknownRoot')
   const currentDir = preview !== null ? parentRelativePath(preview.path) : ''
 
-  return createPortal(
-    <div className={clsx(styles.overlay, isMobile && styles.overlayMobile)} onClick={close}>
-      <div
-        className={clsx(styles.panel, isMobile ? styles.panelMobile : styles.panelSide)}
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('workspacePaneTitle')}
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className={styles.header}>
-          <div className={styles.headerText}>
-            <div className={styles.title}>{t('workspacePaneTitle')}</div>
-            <div className={styles.path} title={displayPath}>
-              {displayPath}
-            </div>
+  const panel = (
+    <div
+      className={clsx(styles.panel, docked ? styles.panelDocked : isMobile ? styles.panelMobile : styles.panelSide)}
+      role={docked ? 'complementary' : 'dialog'}
+      aria-modal={docked ? undefined : true}
+      aria-label={t('workspacePaneTitle')}
+      data-workspace-pane
+    >
+      <div className={styles.header}>
+        <div className={styles.headerText}>
+          <div className={styles.title}>{t('workspacePaneTitle')}</div>
+          <div className={styles.path} title={displayPath}>
+            {displayPath}
           </div>
-          {downloadVisible ? (
-            <IconButton
-              size="xs"
-              tooltip={t('downloadAction')}
-              icon={<IconDownloadOutline16 />}
-              disabled={downloading}
-              onClick={downloadPreview}
-            />
-          ) : null}
+        </div>
+        {downloadVisible ? (
           <IconButton
             size="xs"
-            tooltip={t('workspacePaneRefresh')}
-            icon={<IconRefreshOutline16 />}
-            onClick={() => void useWorkspacePane.getState().refresh(currentDir)}
+            tooltip={t('downloadAction')}
+            icon={<IconDownloadOutline16 />}
+            disabled={downloading}
+            onClick={downloadPreview}
           />
-          <IconButton
-            size="xs"
-            tooltip={t('workspacePaneClose')}
-            icon={<IconCloseOutline16 />}
-            onClick={close}
-          />
-        </div>
-
-        <div className={styles.toolbar}>
-          {switchable ? (
-            <>
-              <button
-                ref={switcher.anchorRef}
-                type="button"
-                className={styles.switchTrigger}
-                aria-haspopup="dialog"
-                aria-expanded={switcherOpen}
-                aria-label={t('workspaces.switch')}
-                title={t('workspaces.switchHint')}
-                onClick={() => setSwitcherOpen((open) => !open)}
-              >
-                <span className={styles.switchLabel}>{switchLabel}</span>
-                <span className={styles.switchArrow} aria-hidden>
-                  <IconChevronDownOutline14 />
-                </span>
-              </button>
-              {switcherOpen
-                ? createPortal(
-                  <div
-                    ref={switcher.floatingRef}
-                    className={styles.switchMenu}
-                    style={switcher.position ?? undefined}
-                    role="dialog"
-                    aria-label={t('workspaces.switch')}
-                  >
-                    <WorkspaceList
-                      testId="workspace-switch-list"
-                      label={t('workspaces.listLabel')}
-                      items={switchItems}
-                      onSelect={(item) => {
-                        const workspace = workspaces.find((entry) => entry.workspaceId === item.workspaceId)
-                        setSwitcherOpen(false)
-                        if (workspace === undefined) return
-                        const sessionId = sessionOfWorkspace(workspace)
-                        if (sessionId === undefined) return
-                        // 真切换：让 `workspaceFileScopeId` 跟着会话换到那个工作区（只换标题是骗人）
-                        void Promise.resolve(useRemoteStore.getState().openSession(sessionId)).catch(() => undefined)
-                      }}
-                    />
-                  </div>,
-                  document.body,
-                )
-                : null}
-            </>
-          ) : (
-            <span className={styles.rootBadge}>{t('workspacePaneRoot')}</span>
-          )}
-          {preview === null ? (
-            <span className={styles.dirLabel}>{t('workspacePaneFilesHere')}</span>
-          ) : (
-            <button
-              type="button"
-              className={styles.backButton}
-              onClick={() => useWorkspacePane.getState().closePreview()}
-            >
-              {t('workspacePaneBack')} · {baseNameOf(preview.path)}
-            </button>
-          )}
-        </div>
-
-        {rootSource === 'unknown' ? (
-          <div className={styles.notice}>{t('workspacePaneUnknownRootHint')}</div>
         ) : null}
-        {error !== null ? <div className={styles.error}>{error}</div> : null}
+        <IconButton
+          size="xs"
+          tooltip={t('workspacePaneRefresh')}
+          icon={<IconRefreshOutline16 />}
+          onClick={() => void useWorkspacePane.getState().refresh(currentDir)}
+        />
+        <IconButton
+          size="xs"
+          tooltip={t('workspacePaneClose')}
+          icon={<IconCloseOutline16 />}
+          onClick={close}
+        />
+      </div>
 
-        <div className={styles.body}>
-          {preview !== null ? (
-            <FilePreview preview={preview} />
-          ) : rootNode === undefined || (rootNode.loading && !rootNode.loaded) ? (
-            <div className={styles.notice}>{t('workspacePaneLoading')}</div>
-          ) : rootNode.error !== null ? (
-            <div className={styles.error}>{rootNode.error}</div>
-          ) : rootNode.entries.length === 0 ? (
-            <div className={styles.notice}>{t('workspacePaneEmptyDir')}</div>
-          ) : (
-            <WorkspaceTree path="" depth={0} />
-          )}
-        </div>
-
-        {scopeId === null ? null : (
-          <div className={styles.footer} title={scopeId}>
-            {t('workspacePaneScope', { session: scopeId.slice(0, 8) })}
-          </div>
+      <div className={styles.toolbar}>
+        {switchable ? (
+          <>
+            <button
+              ref={switcher.anchorRef}
+              type="button"
+              className={styles.switchTrigger}
+              aria-haspopup="dialog"
+              aria-expanded={switcherOpen}
+              aria-label={t('workspaces.switch')}
+              title={t('workspaces.switchHint')}
+              onClick={() => setSwitcherOpen((open) => !open)}
+            >
+              <span className={styles.switchLabel}>{switchLabel}</span>
+              <span className={styles.switchArrow} aria-hidden>
+                <IconChevronDownOutline14 />
+              </span>
+            </button>
+            {switcherOpen
+              ? createPortal(
+                <div
+                  ref={switcher.floatingRef}
+                  className={styles.switchMenu}
+                  style={switcher.position ?? undefined}
+                  role="dialog"
+                  aria-label={t('workspaces.switch')}
+                >
+                  <WorkspaceList
+                    testId="workspace-switch-list"
+                    label={t('workspaces.listLabel')}
+                    items={switchItems}
+                    onSelect={(item) => {
+                      const workspace = workspaces.find((entry) => entry.workspaceId === item.workspaceId)
+                      setSwitcherOpen(false)
+                      if (workspace === undefined) return
+                      const sessionId = sessionOfWorkspace(workspace)
+                      if (sessionId === undefined) return
+                      // 真切换：让 `workspaceFileScopeId` 跟着会话换到那个工作区（只换标题是骗人）
+                      void Promise.resolve(useRemoteStore.getState().openSession(sessionId)).catch(() => undefined)
+                    }}
+                  />
+                </div>,
+                document.body,
+              )
+              : null}
+          </>
+        ) : (
+          <span className={styles.rootBadge}>{t('workspacePaneRoot')}</span>
+        )}
+        {preview === null ? (
+          <span className={styles.dirLabel}>{t('workspacePaneFilesHere')}</span>
+        ) : (
+          <button
+            type="button"
+            className={styles.backButton}
+            onClick={() => useWorkspacePane.getState().closePreview()}
+          >
+            {t('workspacePaneBack')} · {baseNameOf(preview.path)}
+          </button>
         )}
       </div>
+
+      {rootSource === 'unknown' ? (
+        <div className={styles.notice}>{t('workspacePaneUnknownRootHint')}</div>
+      ) : null}
+      {error !== null ? <div className={styles.error}>{error}</div> : null}
+
+      <div className={styles.body}>
+        {preview !== null ? (
+          <FilePreview preview={preview} />
+        ) : rootNode === undefined || (rootNode.loading && !rootNode.loaded) ? (
+          <div className={styles.notice}>{t('workspacePaneLoading')}</div>
+        ) : rootNode.error !== null ? (
+          <div className={styles.error}>{rootNode.error}</div>
+        ) : rootNode.entries.length === 0 ? (
+          <div className={styles.notice}>{t('workspacePaneEmptyDir')}</div>
+        ) : (
+          <WorkspaceTree path="" depth={0} />
+        )}
+      </div>
+
+    </div>
+  )
+
+  return docked ? panel : createPortal(
+    <div
+      className={clsx(styles.overlay, isMobile && styles.overlayMobile)}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) close()
+      }}
+    >
+      {panel}
     </div>,
     document.body,
   )

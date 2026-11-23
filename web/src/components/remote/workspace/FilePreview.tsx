@@ -1,4 +1,5 @@
 import clsx from 'clsx'
+import { lazy, Suspense } from 'react'
 import { useTranslate } from '../../../i18n/index.js'
 import { formatSize } from '../../../services/attachments.js'
 import { baseNameOf, extensionOf } from '../../../services/remote/filesApi.js'
@@ -11,6 +12,8 @@ import { FileIcon } from '../../files/FileIcon.js'
 import '../../markdown/markdown.css'
 import { useWorkspacePane, type PreviewState } from './workspacePaneStore.js'
 import styles from './WorkspacePane.module.css'
+
+const WorkspacePdf = lazy(() => import('./WorkspacePdf.js'))
 
 /**
  * 文件预览（三种形态，见任务书）：
@@ -27,7 +30,27 @@ import styles from './WorkspacePane.module.css'
 export const FilePreview = ({ preview }: { preview: PreviewState }) => {
   if (preview.kind === 'text') return <TextPreview preview={preview} />
   if (preview.kind === 'image') return <ImagePreviewState preview={preview} />
+  if (preview.kind === 'document') return <DocumentPreviewState preview={preview} />
   return <BinaryPreviewState preview={preview} />
+}
+
+const DocumentPreviewState = ({ preview }: { preview: Extract<PreviewState, { kind: 'document' }> }) => {
+  const t = useTranslate()
+  const loading = <div className={styles.notice}>{t('workspacePaneLoading')}</div>
+  return <div className={styles.preview}>
+    <div className={styles.previewBar}>
+      <span className={styles.previewName} title={preview.path}>{baseNameOf(preview.path)}</span>
+      <span className={styles.previewMeta}>PDF</span>
+    </div>
+    {preview.status === 'loading' && loading}
+    {preview.status === 'error' && <div role="alert" className={styles.error}>{preview.error}</div>}
+    {preview.status === 'ready' && <>
+      {preview.missingFonts.length > 0 && <div className={styles.notice}>
+        {t('workspacePaneDocumentFonts', { fonts: preview.missingFonts.join(', ') })}
+      </div>}
+      <Suspense fallback={loading}><WorkspacePdf bytes={preview.bytes} /></Suspense>
+    </>}
+  </div>
 }
 
 /* ────────────────────────────── 文本 ────────────────────────────── */

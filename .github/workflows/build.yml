@@ -30,7 +30,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
@@ -47,6 +47,28 @@ jobs:
         run: npx rspack build -c rspack.config.ts
         env:
           NODE_ENV: production
+
+      # 远程层的自测：36 套，任何一套非零退出就红（需要 Node >= 22.7）
+      - name: 远程自测
+        working-directory: web
+        run: pnpm run selftest
+
+      # Android 源文件 / 清单 / 资源的结构检查，不需要 JDK 和 Android SDK
+      - name: Android 静态检查
+        run: node tools/check-android-shell.cjs
+
+      # 三档视口 + 远程功能的浏览器回归：先用测试入口构建一份模拟主机的产物
+      - name: 构建浏览器回归产物
+        working-directory: web
+        run: npx rspack build -c ../tools/qa/tablet-qa.config.ts
+        env:
+          NODE_ENV: production
+
+      - name: 浏览器回归
+        run: node tools/check-tablet-layout.mjs
+        env:
+          QA_DIST: tmp/qa-dist
+          CHROME_PATH: /usr/bin/google-chrome
 
       - name: 启动冒烟（无头浏览器）
         # 构建产物能不能真的跑起来：tsc 抓不到运行期错误（v1.8.6 黑屏就是这么漏的）

@@ -39,7 +39,8 @@ import {
   type RpcCallOptions,
   type StreamEventPayload,
 } from './rpcMux.js'
-import { SecureChannel, type SecureChannelStats } from './secureChannel.js'
+import { SecureChannel, type SecureChannelOptions, type SecureChannelStats } from './secureChannel.js'
+import type { SelectedTransport } from '../../../vendor/dsh-remote/protocol/index.js'
 
 /** `SecureLink.state` 的取值（契约 §3）。 */
 export type SecureLinkState = 'closed' | 'connecting' | 'open' | 'secure'
@@ -76,6 +77,9 @@ export interface SecureLinkOptions {
   helloTimeoutMs?: number
   connectTimeoutMs?: number
   handshakeTimeoutMs?: number
+  rtc?: SecureChannelOptions['rtc']
+  relayBridge?: SecureChannelOptions['relayBridge']
+  useRelayNode?: boolean
   /** 单次 RPC 默认预算（默认 30 s）。 */
   rpcTimeoutMs?: number
   /** 心跳间隔；缺省用 hello.ack 的 `heartbeatIntervalMs`（25 s）。 */
@@ -87,11 +91,7 @@ export interface SecureLinkOptions {
 /** 契约 §3 的对外接口。 */
 export interface SecureLink {
   readonly state: SecureLinkState
-  /**
-   * 实际数据面（扩展字段，供 UI 展示；P0 恒为 `'relay'`）。
-   * 没有它时 UI 只能猜，S3 的 `resolveTransport()` 已按可选字段读取。
-   */
-  readonly transport: 'relay'
+  readonly transport: SelectedTransport
   /** 等安全通道就绪（Noise 完成 + transport.selected 已发）。 */
   ready(): Promise<void>
   /** 发一帧明文 JSON（内部负责分片 + 加密）。 */
@@ -110,7 +110,10 @@ export function createSecureLink(options: SecureLinkOptions): SecureLink {
     headers: options.headers,
     ...(options.bridgeUrl === undefined ? {} : { bridgeUrl: options.bridgeUrl }),
   })
-  return new SecureLinkImpl(options, bridge)
+  const relayBridge = options.useRelayNode && !options.relayBridge
+    ? (url: string) => createBridgeSocket({ url, headers: {}, bridgeUrl: options.bridgeUrl, openTimeoutMs: 5000 })
+    : options.relayBridge
+  return new SecureLinkImpl({ ...options, relayBridge }, bridge)
 }
 
 /**
@@ -124,8 +127,6 @@ export function createSecureLinkWithBridge(options: SecureLinkOptions, bridge: B
 }
 
 class SecureLinkImpl implements SecureLink {
-  /** P0 只用控制通道 relay（没声明 WebRTC/LAN/独立 Relay 能力）。 */
-  readonly transport = 'relay' as const
   private current: SecureLinkState = 'connecting'
   private readonly options: SecureLinkOptions
   private readonly channel: SecureChannel
@@ -150,6 +151,8 @@ class SecureLinkImpl implements SecureLink {
       ...(options.helloTimeoutMs === undefined ? {} : { helloTimeoutMs: options.helloTimeoutMs }),
       ...(options.connectTimeoutMs === undefined ? {} : { connectTimeoutMs: options.connectTimeoutMs }),
       ...(options.handshakeTimeoutMs === undefined ? {} : { handshakeTimeoutMs: options.handshakeTimeoutMs }),
+      ...(options.rtc === undefined ? {} : { rtc: options.rtc }),
+      ...(options.relayBridge === undefined ? {} : { relayBridge: options.relayBridge }),
       onPhase: phase => {
         if (phase === 'bridge-open') this.emitState('open')
         else if (phase === 'secure') this.emitState('secure')
@@ -175,6 +178,10 @@ class SecureLinkImpl implements SecureLink {
 
   get state(): SecureLinkState {
     return this.current
+  }
+
+  get transport(): SelectedTransport {
+    return this.channel.transport
   }
 
   async ready(): Promise<void> {

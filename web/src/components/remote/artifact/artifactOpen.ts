@@ -14,7 +14,8 @@
 import type { ArtifactFile } from '../../../services/remote/artifacts.js'
 import { toWorkspaceRelative } from '../../../services/remote/artifacts.js'
 import { useNewSessionStore } from '../../../services/remote/newSessionStore.js'
-import { useRemoteStore } from '../../../services/remote/store.js'
+import { lastRemoteTarget } from '../../../services/remote/sessionsApi.js'
+import { remoteSessionSelectionVersion, useRemoteStore } from '../../../services/remote/store.js'
 import { showToast } from '../../base/toastState.js'
 import { useWorkspacePane } from '../workspace/workspacePaneStore.js'
 
@@ -28,23 +29,14 @@ export type ArtifactOpenResult = 'opened' | 'external' | 'missing' | 'outside' |
  * 所以这里主动补一次（`ensureWorkspaceFlags` 在 store 里是**按连接只拉一次**的缓存调用，
  * `resolveRoot` 只读本地行，不会打网络）。
  */
-const ensureWorkspaceRoot = async (): Promise<string> => {
-  let pane = useWorkspacePane.getState()
-  if (pane.scopeId === null) {
-    const active = useRemoteStore.getState().activeSessionId
-    if (active === null) {
-      return ''
-    }
-    await pane.bind(active)
-    pane = useWorkspacePane.getState()
-  }
-  if (pane.rootPath.length === 0) {
+const ensureWorkspaceRoot = async (isCurrent: () => boolean): Promise<string> => {
+  if (useWorkspacePane.getState().rootPath.length === 0) {
     try {
       await useNewSessionStore.getState().ensureWorkspaceFlags()
     } catch {
       // 拉不到会话清单不影响「相对路径」这种最常见的情况
     }
-    useWorkspacePane.getState().resolveRoot()
+    if (isCurrent()) useWorkspacePane.getState().resolveRoot()
   }
   return useWorkspacePane.getState().rootPath
 }
@@ -60,19 +52,32 @@ export const openArtifactFile = async (file: ArtifactFile): Promise<ArtifactOpen
     window.open(file.url, '_blank', 'noopener,noreferrer')
     return 'external'
   }
+  const target = lastRemoteTarget()
+  const sessionId = useRemoteStore.getState().activeSessionId
+  const selection = remoteSessionSelectionVersion()
+  if (target === null || sessionId === null) return 'unavailable'
+  const isCurrent = () => lastRemoteTarget() === target &&
+    remoteSessionSelectionVersion() === selection &&
+    useRemoteStore.getState().activeSessionId === sessionId &&
+    useWorkspacePane.getState().attachmentTarget === target &&
+    useWorkspacePane.getState().scopeId === sessionId
+  await useWorkspacePane.getState().bind(sessionId)
+  if (!isCurrent()) return 'unavailable'
   // 能力门禁：Host 没有 `workspaceFiles/*`（`METHOD_NOT_FOUND`）时抽屉整块不存在，
   // 说「不支持」比说「没连上」诚实 —— 后者会让人一直点着重试。
   if (useWorkspacePane.getState().filesSupported === false) {
     showToast({ key: 'artifactUnsupported' })
     return 'unavailable'
   }
-  const root = await ensureWorkspaceRoot()
+  const root = await ensureWorkspaceRoot(isCurrent)
+  if (!isCurrent()) return 'unavailable'
   const relative = toWorkspaceRelative(file.path, root)
   if (relative === null) {
     showToast({ key: 'artifactOutsideWorkspace', params: { name: file.name } })
     return 'outside'
   }
   const result = await useWorkspacePane.getState().openAt(relative)
+  if (!isCurrent()) return 'unavailable'
   if (result === 'ok') {
     return 'opened'
   }

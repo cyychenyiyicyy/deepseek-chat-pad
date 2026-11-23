@@ -48,6 +48,7 @@ import {
   type RemoteCallTarget,
 } from '../sessionsApi.js'
 import { useRemotePaging, useRemoteStore } from '../store.js'
+import { forkPointBeforePrompt, messageActionPoints } from '../messageActions.js'
 
 /* ── 极简断言器（与 connection.selftest.mts 同款） ─────────────────────── */
 
@@ -149,6 +150,7 @@ check('快照：turn/start + user/message + assistant/message + turn/end → 2 �
   assertEqual(messages[1]?.role, 'assistant', '第二条是助手')
   assertEqual(messages[1]?.text, '目录里有两个文件。', '助文本')
   assertEqual(messages[1]?.turnEnd?.reason, 'completed', 'turn/end 已落到行上')
+  assertEqual(messages[1]?.turnEnd?.seq, 4, '从回复分叉使用权威的回合边界')
   assertEqual(state.cursor, 4, '游标 = 最大 seq')
   assertEqual(state.transient, 0, '快照没有瞬态 chunk')
 })
@@ -156,6 +158,38 @@ check('快照：turn/start + user/message + assistant/message + turn/end → 2 �
 check('快照：host 不给 snapshot 时 parseSnapshot 返回 null（调用方按协议报错）', async () => {
   assertEqual(parseSnapshot({ type: 'event', event: {} }), null, 'type ≠ snapshot')
   assertEqual(parseSnapshot(null), null, 'null')
+})
+
+check('消息分叉仅取每轮最后一条回复，重答使用原问题之前的完整边界', async () => {
+  const snapshot = parseSnapshot(snapshotFixture)!
+  const [firstPrompt, firstReply] = messageRows(reduceSnapshot(snapshot, sessionId).items)
+  const nextPrompt: ChatMessage = { ...firstPrompt, id: 'next-prompt', nativeSeq: 6, turnEnd: undefined }
+  const middleReply: ChatMessage = { ...firstReply, id: 'middle', nativeSeq: 7, turnEnd: { reason: 'completed', time: 2_000, seq: 9 } }
+  const finalReply: ChatMessage = { ...middleReply, id: 'final', nativeSeq: 8 }
+  const actions = messageActionPoints([firstPrompt, firstReply, nextPrompt, middleReply, finalReply])
+  assertEqual([...actions.branch], [['msg-asst-1', 4], ['final', 9]], '只接受权威完成边界')
+  assertEqual(actions.regenerate?.prompt.id, nextPrompt.id, '重答选中原问题')
+  assertEqual(messageActionPoints([firstReply, { ...nextPrompt, hasFiles: true }, finalReply]).regenerate,
+    undefined, '带文件的原问题不能静默丢附件重发')
+})
+
+check('编辑首轮、后续轮次和插话时保留紧邻输入之前的持久事件', async () => {
+  const types = [
+    'permission/preset', 'sandbox/mode', 'approval/policy', 'agent/inbox/spliced',
+    'turn/start', 'agent/inbox/spliced', 'step/start', 'system/message',
+    'user/message', 'session/title', 'assistant/message', 'step/end', 'turn/end',
+    'agent/inbox/spliced', 'turn/start', 'agent/inbox/spliced', 'step/start',
+    'user/message', 'assistant/message', 'step/end', 'step/start',
+    'agent/inbox/spliced', 'user/message',
+  ]
+  const history = historyEntriesFromRecords(types.map((type, seq) => ({
+    type: 'event', event: { type, seq, time: seq, data: {} },
+  })))
+  assertEqual(forkPointBeforePrompt(history, 8), 2, '启动设置保留在新会话')
+  assertEqual(forkPointBeforePrompt(history.slice(12, 17), 17), 12, '后续轮次保留上一轮结束')
+  assertEqual(forkPointBeforePrompt(history, 22), 19, '插话前保留同回合已完成的步骤')
+  assertEqual(forkPointBeforePrompt(history.filter(({ event }) => event.seq !== 15), 17),
+    undefined, '历史缺帧时不猜测截断位置')
 })
 
 /* ── 2. 增量帧 ────────────────────────────────────────────────────────── */
@@ -365,13 +399,20 @@ check('乐观消息：addOptimisticUserMessage 可被 markSendState 标成 faile
 
 check('分页锚点：oldestSeqOfItems 取最旧 seq（含 historyEntriesFromRecords 展开）', async () => {
   const state = reduceSnapshot(parseSnapshot(snapshotFixture)!, sessionId)
-  // `turn/start` 不产生行，所以最旧的行是用户消息（seq 2）—— 上翻锚点就该落在
-  // 第一个**看得见**的事件上，否则会拿到重复页。
+  // `turn/start` 不产生行。分页仍须从该事件起算，避免重复请求同一页。
   assertEqual(oldestSeqOfItems(state.items), 2, '最旧可见行 = 用户消息的 seq 2')
+  assertEqual(state.historyBeforeSeq, 1, '分页锚点 = 最旧的持久事件')
   const entries = historyEntriesFromRecords(snapshotFixture.records)
   assertEqual(entries.length, 4, '四条记录都展开了')
   assertEqual(hasVisibleMessageText('  \u200b '), false, '纯空白/零宽不算可见文本')
   assertEqual(hasVisibleMessageText('hi'), true, '正常文本可见')
+})
+
+check('回显先于 RPC 超时时，迟到的发送错误不能标记主机消息', async () => {
+  const items = messageRows(reduceSnapshot(parseSnapshot(snapshotFixture)!, sessionId).items)
+  const echo = items.find((item) => item.role === 'user')!
+  const accepted = [{ ...echo, requestRpcId: 'already-received' }]
+  assertEqual(markSendState(accepted, 'already-received', 'unconfirmed', 'timeout'), accepted, 'Host 回显仍然已送达')
 })
 
 check('空状态：createTranscriptState 是干净的', async () => {

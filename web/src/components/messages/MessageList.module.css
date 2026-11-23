@@ -30,10 +30,9 @@
 }
 
 .column {
-  width: calc(var(--message-list-max-width) - 2 * var(--message-list-padding-horizontal));
-  max-width: calc(100% - 40px);
+  width: min(var(--chat-width), calc(100% - 2 * var(--chat-gutter)));
   margin: 0 auto;
-  padding-bottom: 24px;
+  padding-block: 18px 24px;
 }
 
 /* 顶部「加载更早的消息」 */

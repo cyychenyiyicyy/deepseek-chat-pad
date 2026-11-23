@@ -434,7 +434,6 @@ export const callEndpoint = async <T>(
   args: Record<string, unknown>,
   timeoutMs = DEFAULT_CALL_TIMEOUT_MS,
 ): Promise<T> => {
-  observeRemoteTarget(target)
   const result = await target.rpc<unknown>(
     RemoteMethods.call,
     { endpoint, payload: { args } },
@@ -477,34 +476,21 @@ export const callWorkspaceUpload = async <T>(
   params: Record<string, unknown>,
   timeoutMs = DEFAULT_CALL_TIMEOUT_MS,
 ): Promise<T> => {
-  observeRemoteTarget(target)
   return await target.rpc<T>(method, params, { timeoutMs })
 }
 
 /* ────────────────────────────────────────────────────────────────────────
- * 四·补、连接观察者（给 W1 的独立 store 复用现有连接，不动 store.ts）
+ * 四·补、当前连接（由连接生命周期发布）
  * ──────────────────────────────────────────────────────────────────────── */
 
-/**
- * 本模块**观察**到的最近一次调用目标（= `store.ts` 里那个 `ActiveSession.link`）。
- *
- * 为什么需要：`store.ts` 的 `active` 是模块私有的，而 W1 的 `newSessionStore.ts`
- * 又必须能发 `workspace/follow` / `session/create` 这些端点。任务边界不允许改
- * `store.ts`（它由 W2 独占）也不允许新增 action，所以这里做一个**纯只读观察者**：
- * 业务层每次真正调用都会把 target 记下来，别人要用时拿走同一个引用即可。
- *
- * 用法纪律（`newSessionStore.ts` 已经这么做了）：
- *   - 只能在 `useRemoteStore.getState().phase === 'ready'` 时用它（否则是上一代连接的死引用）；
- *   - 只拿它发请求，不持有、不改、不 dispose（连接生命周期仍归 `store.ts`）。
- */
 let observedTarget: RemoteCallTarget | null = null
 
-/** 记一次调用目标（`callEndpoint` / 开流函数内部调用，业务代码不必手动调）。 */
+/** 由连接生命周期登记或清理。迟到的 RPC 始终使用原连接，不能成为当前连接。 */
 export const observeRemoteTarget = (target: RemoteCallTarget | null): void => {
   observedTarget = target
 }
 
-/** 最近一次观察到的调用目标（没有过就返回 `null`）。 */
+/** 已登记的当前连接。 */
 export const lastRemoteTarget = (): RemoteCallTarget | null => observedTarget
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -617,7 +603,6 @@ export const openFollow = async (
     maxMessages: options.maxMessages ?? DEFAULT_HISTORY_PAGE_SIZE,
   }
   if (options.assistantStream === true) request.assistantStream = true
-  observeRemoteTarget(target)
   return await target.openStream(
     RemoteEndpoints.sessionFollow,
     { args: { request } },
@@ -848,7 +833,6 @@ export const cancelSession = async (
  * （审批应答要用 `clientId`），P0 因此把它当成建连的最后一关。
  */
 export const openEvents = async (target: RemoteCallTarget): Promise<RemoteStreamHandle> => {
-  observeRemoteTarget(target)
   return await target.openStream(RemoteEndpoints.events, { args: {} }, { timeoutMs: STREAM_OPEN_TIMEOUT_MS })
 }
 
@@ -928,6 +912,7 @@ export interface RemoteWorkspaceList {
   archivedSessionIds: string[]
   /** 老 Host 可能没有这一项 —— 缺省是空数组，UI 不要据此判断「没置顶过」。 */
   pinnedSessionIds: string[]
+  pinnedReported?: boolean
 }
 
 const stringList = (value: unknown): string[] =>
@@ -947,22 +932,20 @@ export const parseWorkspace = (value: unknown): RemoteWorkspace | null => {
 }
 
 /**
- * 解析 `workspace/follow` 的首帧。
- *
- * 首帧**必须**是 `{type:'baseline', value:{items, archivedSessionIds, pinnedSessionIds?}}`
- * （input-B §2.1，证据 `harness-alpha-client.ts:970-982`）；不是 baseline 就返回 `null`，
- * 调用方据此判定「这台 Host 的工作区流不可用」，而不是拿半截数据往上画。
+ * 解析 `workspace/follow` 的初始快照和权限变化后发送的替换快照。
  */
 export const parseWorkspaceBaseline = (frame: unknown): RemoteWorkspaceList | null => {
-  if (!isRecord(frame) || frame.type !== 'baseline' || !isRecord(frame.value)) return null
+  if (!isRecord(frame) || (frame.type !== 'baseline' && frame.type !== 'replace') || !isRecord(frame.value)) return null
   const value = frame.value
+  if (!Array.isArray(value.items)) return null
   return {
-    items: Array.isArray(value.items) ? value.items.flatMap((item) => {
+    items: value.items.flatMap((item) => {
       const parsed = parseWorkspace(item)
       return parsed === null ? [] : [parsed]
-    }) : [],
+    }),
     archivedSessionIds: stringList(value.archivedSessionIds),
     pinnedSessionIds: stringList(value.pinnedSessionIds),
+    pinnedReported: Array.isArray(value.pinnedSessionIds),
   }
 }
 
@@ -974,7 +957,6 @@ export const openWorkspaceFollow = async (
   target: RemoteCallTarget,
   options: { timeoutMs?: number } = {},
 ): Promise<RemoteStreamHandle> => {
-  observeRemoteTarget(target)
   return await target.openStream(
     RemoteEndpoints.workspaceFollow,
     { args: {} },
@@ -982,19 +964,13 @@ export const openWorkspaceFollow = async (
   )
 }
 
-/* ────────────────────────────────────────────────────────────────────────
- * 九·补、`workspace/follow` 的**增量帧**（S2）
- *
- * input-B §2.1 逐字取证过的只有首帧 `baseline`；增量帧的形状没有拿到官方实现原文，
- * 所以这里**只识别语义明确的两类**（upsert / remove），其余一律 `ignore`：
- *   - 忽略是安全的，因为 baseline 是权威全集，而流被关掉后 `workspaces.ts` 会重开并
- *     重新拿一份 baseline —— 增量丢一两条只会晚一拍，不会留下错的数据。
- * ──────────────────────────────────────────────────────────────────────── */
-
-/** 一帧 `workspace/follow` 的增量（认出多少算多少）。 */
+/** 一帧 `workspace/follow` 的增量。 */
 export type RemoteWorkspaceFrame =
   | { kind: 'upsert'; workspace: RemoteWorkspace }
   | { kind: 'remove'; workspaceId: string }
+  | { kind: 'order'; workspaceIds: string[] }
+  | { kind: 'pinned'; sessionIds: string[] }
+  | { kind: 'archived'; sessionIds: string[] }
   | { kind: 'ignore' }
 
 /** `workspace/removed` / `workspace/delete` / `deleted:true` 这些写法都认。 */
@@ -1013,6 +989,15 @@ const isRemovalFrame = (frame: Record<string, unknown>, type: string): boolean =
 export const parseWorkspaceFrame = (frame: unknown): RemoteWorkspaceFrame => {
   if (!isRecord(frame)) return { kind: 'ignore' }
   const type = typeof frame.type === 'string' ? frame.type : ''
+  if (type === 'order' && Array.isArray(frame.workspaceIds)) {
+    return { kind: 'order', workspaceIds: stringList(frame.workspaceIds) }
+  }
+  if (type === 'pinned' && Array.isArray(frame.pinnedSessionIds)) {
+    return { kind: 'pinned', sessionIds: stringList(frame.pinnedSessionIds) }
+  }
+  if (type === 'archived' && Array.isArray(frame.archivedSessionIds)) {
+    return { kind: 'archived', sessionIds: stringList(frame.archivedSessionIds) }
+  }
   const removing = isRemovalFrame(frame, type)
   const candidate = isRecord(frame.workspace)
     ? frame.workspace

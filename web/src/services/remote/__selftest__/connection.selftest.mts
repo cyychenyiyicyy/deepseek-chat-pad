@@ -63,6 +63,7 @@ interface FakeLinkOptions {
   readyError?: Error
   describe?: unknown
   describeError?: Error
+  configureHistory?: (params: unknown) => unknown
   transport?: string
 }
 
@@ -82,8 +83,9 @@ const createFakeLink = (options: FakeLinkOptions = {}) => {
     sendFrame() {
       calls.push('sendFrame')
     },
-    async rpc<T = unknown>(method: string): Promise<T> {
+    async rpc<T = unknown>(method: string, params?: unknown): Promise<T> {
       calls.push(`rpc:${method}`)
+      if (method === 'remote.history.configure') return options.configureHistory?.(params) as T
       if (options.describeError !== undefined) throw options.describeError
       return (options.describe ?? { capabilities: ['harness.remote.v1', 'transport.relay'] }) as T
     },
@@ -118,6 +120,32 @@ const account = {
 
 const host = { deviceId: HOST_ID, name: 'Workstation', identityKey: IDENTITY_KEY }
 
+check('精简历史只在支持的主机协商，且要求逐字段确认', async () => {
+  const client = new RemoteClientImpl()
+  const describe = { capabilities: ['harness.remote.v3', 'remote.history.compact.v1'] }
+  for (const compact of [false, true]) {
+    const { link, calls } = createFakeLink({ describe, configureHistory: (params) => {
+      assertEqual(params, { compact }, '请求固定连接的历史模式')
+      return { compact }
+    } })
+    const result = await client.connect(SERVER, account, host, link, { compactHistory: compact })
+    assertEqual(result.compactHistory, compact, '模式经主机确认')
+    assertEqual(calls, ['ready', 'rpc:harness.transport.describe', 'rpc:remote.history.configure'], '业务流之前协商')
+  }
+  const legacy = createFakeLink()
+  const fallback = await client.connect(SERVER, account, host, legacy.link, { compactHistory: true })
+  assertEqual(fallback.compactHistory, false, '旧版主机继续使用完整历史')
+  assertEqual(legacy.calls, ['ready', 'rpc:harness.transport.describe'], '旧版没有额外的 RPC')
+  const dropped = createFakeLink()
+  const lostSupport = await client.connect(SERVER, account, host, dropped.link, { compactHistory: true, requireCompactHistory: true })
+    .catch(codeOfError)
+  assertEqual(lostSupport, 'HISTORY_MODE_CHANGED', '自动重连不可静默换模式')
+  const invalid = createFakeLink({ describe, configureHistory: () => ({ compact: false, extra: 1 }) })
+  const wrongEcho = await client.connect(SERVER, account, host, invalid.link).catch(codeOfError)
+  assertEqual(wrongEcho, 'INVALID_MESSAGE', '拒绝未知确认格式')
+  assertTrue(invalid.isClosed(), '异常连接已关闭')
+})
+
 /* ── 状态机 ───────────────────────────────────────────────────────────── */
 
 check('connect 成功：connecting → handshaking → ready，且调了一次 describe', async () => {
@@ -128,7 +156,10 @@ check('connect 成功：connecting → handshaking → ready，且调了一次 d
 
   const result = await client.connect(SERVER, account, host, fake.link)
 
-  assertEqual(result, { capabilities: ['harness.remote.v3', 'transport.relay'], transport: 'relay' }, '返回值')
+  assertEqual(result.capabilities, ['harness.remote.v3', 'transport.relay'], '能力')
+  assertEqual(result.transport, 'relay', '传输方式')
+  assertTrue(result.diagnostics.connectMs >= result.diagnostics.hostRequestMs, '请求耗时包含在握手内')
+  assertTrue(result.diagnostics.measuredAt > 0, '保留测量时间')
   assertEqual(fake.calls.filter((call) => call === 'ready').length, 1, 'ready 调 1 次')
   assertEqual(fake.calls.filter((call) => call === 'rpc:harness.transport.describe').length, 1, 'describe 调 1 次')
   assertEqual(phases[0], 'connecting', '首帧状态')

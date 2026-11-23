@@ -422,9 +422,12 @@ check('E4 `deriveOtherWorkItem()`：有工具名说工具，没有就说「正�
     { sessionId: 's', title: '会话', state: 'running', tool: '读取 README.md', detail: '正在调用 读取 README.md', ts: 1000 },
     '有工具名',
   )
+  const before = Date.now()
+  const { ts, ...item } = deriveOtherWorkItem({ sessionId: 's', title: '', ts: 0 })
+  assertEqual(ts >= before && ts <= Date.now(), true, '没有时间时使用当前时钟')
   assertEqual(
-    deriveOtherWorkItem({ sessionId: 's', title: '', ts: 0 }),
-    { sessionId: 's', title: '会话', state: 'running', detail: '正在回复…', ts: deriveOtherWorkItem({ sessionId: 's', title: '', ts: 0 }).ts },
+    item,
+    { sessionId: 's', title: '会话', state: 'running', detail: '正在回复…' },
     '没有工具名 / 没有标题 / 没有时间',
   )
 })

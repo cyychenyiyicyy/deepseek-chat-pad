@@ -61,6 +61,7 @@
  * ──────────────────────────────────────────────────────────────────────── */
 
 import { isOptimisticEcho } from './routing.js'
+import type { RemotePromptAttachment, SendPromptOptions } from './sessionsApi.js'
 
 /** `ChatItem` 的公共字段（上游 `ChatItemBase`）。 */
 export interface ChatItemBase {
@@ -76,7 +77,7 @@ export interface ChatItemBase {
   nativeRevisionSeq?: number
   turn?: string
   /** 权威的 turn/end 证据；该事件不会替换任何回复序列。 */
-  turnEnd?: { reason: 'completed' | 'stopped' | 'failed'; time: number; detail?: string }
+  turnEnd?: { reason: 'completed' | 'stopped' | 'failed'; time: number; seq?: number; detail?: string }
 }
 
 export type ImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
@@ -98,6 +99,7 @@ export interface ToolDisplayDetail {
   text: string
   format: 'code' | 'markdown'
   truncated?: boolean
+  kind?: 'diff'
 }
 
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
@@ -110,6 +112,8 @@ export interface ChatMessage extends ChatItemBase {
   replyGroup?: string
   reasoning?: string
   images?: ChatImage[]
+  /** 非图片附件无法用 session/attachment 重新发送。 */
+  hasFiles?: true
   streaming?: boolean
   streamingPhase?: 'reasoning' | 'text'
   /** `session/prompt` 的 requestId，用来把乐观用户消息和 Host 回显对账。 */
@@ -120,6 +124,8 @@ export interface ChatMessage extends ChatItemBase {
    * `unconfirmed` 超时/断线，结果未知；`canceled` 远端已不存在。
    */
   sendState?: 'queued' | 'failed' | 'unconfirmed' | 'canceled'
+  /** Original payload for retrying a delivery whose outcome is still unknown. */
+  pendingPrompt?: { mode: NonNullable<SendPromptOptions['mode']>; attachments: readonly RemotePromptAttachment[] }
   /** 投递失败的可读原因（唯一的错误展示面）。 */
   sendError?: string
   /** Host inbox 已接纳这条本地 prompt（不得再回落到本地队列）。 */
@@ -338,8 +344,14 @@ function applyNativeEvent(
     // Official shape: `error: { kind: 'error', error: LlmFailure }` and hook
     // interruptions carry `reason: { reason }` — dig into both.
     const detail = turnEndDetail(reasonData)
+    const turnEnd = {
+      reason,
+      time: event.time,
+      ...(Number.isSafeInteger(event.seq) && event.seq >= 0 ? { seq: event.seq } : {}),
+      ...(detail === undefined ? {} : { detail }),
+    }
     const settled: ChatItem[] = settleTurnItems(current, turn).map(item => item.turn === turn || (item.kind === 'message' && item.replyGroup === turn)
-      ? { ...item, turnEnd: { reason, time: event.time, ...(detail === undefined ? {} : { detail }) } } : item)
+      ? { ...item, turnEnd } : item)
     // User bubbles do not render turn-end state, and context/usage-only rows are hidden.
     // A turn with only those rows still needs a process row to carry the failure.
     const owned = settled.some(item => (item.kind !== 'message' || (item.role === 'assistant' && !item.context && !item.usageOnly))
@@ -356,7 +368,7 @@ function applyNativeEvent(
       text: '',
       createdAt: event.time,
       turn,
-      turnEnd: { reason, time: event.time, ...(detail === undefined ? {} : { detail }) },
+      turnEnd,
     }
     return [...settled, failureRow]
   }
@@ -495,7 +507,10 @@ function addUserMessage(current: ChatItem[], data: UnknownRecord, sessionId: str
   const id = messageId(data)
   const text = messageText(data)
   const persistedImages = messageImages(data, sessionId)
-  if (text.length === 0 && persistedImages.length === 0) return current
+  const source = isRecord(data.message) ? data.message : data
+  const hasFiles = Array.isArray(source.content) &&
+    source.content.some((block) => isRecord(block) && block.type === 'file')
+  if (text.length === 0 && persistedImages.length === 0 && !hasFiles) return current
   const rpcId = messageRequestRpcId(data)
   /*
    * [S4 串台修复] 乐观行对齐用 **(sessionId, requestRpcId) 二元组**，不是只比 rpcId。
@@ -519,6 +534,7 @@ function addUserMessage(current: ChatItem[], data: UnknownRecord, sessionId: str
     kind: 'message', id, sessionId, role: 'user', text, createdAt: now(data),
     ...(rpcId === undefined ? {} : { requestRpcId: rpcId }),
     ...(images.length === 0 ? {} : { images }),
+    ...(hasFiles ? { hasFiles: true } : {}),
   }
   if (optimisticIndex >= 0) {
     return current.map((item, index) => index === optimisticIndex ? message : item)
@@ -895,7 +911,7 @@ function toolCallDetail(view: UnknownRecord | undefined, argumentsText: string):
     }
     if (card === 'diff') {
       const detail = boundedToolDetail(formatDiffs(view.diffs), 'code')
-      if (detail !== undefined) return detail
+      if (detail !== undefined) return { ...detail, kind: 'diff' }
     }
     if (card === 'generic') {
       const rawInput = displayJson(view.rawInput)
@@ -920,7 +936,7 @@ function toolResultDetail(view: UnknownRecord | undefined, data: UnknownRecord):
     }
     if (card === 'diff') {
       const detail = boundedToolDetail(formatDiffs(view.diffs), 'code')
-      if (detail !== undefined) return detail
+      if (detail !== undefined) return { ...detail, kind: 'diff' }
     }
     if (card === 'search') {
       const detail = boundedToolDetail(formatSearchResult(view), 'code')
@@ -1491,6 +1507,9 @@ export interface AssistantAttempt {
 /** 一个会话时间线的归约状态：行 + follow 游标 + 当前流式 attempt。 */
 export interface RemoteTranscriptState {
   items: ChatItem[]
+  /** Smallest durable event loaded, including events with no visible row. */
+  historyBeforeSeq?: number
+  hasMoreHistory?: boolean
   /** follow 的 durability 游标（`snapshot.cursor` / 最新 `event.seq`）。 */
   cursor: number
   /** 同一 cursor 内已收到的瞬态 chunk 数（合成小数 seq 用）。 */
@@ -1505,6 +1524,7 @@ export function createTranscriptState(): RemoteTranscriptState {
 
 /** `session/follow` 首帧（snapshot）的最小结构（input-B §2.3）。 */
 export interface RemoteFollowSnapshot {
+  sessionId?: string
   cursor?: number
   throughSeq?: number
   hasMore: boolean
@@ -1525,6 +1545,7 @@ export function parseSnapshot(value: unknown): RemoteFollowSnapshot | null {
   const throughSeq = typeof value.throughSeq === 'number' && Number.isFinite(value.throughSeq) ? value.throughSeq : undefined
   const header = isRecord(value.header) ? value.header : undefined
   return {
+    ...(typeof header?.sessionId === 'string' ? { sessionId: header.sessionId } : {}),
     ...(cursor === undefined ? {} : { cursor }),
     ...(throughSeq === undefined ? {} : { throughSeq }),
     hasMore: value.hasMore === true,
@@ -1556,7 +1577,9 @@ export function reduceSnapshot(
   for (const entry of entries) {
     if (Number.isSafeInteger(entry.event.seq)) cursor = Math.max(cursor, entry.event.seq)
   }
-  let next: RemoteTranscriptState = { items, cursor, transient: 0 }
+  let next: RemoteTranscriptState = {
+    items, cursor, transient: 0, historyBeforeSeq: oldestSeq(entries), hasMoreHistory: snapshot.hasMore,
+  }
   const attempt = assistantStreamAttempt(readActiveAttempt(snapshot.assistantStream), 0)
   if (attempt !== undefined) {
     next = { ...next, attempt }
@@ -1602,7 +1625,7 @@ export function reduceFollowItem(
     }
     items = applyFollowEvent(items, entry.event, sessionId, entry.view, true)
   }
-  return { items, cursor, transient, ...(state.attempt === undefined ? {} : { attempt: state.attempt }) }
+  return { ...state, items, cursor, transient }
 }
 
 /**
@@ -1624,7 +1647,7 @@ function reduceAssistantStreamFrame(
     if (attempt !== undefined && frame.attemptId === attempt.attemptId) {
       const abandoned = isRecord(frame.outcome) && frame.outcome.kind === 'abandoned'
       // attempt 结束：清掉当前 attempt，transient 计数继续累加（同一 cursor 内不乱序）。
-      const cleared: RemoteTranscriptState = { items: state.items, cursor: state.cursor, transient: state.transient + 1 }
+      const cleared: RemoteTranscriptState = { ...state, attempt: undefined, transient: state.transient + 1 }
       if (!abandoned) return cleared
       const items = applyFollowEvent(state.items, {
         type: 'assistant/attempt-abandoned',
@@ -1798,6 +1821,7 @@ export function addOptimisticUserMessage(
   sessionId: string,
   text: string,
   requestRpcId: string,
+  pendingPrompt?: ChatMessage['pendingPrompt'],
 ): ChatItem[] {
   const message: ChatMessage = {
     kind: 'message',
@@ -1808,6 +1832,8 @@ export function addOptimisticUserMessage(
     createdAt: Date.now(),
     requestRpcId,
     sendState: 'queued',
+    ...(pendingPrompt === undefined ? {} : { pendingPrompt }),
+    ...(pendingPrompt?.attachments.length ? { hasFiles: true } : {}),
   }
   return [...items, message]
 }
@@ -1819,8 +1845,8 @@ export function addOptimisticUserMessage(
  * 只留 `markSendState(..., 'failed')` 的话，成功的插话会永远停在「发送中」。
  */
 export function clearSendState(items: ChatItem[], requestRpcId: string): ChatItem[] {
-  return items.map(item => item.kind === 'message' && item.requestRpcId === requestRpcId
-    ? { ...item, sendState: undefined }
+  return items.map(item => item.kind === 'message' && item.id === `local:${requestRpcId}`
+    ? { ...item, sendState: undefined, sendError: undefined, pendingPrompt: undefined }
     : item)
 }
 
@@ -1831,8 +1857,8 @@ export function markSendState(
   sendState: NonNullable<ChatMessage['sendState']>,
   sendError?: string,
 ): ChatItem[] {
-  return items.map(item => item.kind === 'message' && item.requestRpcId === requestRpcId
-    ? { ...item, sendState, ...(sendError === undefined ? { sendError: undefined } : { sendError }) }
+  return items.map(item => item.kind === 'message' && item.id === `local:${requestRpcId}`
+    ? { ...item, sendState, sendError, pendingPrompt: sendState === 'failed' ? undefined : item.pendingPrompt }
     : item)
 }
 

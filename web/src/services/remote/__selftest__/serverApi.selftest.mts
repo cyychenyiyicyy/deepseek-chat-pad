@@ -13,11 +13,13 @@ import {
   RemoteApiError,
   getDevice,
   getPresence,
+  listDeviceMemberships,
   listDevices,
   login,
   normalizeServerUrl,
   refreshToken,
   registerDevice,
+  revokeDeviceMembership,
   withRefreshRetry,
   type FetchLike,
 } from '../serverApi.js'
@@ -244,6 +246,24 @@ check('listDevices：缺 items 数组 → INVALID_RESPONSE（不能当成功空�
     'INVALID_RESPONSE',
     '缺 items',
   )
+})
+
+check('配对关系分页，用设备权限只解除指定的一条关系', async () => {
+  const mock = createMock((request) => {
+    if (request.method === 'DELETE') return { body: {} }
+    if (request.target.includes('cursor=c2')) {
+      return { body: { items: [{ membershipId: 'm2', peer: { deviceId: 'peer/two' } }], nextCursor: null } }
+    }
+    return { body: { items: [{ membershipId: 'm1', peer: { deviceId: 'peer-one' } }], nextCursor: 'c2' } }
+  })
+  const deps = { fetch: mock.fetchImpl }
+  const rows = await listDeviceMemberships(SERVER, tokenPair.accessToken, deps)
+  assertEqual(rows.map((item) => item.membershipId), ['m1', 'm2'], '读取两页')
+  await revokeDeviceMembership(SERVER, tokenPair.accessToken, rows[1]!.peer.deviceId, deps)
+  assertEqual(mock.calls[2]?.path, '/api/v1/device-memberships/peer%2Ftwo', '按对方设备编号解除配对')
+  assertEqual(mock.calls[2]?.headers.Authorization, `Bearer ${tokenPair.accessToken}`, '使用设备 Bearer')
+  await assertThrowsCode(() => revokeDeviceMembership(SERVER, tokenPair.accessToken, '..', deps), 'INVALID_ARGUMENT', '拒绝无效编号')
+  assertEqual(mock.calls.length, 3, '无效编号未发请求')
 })
 
 check('listDevices：all=false 只读一页', async () => {

@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useTranslate } from '../../../i18n/index.js'
 import {
   useNewSessionStore,
@@ -7,7 +7,9 @@ import {
   effectiveModelSelection,
   type ModelPick,
 } from '../../../services/remote/newSessionStore.js'
-import { shortModelName, type RemoteModelCatalog, type RemoteModelEntry } from '../../../services/remote/sessionsApi.js'
+import { describeRemoteError, lastRemoteTarget, shortModelName, type RemoteModelCatalog, type RemoteModelEntry } from '../../../services/remote/sessionsApi.js'
+import { createHostDirectory, hostHttpTarget } from '../../../services/remote/hostHttpActions.js'
+import { useRemoteStore } from '../../../services/remote/store.js'
 import { Button } from '../../base/Button.js'
 import {
   IconBrowseOutline16,
@@ -186,7 +188,32 @@ const NewWorkspaceSheet = () => {
   const directoryLoading = useNewSessionStore((state) => state.directoryLoading)
   const directoryError = useNewSessionStore((state) => state.directoryError)
   const directoryCapable = useNewSessionStore((state) => state.capabilities.directory)
+  const recentDirectories = useNewSessionStore((state) => state.workspacePreferences.recentDirectories)
+  const phase = useRemoteStore((state) => state.phase)
+  const target = phase === 'ready' ? hostHttpTarget(lastRemoteTarget()) : null
+  const [folder, setFolder] = useState<string | null>(null)
+  const [folderError, setFolderError] = useState('')
+  const [addingFolder, setAddingFolder] = useState(false)
+  const parent = directory?.path
   const close = (): void => useNewSessionStore.getState().openSheet(null)
+
+  async function makeFolder() {
+    if (!target || !parent || !folder?.trim() || addingFolder) return
+    setAddingFolder(true)
+    setFolderError('')
+    try {
+      const path = await createHostDirectory(target, parent, folder.trim())
+      const state = useNewSessionStore.getState()
+      if (lastRemoteTarget() !== target || state.directory?.path !== parent || state.sheet !== 'newWorkspace') return
+      setFolder(null)
+      state.setPathDraft(path)
+      await state.browse(path)
+    } catch (failure) {
+      if (lastRemoteTarget() === target) setFolderError(describeRemoteError(failure).text)
+    } finally {
+      setAddingFolder(false)
+    }
+  }
 
   return (
     <SheetFrame
@@ -198,7 +225,7 @@ const NewWorkspaceSheet = () => {
           variant="primary"
           size="m"
           block
-          disabled={creating || pathDraft.trim().length === 0}
+          disabled={creating || addingFolder || pathDraft.trim().length === 0}
           onClick={() => {
             void useNewSessionStore.getState().submitWorkspacePath()
           }}
@@ -234,6 +261,19 @@ const NewWorkspaceSheet = () => {
         ) : null}
       </div>
       {pathError !== null ? <div className={styles.sheetError}>{pathError}</div> : null}
+      {recentDirectories.length > 0 && (
+        <section aria-label={t('remoteWorkspaceRecentDirectories')}>
+          <div className={styles.fieldLabel}>{t('remoteWorkspaceRecentDirectories')}</div>
+          {recentDirectories.map((path) => (
+            <ChoiceRow key={path} title={path} selected={pathDraft === path} disabled={creating || directoryLoading}
+              onClick={() => {
+                const state = useNewSessionStore.getState()
+                state.setPathDraft(path)
+                if (directoryCapable) void state.browse(path)
+              }} />
+          ))}
+        </section>
+      )}
       {directoryCapable ? (
         <DirectoryBrowser
           listing={directory}
@@ -249,6 +289,22 @@ const NewWorkspaceSheet = () => {
       ) : (
         <div className={styles.sheetHint}>{t('newSessionDirectoryUnsupported')}</div>
       )}
+      {target && parent && (folder === null ? (
+        <Button variant="outlined" size="m" disabled={creating || directoryLoading}
+          onClick={() => setFolder('')}>{t('remoteNewDirectory')}</Button>
+      ) : (
+        <div className={styles.pathRow}>
+          <input aria-label={t('remoteNewDirectoryName')} className={styles.input} value={folder}
+            autoComplete="off" maxLength={255} disabled={addingFolder}
+            onChange={(event) => setFolder(event.currentTarget.value)}
+            onKeyDown={(event) => { if (event.key === 'Enter') void makeFolder() }} />
+          <Button variant="outlined" size="m" disabled={addingFolder || directoryLoading || !folder.trim()}
+            onClick={() => void makeFolder()}>{t('remoteNewDirectory')}</Button>
+          <Button variant="outlined" size="m" disabled={addingFolder}
+            onClick={() => { setFolder(null); setFolderError('') }}>{t('cancel')}</Button>
+        </div>
+      ))}
+      {folderError && <div className={styles.sheetError} role="alert">{folderError}</div>}
     </SheetFrame>
   )
 }

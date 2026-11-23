@@ -89,6 +89,34 @@ function javaSkeleton(source, file) {
       i += 2
       continue
     }
+    // Java 15 文本块 """…"""：可以跨行，里面的引号不成串；\""" 是转义的三引号。
+    // 不单独处理的话，第一个 " 会跟第二个 " 配成空串，第三个 " 又开一个新串，整段误报未闭合。
+    if (ch === '"' && next === '"' && source[i + 2] === '"') {
+      const startLine = line
+      i += 3
+      let closed = false
+      while (i < n) {
+        const c = source[i]
+        if (c === '\\') {
+          if (source[i + 1] === '\n') line++
+          i += 2
+          continue
+        }
+        if (c === '\n') {
+          line++
+          i++
+          continue
+        }
+        if (c === '"' && source[i + 1] === '"' && source[i + 2] === '"') {
+          closed = true
+          i += 3
+          break
+        }
+        i++
+      }
+      if (!closed) problems.push(`${file}:${startLine} 文本块未闭合`)
+      continue
+    }
     if (ch === '"' || ch === "'") {
       const quote = ch
       const startLine = line
@@ -350,6 +378,7 @@ const declaredPermissions = [...manifest.matchAll(/<uses-permission\s+android:na
 const expected = [
   'android.permission.INTERNET',
   'android.permission.ACCESS_NETWORK_STATE',
+  'android.permission.RECORD_AUDIO',
   // 分体式更新：下载完新包要能拉起系统安装器
   'android.permission.REQUEST_INSTALL_PACKAGES',
   // 后台保活前台服务（RemoteKeepAliveService）：服务本体 + Android 14 要求的 dataSync 类型权限
@@ -417,7 +446,7 @@ if (!filePaths) {
   }
 }
 if (manifestProblems.length === 0) {
-  ok('manifest.security', '仅 INTERNET/ACCESS_NETWORK_STATE/REQUEST_INSTALL_PACKAGES + 保活那 5 项（FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC、POST_NOTIFICATIONS、WAKE_LOCK、REQUEST_IGNORE_BATTERY_OPTIMIZATIONS）+ 下载目录写入（WRITE_EXTERNAL_STORAGE，锁死 28），明文只放行回环，FileProvider 范围精确')
+  ok('manifest.security', '网络、应用更新、保活、录音和 Android 9 下载权限符合预期，明文只放行回环，FileProvider 范围精确')
 } else fail('manifest.security', manifestProblems.join('\n       '))
 
 // ---------------------------------------------------------------- 5. 关键实现断言（防止写漏需求点）

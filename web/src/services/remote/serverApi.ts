@@ -116,13 +116,16 @@ const targetUrl = (base: string, path: string, query?: Record<string, string | n
 
 /* ── 请求内核 ─────────────────────────────────────────────────────────── */
 
-type HttpMethod = 'GET' | 'POST' | 'DELETE'
+type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'DELETE'
 
 interface RequestOptions {
   method: HttpMethod
   /** 设备 / 账号 access token；只放 Authorization 头 */
   token?: string
   body?: unknown
+  rawJson?: string
+  pairingProof?: string
+  redirect?: 'error'
   query?: Record<string, string | number | undefined>
 }
 
@@ -150,16 +153,17 @@ const buildTransport = (
   const target = targetUrl(base, path, options.query)
   const headers: Record<string, string> = { Accept: 'application/json' }
   let body: string | undefined
-  if (options.body !== undefined) {
-    body = JSON.stringify(options.body)
+  if (options.body !== undefined || options.rawJson !== undefined) {
+    body = options.rawJson ?? JSON.stringify(options.body)
     headers['Content-Type'] = 'application/json'
   }
   if (options.token !== undefined) headers.Authorization = `Bearer ${options.token}`
+  if (options.pairingProof !== undefined) headers['X-DSH-Pairing-Proof'] = options.pairingProof
 
   if (deps.allowDirect === true) {
     return {
       url: target,
-      init: { method: options.method, headers, body: body ?? null, cache: 'no-store', credentials: 'same-origin' },
+      init: { method: options.method, headers, body: body ?? null, cache: 'no-store', credentials: 'same-origin', redirect: options.redirect },
     }
   }
 
@@ -176,6 +180,7 @@ const buildTransport = (
       body: body ?? null,
       cache: 'no-store',
       credentials: 'omit',
+      redirect: options.redirect,
     },
   }
 }
@@ -524,6 +529,88 @@ export const listDevices = async (
   return { items, pages }
 }
 
+export async function renameAccountHost(server: RemoteServer, accessToken: string, deviceId: string, name: string, deps: ServerApiDeps = {}) {
+  const trimmed = name.trim()
+  if (!deviceId || !trimmed || trimmed.length > 128) throw new RemoteApiError('INVALID_ARGUMENT', 'Invalid device ID or name.')
+  const result = await request<unknown>(
+    normalizeServerUrl(server.url), accountHostPath(deviceId),
+    { method: 'PATCH', token: accessToken, body: { name: trimmed } }, deps,
+  )
+  if (!isRecord(result) || typeof result.name !== 'string' || !result.name.trim() || result.name.length > 128) {
+    throw invalidResponse('设备名称')
+  }
+  return result.name
+}
+
+export async function revokeAccountHost(server: RemoteServer, accessToken: string, deviceId: string, deps: ServerApiDeps = {}) {
+  await request(normalizeServerUrl(server.url), accountHostPath(deviceId), { method: 'DELETE', token: accessToken }, deps)
+}
+
+export async function revokeClientDevice(server: RemoteServer, accessToken: string, deps: ServerApiDeps = {}) {
+  await request(normalizeServerUrl(server.url), '/api/v1/devices/self', { method: 'DELETE', token: accessToken }, deps)
+}
+
+export interface DeviceMembership {
+  membershipId: string
+  peer: ServerDeviceRecord
+}
+
+const MEMBERSHIPS_PATH = '/api/v1/device-memberships'
+
+export async function listDeviceMemberships(server: RemoteServer, accessToken: string, deps: ServerApiDeps = {}) {
+  const base = normalizeServerUrl(server.url)
+  const items = new Map<string, DeviceMembership>()
+  const cursors = new Set<string>()
+  let cursor: string | undefined
+  for (let index = 0; index < MAX_PAGES; index += 1) {
+    const page = await request<unknown>(base, MEMBERSHIPS_PATH,
+      { method: 'GET', token: accessToken, query: { limit: DEFAULT_PAGE_LIMIT, cursor } }, deps)
+    if (!isRecord(page) || !Array.isArray(page.items)) throw invalidResponse('配对关系列表')
+    for (const item of page.items) {
+      if (!isRecord(item) || typeof item.membershipId !== 'string' || !item.membershipId) {
+        throw invalidResponse('配对关系编号')
+      }
+      const peer = parseDeviceRecord(item.peer)
+      if (peer === null) throw invalidResponse('配对设备')
+      items.set(item.membershipId, { membershipId: item.membershipId, peer })
+    }
+    if (page.nextCursor === null || page.nextCursor === undefined) return [...items.values()]
+    if (typeof page.nextCursor !== 'string' || !page.nextCursor || cursors.has(page.nextCursor)) {
+      throw invalidResponse('配对关系列表游标')
+    }
+    cursor = page.nextCursor
+    cursors.add(cursor)
+  }
+  throw invalidResponse('配对关系列表超出分页上限')
+}
+
+export async function revokeDeviceMembership(server: RemoteServer, accessToken: string, deviceId: string, deps: ServerApiDeps = {}) {
+  if (!deviceId || deviceId === '.' || deviceId === '..') throw new RemoteApiError('INVALID_ARGUMENT', 'Invalid device ID.')
+  await request(normalizeServerUrl(server.url), `${MEMBERSHIPS_PATH}/${encodeURIComponent(deviceId)}`,
+    { method: 'DELETE', token: accessToken }, deps)
+}
+
+export async function resolvePairingTicket(server: RemoteServer, ticket: string, deps: ServerApiDeps = {}) {
+  if (!isIdentityKey(ticket)) throw new RemoteApiError('PAIRING_SCAN_INVALID', 'Invalid pairing ticket.')
+  return request<unknown>(normalizeServerUrl(server.url), '/api/v1/device-pairing/resolve',
+    { method: 'POST', body: { ticket }, redirect: 'error' }, deps)
+}
+
+export async function postMobilePairing(
+  server: RemoteServer, path: string, rawJson: string, pairingProof: string, deps: ServerApiDeps = {},
+) {
+  if (!/^\/api\/v1\/device-pairing\/sessions\/[\da-f-]{36}\/(claim|mobile\/(status|cancel))$/i.test(path)) {
+    throw new RemoteApiError('PAIRING_SCAN_INVALID', 'Invalid pairing path.')
+  }
+  return request<unknown>(normalizeServerUrl(server.url), path,
+    { method: 'POST', rawJson, pairingProof, redirect: 'error' }, deps)
+}
+
+function accountHostPath(deviceId: string) {
+  if (!deviceId || deviceId === '.' || deviceId === '..') throw new RemoteApiError('INVALID_ARGUMENT', 'Invalid device ID.')
+  return `/api/v1/account/devices/${encodeURIComponent(deviceId)}`
+}
+
 /**
  * GET /api/v1/devices/{deviceId}（docs/protocol.md §9）
  *
@@ -555,6 +642,30 @@ export const getDevice = async (
 export interface DevicePresence {
   online: boolean
   lastSeenAt?: number
+}
+
+export async function getConnectionIceServers(server: RemoteServer, accessToken: string, connectionId: string): Promise<RTCIceServer[]> {
+  let body: unknown
+  try {
+    body = await request(normalizeServerUrl(server.url), `/api/v1/turn/credentials?connection_id=${encodeURIComponent(connectionId)}`,
+      { method: 'GET', token: accessToken }, { timeoutMs: 1500 })
+  } catch (error) {
+    if (error instanceof RemoteApiError && (error.status === 404 || error.status === 501 || error.status === 503
+      || error.code === 'NETWORK_ERROR' || error.code === 'TIMEOUT' || error.code === 'TURN_UNAVAILABLE')) return []
+    throw error
+  }
+  if (!isRecord(body) || !Array.isArray(body.iceServers)) return []
+  return body.iceServers.flatMap((entry: unknown): RTCIceServer[] => {
+    if (!isRecord(entry)) return []
+    const urls = (typeof entry.urls === 'string' ? [entry.urls] : Array.isArray(entry.urls) ? entry.urls : [])
+      .filter((url): url is string => typeof url === 'string' && /^(stuns?|turns?):\S+$/i.test(url))
+    if (urls.length === 0) return []
+    return [{
+      urls,
+      ...(typeof entry.username === 'string' ? { username: entry.username } : {}),
+      ...(typeof entry.credential === 'string' ? { credential: entry.credential } : {}),
+    }]
+  })
 }
 
 /**

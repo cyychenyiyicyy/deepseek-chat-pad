@@ -14,7 +14,6 @@ export const SessionView = ({
 }: {
   session: Session
   streaming: boolean
-  siderCollapsed: boolean
 }) => {
   const t = useTranslate()
   const isMobile = useIsMobile()

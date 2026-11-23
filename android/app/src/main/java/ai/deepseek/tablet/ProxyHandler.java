@@ -89,11 +89,13 @@ final class ProxyHandler {
     };
 
     private final OkHttpClient client;
+    private final OkHttpClient noRedirectClient;
     private final Set<Call> activeCalls =
             Collections.newSetFromMap(new ConcurrentHashMap<Call, Boolean>());
 
     ProxyHandler(OkHttpClient client) {
         this.client = client;
+        this.noRedirectClient = client.newBuilder().followRedirects(false).followSslRedirects(false).build();
     }
 
     /** 服务停止时调用，取消所有还在流的请求。 */
@@ -209,7 +211,10 @@ final class ProxyHandler {
             }
         }
 
-        Call call = client.newCall(builder.build());
+        boolean pairingRequest = url.encodedPath().startsWith("/api/v1/device-pairing/");
+        boolean shareRequest = "go.dshtui.com".equals(url.host())
+                && ("/api/v1/c".equals(url.encodedPath()) || url.encodedPath().startsWith("/api/v1/c/"));
+        Call call = (pairingRequest || shareRequest ? noRedirectClient : client).newCall(builder.build());
         activeCalls.add(call);
         Response response;
         try {

@@ -121,10 +121,12 @@ check('A1：workspace/follow 首帧 baseline 逐字段解析，非 baseline 一�
   assertEqual(baseline?.items[1]?.sessionIds, [], '没有会话的工作区照样在 items 里')
   assertEqual(baseline?.archivedSessionIds, ['s9'], '归档全集')
   assertEqual(baseline?.pinnedSessionIds, ['s1'], '置顶全集')
+  assertEqual(baseline?.pinnedReported, true, '主机提供了置顶全集')
 
   // 老 Host 没有 pinnedSessionIds / archivedSessionIds
   const bare = parseWorkspaceBaseline({ type: 'baseline', value: { items: [] } })
   assertEqual(bare?.pinnedSessionIds, [], '缺 pinnedSessionIds → 空数组')
+  assertEqual(bare?.pinnedReported, false, '保留旧主机的列表投影')
   assertEqual(bare?.archivedSessionIds, [], '缺 archivedSessionIds → 空数组')
 
   // 帧形状不对：不能拿半截数据往上画
@@ -167,6 +169,14 @@ check('A2：增量帧只认得出 upsert / remove，其余忽略', async () => {
   assertEqual(parseWorkspaceFrame({ type: 'workspace/removed' }), { kind: 'ignore' }, '删除帧缺 id')
   assertEqual(parseWorkspaceFrame({ type: 'ping' }), { kind: 'ignore' }, '未知帧')
   assertEqual(parseWorkspaceFrame(null), { kind: 'ignore' }, 'null 帧')
+})
+
+check('A3：工作区替换快照、排序、置顶和归档按 DSH Go 格式解析', async () => {
+  const replaced = parseWorkspaceBaseline({ type: 'replace', value: { items: [], pinnedSessionIds: [], archivedSessionIds: [] } })
+  assertEqual(replaced, { items: [], archivedSessionIds: [], pinnedSessionIds: [], pinnedReported: true }, '空的替换快照')
+  assertEqual(parseWorkspaceFrame({ type: 'order', workspaceIds: ['b', 'a'] }), { kind: 'order', workspaceIds: ['b', 'a'] }, '排序')
+  assertEqual(parseWorkspaceFrame({ type: 'pinned', pinnedSessionIds: [] }), { kind: 'pinned', sessionIds: [] }, '清空置顶')
+  assertEqual(parseWorkspaceFrame({ type: 'archived', archivedSessionIds: ['a'] }), { kind: 'archived', sessionIds: ['a'] }, '归档全集')
 })
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -215,6 +225,11 @@ check('B2：两层去重 —— 同 id、同路径（不同 id）都只留一行
     [],
   )
   assertEqual(windows.length, 1, 'Windows 路径归一化后是同一个工作区')
+  const posix = mergeWorkspaceInventory([
+    { workspaceId: 'ws-l1', path: '/home/me/Code', title: 'Code', sessionIds: ['s1'] },
+    { workspaceId: 'ws-l2', path: '/home/me/code', title: 'code', sessionIds: ['s2'] },
+  ], [])
+  assertEqual(posix.map((workspace) => workspace.sessionIds), [['s1'], ['s2']], 'POSIX 路径按原大小写分开')
 })
 
 check('B3：派生独有的追加在尾部；标题兜底为路径末段', async () => {
@@ -407,7 +422,7 @@ check('C2：流被关（closed 帧）→ 摘接收器 + 排重开 → 定时器�
 })
 
 check('C3：老 Host 的 METHOD_NOT_FOUND → unsupported，不重试、不再开流', async () => {
-  const h = harness(['METHOD_NOT_FOUND'])
+  const h = harness(['METHOD_NOT_FOUND', 'ok'])
   h.syncer.ensure()
   await tick()
   assertEqual(h.syncer.status(), 'unsupported', '状态 unsupported')
@@ -418,14 +433,46 @@ check('C3：老 Host 的 METHOD_NOT_FOUND → unsupported，不重试、不再�
   h.syncer.ensure()
   await tick()
   assertEqual(h.opens, 1, '不再开流')
-  // 断线再回来也不该翻案（这一代连接上它就是没有这个端点）
+  // 换连接后重新探测，下一台主机可能支持该端点。
   h.ready = false
   h.syncer.reset()
   h.ready = true
   h.syncer.ensure()
   await tick()
-  assertEqual(h.opens, 1, 'reset 之后仍不重试')
-  assertEqual(h.syncer.status(), 'unsupported', '状态保持 unsupported')
+  assertEqual(h.opens, 2, 'reset 之后重新开流')
+  assertEqual(h.syncer.status(), 'streaming', '新连接可以接收工作区')
+})
+
+check('C3b：重连后关闭迟到的旧工作区流', async () => {
+  const pending: Array<(handle: RemoteStreamHandle) => void> = []
+  const registered: string[] = []
+  const closed: string[] = []
+  const syncer = createWorkspaceSyncer({
+    open: () => new Promise((resolve) => pending.push(resolve)),
+    registerSink: (id) => {
+      registered.push(id)
+      return () => undefined
+    },
+    target: () => ({} as RemoteCallTarget),
+    isReady: () => true,
+    push: { onBaseline: () => undefined, onDelta: () => undefined, onStatus: () => undefined },
+  })
+  const handle = (streamId: string): RemoteStreamHandle => ({
+    streamId,
+    close: async () => { closed.push(streamId) },
+  })
+  syncer.ensure()
+  syncer.reset()
+  syncer.ensure()
+  pending[0]?.(handle('old'))
+  await tick()
+  syncer.ensure()
+  assertEqual(pending.length, 2, '旧连接完成时不会清除新连接的在途请求')
+  pending[1]?.(handle('new'))
+  await tick()
+  assertEqual(closed, ['old'], '迟到的流被关闭')
+  assertEqual(registered, ['new'], '只有当前连接注册了接收器')
+  syncer.reset()
 })
 
 check('C4：网络类开流失败 → 退避重试；断线时不排重试', async () => {
@@ -610,6 +657,26 @@ check('D3：老 Host（没有 workspace/follow）→ 退回派生列表，UI 能
   assertEqual(state.error, null, '降级是静默的（不写红字）')
   assertEqual(state.workspaces.map((item) => item.workspaceId), ['ws-derived'], '派生列表照常可用')
   assertEqual(state.workspaceSource, 'derived', '来源标记 derived')
+})
+
+check('D3b：工作区替换、成员、置顶和排序以当前主机为准', async () => {
+  resetStore()
+  const a = { workspaceId: 'a', path: '/a', title: 'A', sessionIds: [] }
+  const b = { workspaceId: 'b', path: '/b', title: 'B', sessionIds: ['s1'] }
+  useNewSessionStore.setState({
+    derivedWorkspaces: [{ ...a, sessionIds: ['s1'] }],
+    pinnedSessionIds: ['s1'],
+  })
+  const snapshot = { items: [a, b], archivedSessionIds: [], pinnedSessionIds: [], pinnedReported: true }
+  useNewSessionStore.getState().applyWorkspaceBaseline(snapshot)
+  assertEqual(useNewSessionStore.getState().workspaces.map((workspace) => workspace.sessionIds), [[], ['s1']], '避免过期的会话清单把旧成员放回来')
+  assertEqual(useNewSessionStore.getState().pinnedSessionIds, [], '明确空置顶覆盖旧投影')
+  useNewSessionStore.getState().applyWorkspaceFrame({ kind: 'order', workspaceIds: ['b', 'a'] })
+  useNewSessionStore.getState().applyWorkspaceFrame({ kind: 'archived', sessionIds: ['s1'] })
+  assertEqual(useNewSessionStore.getState().workspaces.map((workspace) => workspace.workspaceId), ['b', 'a'], '主机更新排序')
+  assertEqual(useNewSessionStore.getState().archivedSessionIds, ['s1'], '主机更新归档')
+  useNewSessionStore.getState().applyWorkspaceBaseline({ ...snapshot, items: [b] })
+  assertEqual(useNewSessionStore.getState().workspaces.map((workspace) => workspace.workspaceId), ['b'], '替换后过期工作区不会从会话清单复活')
 })
 
 /* ── 假连接：`session/list` 正常，`workspace/follow` 缺端点 ────────────── */

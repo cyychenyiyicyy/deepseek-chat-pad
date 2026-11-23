@@ -8,6 +8,16 @@
 ## 功能
 
 - **平板布局**：常驻左侧栏（可带动效收起）+ 主对话区，字号与触控目标按平板放大
+  - 横屏常驻会话栏、工作区停靠右侧；竖屏保留导航、工作区浮层；窄分屏用抽屉 + 独立浮层
+  - 主框架与弹窗跟随 `visualViewport`，软键盘、旋转、分屏时输入区仍然可达
+- **远程 DSH**：把 DSH Go 的远程客户端搬进平板
+  - 连接：中继 / 直连 / TURN 自动降级，SSH 主机（密码或私钥 + 主机指纹），设备配对与多主机切换
+  - 会话：列表管理、草稿与断点恢复、编辑重发 / 重新回答 / 分叉、会话目标、后台任务、终端
+  - 工作区：目录浏览、新建文件夹、PDF / Office 预览，工作区排序与分组
+  - 管理与自动化：定时任务、主机插件与插件市场、主机插件设置与模型渠道、会话备份与跨主机恢复
+  - 分享与导出：长图、Markdown、网页、快照 ZIP，DSH Go 加密分享链接与回放
+  - 语音：语音输入与语音通话（ASR + TTS）
+  - 能力清单与验收状态见 [REMOTE-PARITY.md](REMOTE-PARITY.md)
 - **多模型**：内置 DeepSeek，也可以填任意 OpenAI / Anthropic 兼容端点（MiniMax、OpenCode Go、Kimi、GLM…）
   - 填 Base URL + API Key 自动识别厂商与协议、自动拉模型列表
   - 上下文长度、是否支持思考等元信息来自 [models.dev](https://models.dev)，内置离线目录（31 家常用厂商）
@@ -31,12 +41,21 @@
 web/               前端（React 18 + rspack，源自 chat-demo）
   src/services/models/   模型目录、端点解析、思考档位、协议适配
   src/components/models/ 模型胶囊（浮窗 + 滑条）、模型服务设置
+  src/services/remote/   远程 DSH：连接 / 会话 / 工作区 / 文件 / 备份 / 分享 / 终端 / 语音
+  src/components/remote/ 远程界面：会话页、抽屉、设置面板、工作区、各类管理弹窗
   public/catalog/        离线模型目录（生成物，已提交）
 android/           WebView 壳（纯 Java，AGP 8.4 / Gradle 8.7）
   LocalServer     127.0.0.1 上的本地 HTTP 服务：静态资源 + API 透传 + 更新接口
   UpdateHandler   分体更新的下载 / 解压 / 切换
+  RemoteWsHandler 远程 DSH 的 WebSocket 隧道（含 SSH mux）
+  SshDshHandler   SSH 主机：JSch 隧道 + 主机侧 DSH Web 拉起
+  RemoteDshWebView 主机网页版（独立 WebView）
 tools/            build-catalog.mjs 生成离线目录
-.github/workflows/ build.yml：类型检查 → 打包 → 编译 APK → 发布 release
+                  run-remote-regression.mjs 远程自测总入口
+                  check-tablet-layout.mjs 浏览器回归（三档视口 + 远程功能）
+                  check-android-shell.cjs Android 源文件 / 清单静态检查
+                  qa/ 浏览器回归用的测试构建入口（tablet-qa.*）
+.github/workflows/ build.yml：类型检查 → 构建 → 自测 → 浏览器回归 → 编译 APK → 发布 release
 ```
 
 ### 为什么要有本地 HTTP 服务
@@ -70,7 +89,22 @@ APK 更新则下载后拉起系统安装器。
 cd web
 pnpm install
 pnpm run type                          # 类型检查
+pnpm run selftest                      # 远程自测（36 套，需要 Node >= 22.7）
 NODE_ENV=production npx rspack build -c rspack.config.ts
+```
+
+浏览器回归（三档视口 + 远程功能，188 项断言，需要本机有 Chrome / Edge）：
+
+```bash
+# 先构建测试入口（会替换远程连接层为模拟实现），再跑断言
+cd web && NODE_ENV=production npx rspack build -c ../tools/qa/tablet-qa.config.ts && cd ..
+QA_DIST=tmp/qa-dist node tools/check-tablet-layout.mjs
+```
+
+Android 源文件静态检查（不需要 JDK / Android SDK）：
+
+```bash
+node tools/check-android-shell.cjs
 ```
 
 重新生成离线模型目录（需要联网）：
@@ -138,12 +172,30 @@ node tools/build-catalog.mjs
 - 设置 → 数据 显示后端（原生 SQLite / IndexedDB）
 - 导入暂存仍用 IndexedDB
 
+## v1.16.0 变更：远程 DSH 对齐 DSH Go v1.3.0
+
+v1.9–v1.15 的变更见 [Releases](https://github.com/cyychenyiyicyy/deepseek-chat-pad/releases)；这一版把远程入口按 DSH Go v1.3.0 补齐：
+
+- 连接：直连 / TURN / 中继三档自动降级；SSH 主机（JSch + 主机指纹 + 自动拉起 DSH Web）；设备配对与设备管理；连接自愈、诊断与后台保活
+- 会话：分页 / 搜索 / 重命名 / 置顶 / 归档 / 永久删除；工作区会话排序；草稿与附件草稿（7 天、按主机隔离）；断点恢复
+- 对话：会话目标、技能、引用文件与会话、后台任务、终端、编辑重发 / 重新回答 / 分叉、消息反馈、对话详情
+- 工作区：新建文件夹、PDF / Office 预览、排序 / 置顶 / 分组 / 最近目录
+- 管理与自动化：定时任务、主机插件与插件市场、主机插件设置与模型渠道、会话备份与跨主机恢复
+- 分享与导出：长图、Markdown、网页、快照 ZIP，DSH Go 加密链接与回放
+- 语音：语音输入、语音通话
+- 平板布局重做：三档布局 + `visualViewport` 全局适配
+- 工具链：远程自测 36 套、浏览器回归 188 项、Android 静态检查 8 项全部接入 CI
+
 ## 已知限制
 
 - 联网搜索 / 文件上传 / URL 阅读由 DeepSeek 的服务端能力提供，自定义模型下走客户端代取；
   附件目前仍只在 DeepSeek 模型下可用
 - 思考强度依赖模型声明，未声明的模型不显示滑条
 - 侧栏只有点按开合，没有手势滑动
+- 远程：真机扫码、IME / 旋转 / 分屏、录音与 TTS、SSH 实连、主机网页版兑换仍需真机验证；
+  直连与 TURN 需要真实网络；分享与回放只带位图；跨工作区移动会话暂未支持；
+  设备管理、配对关系、独立新建文件夹、永久删除依赖主机或服务器支持，不支持时界面会说明；
+  插件更新是「先卸旧包再装新包」，安装失败时旧版本不会自动回滚，重新点安装即可
 
 ## 许可
 

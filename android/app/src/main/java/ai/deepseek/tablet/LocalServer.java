@@ -63,6 +63,7 @@ public final class LocalServer {
     private final UpdateHandler updateHandler;
     private final DbHandler dbHandler;
     private final RemoteWsHandler remoteWsHandler;
+    private final SshDshHandler sshDshHandler;
     private final RemoteAuthHandler remoteAuthHandler;
     private final KeepAliveHandler keepAliveHandler;
     /** 通知中心（/__ds_notify/*）：页面推「谁在跑」，原生渲染通知 */
@@ -92,7 +93,8 @@ public final class LocalServer {
         // 会话存储用同一个 Application context：SQLiteOpenHelper 会一直持有它
         this.dbHandler = new DbHandler(base);
         // 远程桥自己建独立的 OkHttpClient（不能复用传入的那个：它挂着 HTTPS_ONLY_INTERCEPTOR）
-        this.remoteWsHandler = new RemoteWsHandler();
+        this.sshDshHandler = new SshDshHandler(base);
+        this.remoteWsHandler = new RemoteWsHandler(sshDshHandler);
         // 应用内授权容器（/__ds_auth/*）不需要 HTTP 客户端（网页由 WebView 自己加载），但要能拿到
         // Activity：MainActivity 传进来的是 Application context，所以它内部自己注册
         // ActivityLifecycleCallbacks 跟踪当前 resumed 的 Activity 来弹全屏 Dialog
@@ -174,6 +176,7 @@ public final class LocalServer {
         updateHandler.cancelAll();
         // WebSocket 隧道是长连接：不主动拆，读线程会一直挂在 socket 上
         remoteWsHandler.cancelAll();
+        sshDshHandler.closeAll();
         // 授权容器可能还开着一个全屏 Dialog：退出时一起关掉（内部走主线程 + 幂等）
         remoteAuthHandler.cancelAll();
         workers.shutdownNow();
@@ -323,8 +326,11 @@ public final class LocalServer {
         // 它既不是静态文件，而且 101 之后整条连接归 RemoteWsHandler 独占，不会再回到这个循环。
         // 契约要求的位置：紧跟 /__ds_db、在 /__ds_update 与静态资源之前（顺序错了会被
         // AssetHandler 当成页面路径去 assets 里找，见下面的静态资源分支）。
+        if (path.startsWith(SshDshHandler.PREFIX)) {
+            return sshDshHandler.handle(method, path, port, headers, in, out);
+        }
         if (path.startsWith(RemoteWsHandler.PATH_PREFIX)) {
-            return remoteWsHandler.handle(method, path, headers, in, out, keepAlive);
+            return remoteWsHandler.handle(method, path, port, headers, in, out, keepAlive);
         }
 
         // 应用内 OAuth 授权容器（/__ds_auth/*）：同样必须排在静态资源判断之前。

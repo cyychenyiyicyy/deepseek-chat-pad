@@ -1,0 +1,44 @@
+.modal {
+  width: min(860px, 100%);
+  max-height: calc(var(--app-viewport-height, 100dvh) - 24px);
+}
+
+.toolbar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.screen {
+  height: clamp(140px, calc(var(--app-viewport-height, 100dvh) - 300px), 560px);
+  min-width: 0;
+  padding: 8px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #101827;
+}
+
+.extraKeys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+
+  button {
+    min-height: 40px;
+    padding: 0 10px;
+    border: 1px solid var(--dsw-alias-border-l2);
+    border-radius: 8px;
+    background: var(--dsw-alias-interactive-bg-hover);
+    color: inherit;
+    font: inherit;
+  }
+
+  button[aria-pressed='true'] {
+    color: var(--dsw-primary-color, #3c80ff);
+    border-color: currentColor;
+  }
+
+  button:disabled {
+    opacity: .45;
+  }
+}

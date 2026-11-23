@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useSyncExternalStore } from 'react'
 
 /** 窄于 768px 按移动端布局 */
 const query = window.matchMedia('not all and (min-width: 768px)')
@@ -57,21 +57,23 @@ export const usePreventPageScroll = (enabled: boolean) => {
   }, [enabled])
 }
 
-/** 移动端页面跟随视觉视口，键盘弹出后顶栏和输入框仍留在可见区域。 */
-export const useMobileViewport = (enabled: boolean) => {
-  const frameRef = useRef<HTMLDivElement>(null)
-
+/** 聊天与浮层共同跟随视觉视口，包括平板横屏的软键盘。 */
+export const useMobileViewport = (uiScale: number) => {
   useLayoutEffect(() => {
-    const frame = frameRef.current
-    if (!enabled || !frame) {
-      return
-    }
+    const { style } = document.documentElement
     const viewport = window.visualViewport
-    const inputSelector = 'textarea, input:not([type="file"])'
+    const inputTypes = ['email', 'number', 'password', 'search', 'tel', 'text', 'url']
+    const hasKeyboardInput = () => {
+      const field = document.activeElement
+      return (
+        (field instanceof HTMLTextAreaElement && !field.readOnly) ||
+        (field instanceof HTMLInputElement && !field.readOnly && inputTypes.includes(field.type))
+      )
+    }
     let animationFrame = 0
     const reset = () => {
-      frame.style.removeProperty('--app-viewport-height')
-      frame.style.removeProperty('--app-viewport-top')
+      style.removeProperty('--app-viewport-height')
+      style.removeProperty('--app-viewport-top')
     }
     const update = () => {
       // 双指缩放由浏览器处理，保持当前布局尺寸。
@@ -79,15 +81,15 @@ export const useMobileViewport = (enabled: boolean) => {
         return
       }
       // 失焦后直接恢复 CSS 的全高布局，不等 Safari 收键盘后的 resize。
-      if (!document.activeElement?.matches(inputSelector)) {
+      if (!hasKeyboardInput()) {
         reset()
         return
       }
-      frame.style.setProperty(
+      style.setProperty(
         '--app-viewport-height',
-        `${viewport?.height ?? window.innerHeight}px`
+        `${(viewport?.height ?? window.innerHeight) / uiScale}px`
       )
-      frame.style.setProperty('--app-viewport-top', `${viewport?.offsetTop ?? 0}px`)
+      style.setProperty('--app-viewport-top', `${(viewport?.offsetTop ?? 0) / uiScale}px`)
     }
     const scheduleFrame = () => {
       cancelAnimationFrame(animationFrame)
@@ -99,7 +101,7 @@ export const useMobileViewport = (enabled: boolean) => {
       scheduleFrame()
     }
     const onFocusIn = () => {
-      if (document.activeElement?.matches(inputSelector)) {
+      if (hasKeyboardInput()) {
         schedule()
       }
     }
@@ -120,7 +122,5 @@ export const useMobileViewport = (enabled: boolean) => {
       document.removeEventListener('focusout', scheduleFrame)
       reset()
     }
-  }, [enabled])
-
-  return frameRef
+  }, [uiScale])
 }
