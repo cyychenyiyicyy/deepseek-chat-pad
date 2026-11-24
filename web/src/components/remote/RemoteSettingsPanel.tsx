@@ -2,24 +2,15 @@ import clsx from 'clsx'
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslate, type TranslationKey } from '../../i18n/index.js'
 import { qrDataUrl } from '../../services/remote/qr.js'
-import { openDshWeb, supportsDshWeb } from '../../services/remote/dshWeb.js'
-import { DSH_WEB_CAPABILITY } from '../../vendor/dsh-remote/protocol/dsh-web.js'
-import { describeRemoteError, lastRemoteTarget, type RemoteCallTarget } from '../../services/remote/sessionsApi.js'
+import { lastRemoteTarget } from '../../services/remote/sessionsApi.js'
 import { loadAccounts, loadAdaptiveTransport, loadCompactHistory, loadServers, saveAdaptiveTransport, saveCompactHistory, type LoginMethod } from '../../services/remote/storage.js'
 import { probeAuthBridge, useRemoteStore, type AuthBridgeStatus } from '../../services/remote/store.js'
 import { Button } from '../base/Button.js'
-import { showToast } from '../base/toastState.js'
 import { openSettings } from '../settings/settingsDialogState.js'
 import { useRemoteAvailability } from './RemoteModeSwitch.js'
+import { RemoteWorkspaceTools } from './RemoteWorkspaceTools.js'
 import styles from './RemoteSettingsPanel.module.css'
 
-const SessionBackups = lazy(() => import('./SessionBackups.js'))
-const RemoteConversationShares = lazy(() => import('./RemoteConversationShares.js'))
-const HostPlugins = lazy(() => import('./HostPlugins.js'))
-const HostWorkspaces = lazy(() => import('./HostWorkspaces.js'))
-const RemoteDevices = lazy(() => import('./RemoteDevices.js'))
-const RemoteSchedules = lazy(() => import('./RemoteSchedules.js'))
-const RemoteHostSettings = lazy(() => import('./RemoteHostSettings.js'))
 const PairDevice = lazy(() => import('./PairDevice.js'))
 const SshHostDialog = lazy(() => import('./SshHostDialog.js'))
 
@@ -93,17 +84,10 @@ const loginMethodLabel = (method: LoginMethod | undefined): TranslationKey => {
   return 'remoteLoginMethodPassword'
 }
 
-export const RemoteSettingsPanel = () => {
-  const [showBackups, setShowBackups] = useState(false)
-  const [showShares, setShowShares] = useState(false)
+export const RemoteSettingsPanel = ({ connectionOnly = false }: { connectionOnly?: boolean }) => {
   const [showPairing, setShowPairing] = useState(false)
   const [showSsh, setShowSsh] = useState(false)
   const [sshAvailable, setSshAvailable] = useState(false)
-  const [hostDialog, setHostDialog] = useState<{
-    kind: 'plugins' | 'workspaces' | 'devices' | 'schedules' | 'configuration' | 'providers'
-    target: RemoteCallTarget
-  } | null>(null)
-  const [openingWeb, setOpeningWeb] = useState(false)
   const [adaptiveTransport, setAdaptiveTransport] = useState(loadAdaptiveTransport)
   const [compactHistory, setCompactHistory] = useState(loadCompactHistory)
   const t = useTranslate()
@@ -152,7 +136,6 @@ export const RemoteSettingsPanel = () => {
 
   const busy = phase === 'authing' || phase === 'connecting' || phase === 'waiting-auth' || starting !== null
   const connected = phase === 'ready'
-  const currentTarget = connected ? lastRemoteTarget() : null
   const blocked = availability !== 'ready'
   const bridgeProbing = bridge === 'probing'
   const appOnly = bridge === 'missing' || bridge === 'outdated'
@@ -354,9 +337,23 @@ export const RemoteSettingsPanel = () => {
       ) : null}
 
       <div className={styles.intro}>
-        <div className={styles.introTitle}>{t('remoteSettingsTitle')}</div>
+        {!connectionOnly ? <div className={styles.introTitle}>{t('remoteSettingsTitle')}</div> : null}
         <div className={styles.description}>{t('remoteSettingsDesc')}</div>
       </div>
+      {availability === 'ready' && (sshAvailable || !connected) ? (
+        <div className={styles.connectionActions}>
+          {sshAvailable ? (
+            <Button variant="outlined" size="l" disabled={busy || restoring} onClick={() => setShowSsh(true)}>
+              {t(!connected && lastSession?.transport === 'ssh' ? 'remoteSshReconnect' : 'remoteSshHost')}
+            </Button>
+          ) : null}
+          {!connected ? (
+            <Button variant="outlined" size="l" disabled={busy || restoring} onClick={() => setShowPairing(true)}>
+              {t('remotePairDevice')}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* ── 重启后自动恢复（K4）：一条横幅说清「在干什么 / 为什么没连上」 ──────
        * 三态优先级：正在恢复 > 失败可重试 > 凭据过期 > 有记录但当前没连（临时断开后）。
@@ -598,13 +595,6 @@ export const RemoteSettingsPanel = () => {
             {transport !== 'ssh' && <StatusChip label={t('remoteLoginMethodLabel')} value={t(loginMethodLabel(account?.loginMethod))} />}
           </div>
           <div className={styles.actions}>
-            <Button
-              variant="outlined"
-              size="m"
-              onClick={() => fireAndForget(() => useRemoteStore.getState().refreshSessions())}
-            >
-              {t('remoteRefreshSessions')}
-            </Button>
             <Button variant="outlined" size="m" onClick={disconnect}
               title={transport === 'ssh' ? undefined : t('remoteDisconnectHint')}>
               {t('remoteDisconnect')}
@@ -629,7 +619,7 @@ export const RemoteSettingsPanel = () => {
         </div>
       ) : null}
 
-      {availability === 'ready' && transport !== 'ssh' && typeof RTCPeerConnection === 'function' && (
+      {!connectionOnly && availability === 'ready' && transport !== 'ssh' && typeof RTCPeerConnection === 'function' && (
         <Field label={t('remoteTransportPreference')} description={t('remoteTransportPreferenceHint')}>
           <select className={styles.input} aria-label={t('remoteTransportPreference')} disabled={busy}
             value={adaptiveTransport ? 'automatic' : 'relay'} onChange={(event) => {
@@ -641,7 +631,7 @@ export const RemoteSettingsPanel = () => {
           </select>
         </Field>
       )}
-      {availability === 'ready' && transport !== 'ssh' && (
+      {!connectionOnly && availability === 'ready' && transport !== 'ssh' && (
         <Field label={t('remoteCompactHistory')} description={t('remoteCompactHistoryHint')}>
           <input type="checkbox" aria-label={t('remoteCompactHistory')} checked={compactHistory} disabled={busy} onChange={(event) => {
             const enabled = event.currentTarget.checked
@@ -650,62 +640,16 @@ export const RemoteSettingsPanel = () => {
         </Field>
       )}
       {connected && <ConnectionDetails key={JSON.stringify([lastSession?.serverUrl, lastSession?.hostDeviceId])} />}
-      {availability === 'ready' && (
-        <div className={styles.actions}>
-          <Button variant="outlined" size="m" onClick={() => setShowBackups(true)}>{t('remoteSessionBackups')}</Button>
-          <Button variant="outlined" size="m" onClick={() => setShowShares(true)}>{t('remoteHostedManage')}</Button>
-          {sshAvailable && (
-            <Button variant="outlined" size="m" disabled={busy || restoring} onClick={() => setShowSsh(true)}>
-              {t(!connected && lastSession?.transport === 'ssh' ? 'remoteSshReconnect' : 'remoteSshHost')}
-            </Button>
-          )}
-          {!connected && (
-            <Button variant="outlined" size="m" disabled={busy || restoring} onClick={() => setShowPairing(true)}>
-              {t('remotePairDevice')}
-            </Button>
-          )}
-          {currentTarget && (
-            <>
-              <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'workspaces', target: currentTarget })}>{t('remoteManageWorkspaces')}</Button>
-              <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'plugins', target: currentTarget })}>{t('remoteHostPlugins')}</Button>
-              <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'configuration', target: currentTarget })}>{t('remoteHostConfiguration')}</Button>
-              <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'providers', target: currentTarget })}>{t('remoteHostModels')}</Button>
-              {transport !== 'ssh' && (
-                <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'devices', target: currentTarget })}>{t('remoteManageDevices')}</Button>
-              )}
-              <Button variant="outlined" size="m" onClick={() => setHostDialog({ kind: 'schedules', target: currentTarget })}>{t('remoteSchedules')}</Button>
-            </>
-          )}
-          {connected && capabilities.includes(DSH_WEB_CAPABILITY) && supportsDshWeb() && (
-            <Button variant="outlined" size="m" disabled={openingWeb} onClick={() => {
-              setOpeningWeb(true)
-              void openDshWeb().catch((error) => showToast(describeRemoteError(error).text)).finally(() => setOpeningWeb(false))
-            }}>{t('remoteOpenDshWeb')}</Button>
-          )}
-        </div>
-      )}
-      {showBackups && <Suspense fallback={null}><SessionBackups onClose={() => setShowBackups(false)} /></Suspense>}
-      {showShares && <Suspense fallback={null}><RemoteConversationShares onClose={() => setShowShares(false)} /></Suspense>}
+      {!connectionOnly && <RemoteWorkspaceTools />}
       {showPairing && <Suspense fallback={null}><PairDevice onClose={() => setShowPairing(false)} /></Suspense>}
       {showSsh && <Suspense fallback={null}><SshHostDialog onClose={() => setShowSsh(false)} /></Suspense>}
-      {hostDialog && hostDialog.target === currentTarget && (
-        <Suspense fallback={null}>
-          {hostDialog.kind === 'workspaces' && <HostWorkspaces target={currentTarget} onClose={() => setHostDialog(null)} />}
-          {hostDialog.kind === 'plugins' && <HostPlugins target={currentTarget} onClose={() => setHostDialog(null)} />}
-          {hostDialog.kind === 'devices' && <RemoteDevices target={currentTarget} onClose={() => setHostDialog(null)} />}
-          {hostDialog.kind === 'schedules' && <RemoteSchedules target={currentTarget} onClose={() => setHostDialog(null)} />}
-          {(hostDialog.kind === 'configuration' || hostDialog.kind === 'providers') && (
-            <RemoteHostSettings key={hostDialog.kind} mode={hostDialog.kind} target={currentTarget} onClose={() => setHostDialog(null)} />
-          )}
-        </Suspense>
-      )}
 
       {/* ── 后台与权限：**已搬到通用设置**（K4）。这里只留一句小字 + 一个跳过去的入口：
        * 通知权限 / 电池优化 / 自启动 / 精确定时 / 悬浮窗属于整个 App 的后台存活能力，
        * 不只服务远程连接 —— 放在这里等于暗示「不连远程就不需要」。
        * 只在原生真的支持 `/__ds_keepalive/*` 时出现（浏览器 / 旧 APK 那边整节也不显示，
        * 指过去只会落空）。 */}
-      {keepAlive !== null && keepAlive.supported ? (
+      {!connectionOnly && keepAlive !== null && keepAlive.supported ? (
         <>
           <div className={styles.actions}>
             <Button variant="outlined" size="s" onClick={() => openSettings('general')}>

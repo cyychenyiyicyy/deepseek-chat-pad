@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useState, type ReactNode } from 'react'
+import { useLayoutEffect, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useAnchoredPosition, useDismiss } from './anchored.js'
 import styles from './Menu.module.css'
@@ -28,6 +28,14 @@ export const Menu = ({
     { align: 'start', alignOffset: -5, offset: 4 }
   )
   useDismiss(open, [anchorRef, floatingRef], close)
+  useLayoutEffect(() => {
+    if (open) floatingRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+  }, [floatingRef, open])
+
+  const closeWithFocus = () => {
+    close()
+    anchorRef.current?.querySelector<HTMLButtonElement>('button')?.focus()
+  }
 
   return (
     <>
@@ -41,20 +49,44 @@ export const Menu = ({
               className={styles.menu}
               style={position ?? undefined}
               role="menu"
+              onKeyDown={(event) => {
+                if (event.key === 'Escape' || event.key === 'Tab') {
+                  closeWithFocus()
+                  if (event.key === 'Escape') {
+                    event.stopPropagation()
+                    event.preventDefault()
+                  }
+                  return
+                }
+                const items = Array.from(event.currentTarget.querySelectorAll('button'))
+                const current = items.findIndex((item) => item === document.activeElement)
+                let next: number
+                switch (event.key) {
+                  case 'ArrowDown': next = (current + 1) % items.length; break
+                  case 'ArrowUp': next = (current + items.length - 1) % items.length; break
+                  case 'Home': next = 0; break
+                  case 'End': next = items.length - 1; break
+                  default: return
+                }
+                event.preventDefault()
+                items[next]?.focus()
+              }}
             >
               {options.map((option) => (
-                <div
+                <button
                   key={option.key}
+                  type="button"
                   role="menuitem"
+                  tabIndex={-1}
                   className={clsx(styles.option, option.danger && styles.danger)}
                   onClick={() => {
-                    setOpen(false)
+                    closeWithFocus()
                     option.onSelect()
                   }}
                 >
                   <span className={styles.icon}>{option.icon}</span>
                   {option.label}
-                </div>
+                </button>
               ))}
             </div>,
             document.body

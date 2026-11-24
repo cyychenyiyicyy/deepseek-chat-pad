@@ -1,23 +1,7 @@
-import clsx from 'clsx'
 import { useEffect } from 'react'
 import { create } from 'zustand'
-import { useTranslate } from '../../i18n/index.js'
-import styles from './RemoteModeSwitch.module.css'
 
-/**
- * 侧栏顶部的「本机 / 远程」胶囊切换。
- *
- * 两种模式用的是**同一套布局**：左栏会话列表 + 右栏会话详情。
- * 这个胶囊只决定左栏读哪一份列表、右栏渲染哪个会话页，不新开一层页面。
- *
- * 两条纪律：
- *   1. **胶囊自己不探测**。它常驻侧栏，一探测就落在启动路径上，而
- *      `web/src/index.html` 的 8 秒看门狗会把慢启动当成坏包回滚。
- *      原生桥可用性由右栏（`RemoteChatView`）和设置面板按需探测。
- *   2. 非壳环境也**允许切过去**：右栏会显示「只能在 App 内使用」，不白屏、不弹红条。
- */
-
-/** 对话模式：本机（现有链路）或远程（远端 DSH 主机）。 */
+/** 主机选择器切换两个对话模式。远程页面和连接面板按需探测原生桥。 */
 export type ChatMode = 'local' | 'remote'
 
 type RemoteModeState = { mode: ChatMode }
@@ -34,7 +18,6 @@ const readStoredMode = (): ChatMode => {
     return 'local'
   }
 }
-
 export const useRemoteMode = create<RemoteModeState>(() => ({ mode: readStoredMode() }))
 
 export const setChatMode = (mode: ChatMode) => {
@@ -141,30 +124,4 @@ export const useRemoteAvailability = (): {
       void ensureProbed()
     },
   }
-}
-
-/** 两段式胶囊：左本机、右远程。选中态沿用主题的 ghost-active 配色。 */
-export const RemoteModeSwitch = () => {
-  const t = useTranslate()
-  const mode = useRemoteMode((state) => state.mode)
-  return (
-    <div role="group" aria-label={t('remoteModeLabel')} className={styles.switch}>
-      <button
-        type="button"
-        aria-pressed={mode === 'local'}
-        className={clsx(styles.option, mode === 'local' && styles.optionActive)}
-        onClick={exitRemoteMode}
-      >
-        {t('remoteModeLocal')}
-      </button>
-      <button
-        type="button"
-        aria-pressed={mode === 'remote'}
-        className={clsx(styles.option, mode === 'remote' && styles.optionActive)}
-        onClick={enterRemoteMode}
-      >
-        {t('remoteModeRemote')}
-      </button>
-    </div>
-  )
 }

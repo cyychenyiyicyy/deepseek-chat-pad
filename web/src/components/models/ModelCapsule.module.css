@@ -3,6 +3,7 @@
   align-items: center;
   gap: 4px;
   box-sizing: border-box;
+  min-width: 0;
   max-width: 260px;
   height: 32px;
   padding: 0 8px 0 10px;
@@ -53,7 +54,7 @@
 
 .anchor {
   display: inline-flex;
-  flex-shrink: 0;
+  min-width: 0;
 }
 
 /* 宿主铺满整个文档坐标区，弹层在里面按差值定位，指哪儿算哪儿 */

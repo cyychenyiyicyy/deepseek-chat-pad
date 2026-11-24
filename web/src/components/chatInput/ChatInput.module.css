@@ -8,27 +8,16 @@
   cursor: text;
   font-size: 16px;
   line-height: var(--line-height);
-  border-radius: 24px;
-  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin);
-  background: var(--dsw-specific-input-major);
+  border-radius: var(--pad-radius-compose);
+  border: 1px solid var(--pad-control-border);
+  background: var(--pad-surface);
+  box-shadow: var(--pad-shadow);
   overflow: hidden;
 }
 
-.session {
-  box-shadow:
-    0 4px 10px rgba(0, 0, 0, 0.02),
-    0 2px 4px rgba(0, 0, 0, 0.04);
-}
-
-.home {
-  box-shadow:
-    0 4px 12px 0 rgba(0, 0, 0, 0.02),
-    0 2px 2px 0 rgba(72, 104, 178, 0.01),
-    0 30px 60px 0 rgba(72, 104, 178, 0.03);
-
-  [data-ds-dark-theme] & {
-    box-shadow: none;
-  }
+.wrapper:focus-within {
+  border-color: var(--pad-focus);
+  box-shadow: 0 0 0 1px var(--pad-focus), var(--pad-shadow);
 }
 
 .attachments {
@@ -219,7 +208,7 @@
   max-height: 336px;
 }
 
-@media not all and (min-width: 768px) {
+@media (max-width: 767px), (max-height: 500px) {
   .wrapper {
     flex-shrink: 0;
     max-height: calc(var(--app-viewport-height, 100dvh) - 120px);
@@ -238,21 +227,40 @@
 .functionRow {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 4px;
-  padding: 12px;
+  gap: 6px;
+  padding: 8px 10px 10px;
 }
 
 .toggles {
   display: flex;
   flex: 1;
   align-items: center;
-  gap: 10px;
-  min-width: 0;
+  gap: 6px;
+  min-width: 78px;
 }
 
 .collapsedToggles .toggleLabel {
   display: none;
+}
+
+@media (max-width: 359px) {
+  .functionRow {
+    gap: 4px;
+    padding-inline: 6px;
+  }
+
+  .toggles {
+    min-width: 68px;
+    gap: 4px;
+  }
+
+  .toggles .toggle {
+    padding-inline: 8px;
+  }
+
+  .right {
+    gap: 2px;
+  }
 }
 
 /* 当前模型不支持的能力：仍然显示，但置灰并给出说明 */
@@ -266,9 +274,9 @@
   align-items: center;
   justify-content: center;
   gap: 4px;
-  height: 34px;
-  padding: 0 12px;
-  border-radius: 18px;
+  height: 38px;
+  padding: 0 10px;
+  border-radius: var(--pad-radius-control);
   border: 1px solid var(--dsw-alias-border-l2);
   background-color: transparent;
   color: var(--dsw-alias-label-primary);
@@ -315,12 +323,12 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 34px;
-  height: 34px;
-  margin-left: 6px;
+  width: var(--pad-touch);
+  height: var(--pad-touch);
+  margin-left: 2px;
   padding: 0;
   border: none;
-  border-radius: 50%;
+  border-radius: var(--pad-radius-control);
   background: var(--dsw-alias-button-primary-fill);
   color: var(--dsw-static-neutral-bluish-00);
   cursor: pointer;
@@ -333,5 +341,32 @@
   &.disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+}
+
+@media (min-width: 640px) and (max-height: 500px) {
+  .wrapper {
+    display: grid;
+    grid-template-columns: minmax(150px, 1fr) minmax(0, auto);
+    align-items: center;
+  }
+
+  .wrapper > :not(.textareaWrapper):not(.functionRow) {
+    grid-column: 1 / -1;
+  }
+
+  .functionRow {
+    max-width: min(540px, 57vw);
+    padding: 5px 8px;
+  }
+
+  .textarea,
+  .mirror {
+    min-height: 44px;
+    padding: 9px 12px;
+  }
+
+  .mirror {
+    max-height: 92px;
   }
 }

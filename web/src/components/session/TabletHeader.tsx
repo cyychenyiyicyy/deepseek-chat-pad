@@ -25,15 +25,18 @@ export const TabletHeader = ({ title }: { title?: string }) => {
 
   return (
     <div className={styles.header}>
-      <IconButton
-        size="xl"
-        tone="primary"
-        icon={<IconMenuOutline20 />}
-        tooltip={collapsed ? t('expandSiderbarButton') : t('collapseSiderbarButton')}
-        aria-label={collapsed ? t('expandSiderbarButton') : t('collapseSiderbarButton')}
-        onClick={() => setSiderCollapsed(!collapsed)}
-      />
-      <div className={styles.title}>{title ?? ''}</div>
+      {collapsed ? (
+        <IconButton
+          size="xl"
+          tone="primary"
+          icon={<IconMenuOutline20 />}
+          tooltip={t('expandSiderbarButton')}
+          aria-expanded={false}
+          aria-controls="desktop-session-sidebar"
+          onClick={() => setSiderCollapsed(false)}
+        />
+      ) : null}
+      <div className={styles.title}>{title ?? t('newChat')}</div>
       <div className={styles.actions}>
         <IconButton
           size="m"
@@ -43,14 +46,16 @@ export const TabletHeader = ({ title }: { title?: string }) => {
           aria-label={theme === 'dark' ? t('themeToLight') : t('themeToDark')}
           onClick={() => setThemePreference(theme === 'dark' ? 'light' : 'dark')}
         />
-        <IconButton
-          size="m"
-          tone="primary"
-          icon={<IconNewChatOutline20 />}
-          tooltip={t('newChat')}
-          aria-label={t('newChat')}
-          onClick={newChat}
-        />
+        {collapsed ? (
+          <IconButton
+            size="m"
+            tone="primary"
+            icon={<IconNewChatOutline20 />}
+            tooltip={t('newChat')}
+            aria-label={t('newChat')}
+            onClick={newChat}
+          />
+        ) : null}
       </div>
     </div>
   )

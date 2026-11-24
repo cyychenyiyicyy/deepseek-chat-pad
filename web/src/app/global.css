@@ -62,13 +62,18 @@ body[data-ds-dark-theme] {
   --scroll-color-hover: rgba(255, 255, 255, 0.24);
 }
 
+:where(button, a[href], input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--pad-focus);
+  outline-offset: 2px;
+}
+
 body.change-theme *,
 body.change-theme *::before,
 body.change-theme *::after {
   transition: none !important;
 }
 
-@media not all and (min-width: 768px) {
+@media (max-width: 767px), (max-height: 500px) {
   html,
   body,
   #root {

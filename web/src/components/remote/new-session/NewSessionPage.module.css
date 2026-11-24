@@ -62,36 +62,40 @@
 
 /* ─────────────────── 中间：居中一列 ─────────────────── */
 
-.body {
+.start {
   display: flex;
-  flex: 1;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(var(--chat-width), calc(100% - 2 * var(--chat-gutter)));
+  min-height: 0;
+  max-height: calc(100% - var(--ds-topbar-h) - var(--ds-top-offset));
+  margin: auto;
+  padding: 16px 0 max(12px, env(safe-area-inset-bottom));
+}
+
+.body {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior-y: contain;
   scrollbar-color: var(--scroll-color) transparent;
 }
 
-.column {
-  display: grid;
-  gap: 12px;
-  width: min(560px, calc(100% - 2 * var(--chat-gutter)));
-  margin: auto;
-  padding-block: 20px;
-}
-
 .workspaceSection {
-  display: grid;
-  gap: 12px;
-  padding: clamp(14px, 3vw, 24px);
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 20px;
-  background: var(--dsw-specific-sidebar-fill);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--pad-divider);
+  border-radius: var(--pad-radius-card);
+  background: var(--pad-surface);
 }
 
 .workspaceLabel {
+  flex-shrink: 0;
   margin: 0;
-  font-size: 20px;
-  line-height: 26px;
+  font-size: 14px;
+  line-height: 22px;
   font-weight: 600;
   color: var(--dsw-alias-label-primary);
 }
@@ -106,11 +110,12 @@
 }
 
 .chip.workspacePill {
-  width: 100%;
+  flex: 1 1 200px;
+  min-width: 0;
   height: 44px;
   padding: 0 12px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 12px;
+  border: 1px solid var(--pad-control-border);
+  border-radius: var(--pad-radius-control);
   background: var(--dsw-alias-bg-base);
 }
 
@@ -124,7 +129,12 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
+  margin-top: 8px;
   max-width: 100%;
+}
+
+.pillRow:empty {
+  display: none;
 }
 
 .optionPill {
@@ -135,9 +145,9 @@
   max-width: 100%;
   height: 42px;
   padding: 0 8px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 8px;
-  background: none;
+  border: 1px solid var(--pad-divider);
+  border-radius: var(--pad-radius-control);
+  background: var(--pad-surface);
   font: inherit;
   font-size: 13px;
   line-height: 18px;
@@ -222,7 +232,30 @@
 
 .composerSlot {
   flex-shrink: 0;
-  background-color: var(--dsw-alias-bg-base);
+  padding: 10px 2px 0;
+}
+
+.composerSlot > div {
+  width: 100%;
+  padding-bottom: 0;
+}
+
+@media (max-width: 767px), (max-height: 500px) {
+  .start {
+    margin-bottom: 0;
+    padding-top: 10px;
+  }
+}
+
+@media (max-width: 520px) {
+  .workspaceSection {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .chip.workspacePill {
+    flex: auto;
+  }
 }
 
 .creatingBadge {

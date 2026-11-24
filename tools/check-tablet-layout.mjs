@@ -10,7 +10,7 @@ import { runInThisContext } from 'node:vm'
 import { unzipSync } from '../web/node_modules/fflate/esm/index.mjs'
 
 const annotate = (error) => {
-  const message = error instanceof Error ? error.message : String(error)
+  const message = typeof error?.message === 'string' ? error.message : String(error)
   // Actions 会把 ::error:: 变成 annotation：公开仓库不登录也能看到是哪一条断言挂了。
   console.log('::error title=tablet-layout::' + message.replace(/%/g, '%25').replace(/\r/g, '').replace(/\n/g, '%0A').slice(0, 900))
 }
@@ -160,6 +160,13 @@ const server = http.createServer((req, res) => {
     const upstream = new URL(Buffer.from(req.headers['x-ds-target'], 'base64url').toString())
     const path = upstream.pathname
     const method = req.headers['x-ds-method']
+    if (path === '/user/balance' && method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({
+        is_available: true,
+        balance_infos: [{ currency: 'CNY', total_balance: '12.50' }],
+      }))
+      return
+    }
     if (['dl.dshtui.com', 'go.dshtui.com'].includes(upstream.hostname) && path.startsWith('/market/')) {
       res.writeHead(403).end()
       return
@@ -453,7 +460,8 @@ try {
     throw new Error('No download emitted for ' + name + ': ' + await js('document.querySelector("[role=alert]")?.textContent'))
   }
   if (!process.argv.includes('--integration-only')) {
-  for (const [name, width, height] of [['landscape', 1366, 900], ['portrait', 800, 1120], ['split', 460, 780]]) {
+  for (const [name, width, height] of [['landscape', 1366, 900], ['portrait', 800, 1120], ['phone-landscape', 844, 390], ['split', 460, 780]]) {
+    const drawerLayout = width < 768 || height <= 500
     await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
     await send('Page.navigate', { url: 'http://127.0.0.1:' + server.address().port + '/' })
     for (let attempt = 0; attempt < 70; attempt++) {
@@ -463,11 +471,15 @@ try {
     await check(name + ' renders chat', 'document.body.textContent.includes("A distinct response for qa-a")')
     await check(name + ' composer within viewport', textarea + '.getBoundingClientRect().bottom <= innerHeight')
     await check(name + ' frame fits window', frame + '.scrollWidth <= innerWidth')
+    if (name === 'phone-landscape') {
+      await check('phone landscape fits idle input and send on one line',
+        'document.querySelector("[data-composer-primary]").parentElement.getBoundingClientRect().height <= 64')
+    }
     await photo('tablet-' + name)
-    if (name === 'split') {
+    if (drawerLayout) {
       await operation('document.querySelector("[class^=header-] button[aria-label]")?.click()')
       await sleep(330)
-      await check('split drawer opens', 'document.querySelector("[class^=drawerLayer-]").getAttribute("aria-hidden") === "false"')
+      await check(name + ' drawer opens', 'document.querySelector("[class^=drawerLayer-]").getAttribute("aria-hidden") === "false"')
     }
     await openBy('Tablet workspace beta')
     await check(name + ' select beta', 'fixture.remote.getState().activeSessionId === "qa-b" && document.body.textContent.includes("A distinct response for qa-b")')
@@ -481,12 +493,14 @@ try {
     await operation(textarea + '.focus(); Object.defineProperty(visualViewport, "height", { configurable:true, value: Math.round(innerHeight * .57) }); visualViewport.dispatchEvent(new Event("resize"))')
     await check(name + ' composer stays above keyboard', textarea + '.getBoundingClientRect().bottom <= visualViewport.height')
     await check(name + ' frame follows visual viewport', 'Math.round(' + frame + '.getBoundingClientRect().height) === visualViewport.height')
-    await operation(textarea + '.blur(); delete visualViewport.height')
+    await operation(textarea + '.blur(); delete visualViewport.height; visualViewport.dispatchEvent(new Event("resize"))')
     await operation('fixture.newSession.getState().openPanel()')
     await check(name + ' new session shows workspace selection', 'document.querySelector("[data-testid=new-session-page] h1") !== null')
+    await check(name + ' new session keeps workspace and composer together',
+      'document.querySelector("textarea").getBoundingClientRect().top - document.querySelector("[data-testid=new-session-page] h1").getBoundingClientRect().bottom < 125')
     await photo('tablet-' + name + '-new')
     await operation('fixture.newSession.getState().closePanel()')
-    if (name === 'split') {
+    if (drawerLayout) {
       await operation('document.querySelector("[class^=header-] button[aria-label]")?.click()')
       await sleep(330)
     }
@@ -494,9 +508,51 @@ try {
     await check(name + ' shows all settings tabs', '[...document.querySelectorAll("[role=tab]")].length === 4')
     await photo('tablet-' + name + '-settings')
   }
+  await send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 900, deviceScaleFactor: 1, mobile: false })
+  await send('Page.navigate', { url: 'http://127.0.0.1:' + server.address().port + '/?local' })
+  await check('local welcome shows editable first-message starters', 'document.querySelector("h1")?.textContent === "What are we working on?" && !document.querySelector("[role=dialog]")')
+  await check('local welcome shows the current balance', 'document.body.innerText.includes("12.50")')
+  await operation('fixture.settings.setState({ locale: "zh-CN" })')
+  await photo('tablet-local-welcome')
+  await operation('fixture.settings.setState({ locale: "en-US" })')
+  await openBy('Draft a message')
+  await check('a starter fills and focuses the composer without sending', 'document.activeElement === document.querySelector("textarea") && document.activeElement.value === "Help me draft a message about " && !document.querySelector("[aria-current=true]")')
+  await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 780, deviceScaleFactor: 1, mobile: false })
+  await operation('fixture.settings.setState({ themePreference: "dark" })')
+  await check('dark split welcome keeps input and 44px send target inside the frame', `(() => {
+    const send = document.querySelector('button[aria-label="Send"]');
+    const rect = send?.getBoundingClientRect();
+    const toolbar = send?.closest('[class^="functionRow-"]');
+    return document.body.dataset.dsDarkTheme === "dark" && ${frame}.scrollWidth <= innerWidth &&
+      rect?.height >= 44 && rect.bottom <= innerHeight &&
+      toolbar && toolbar.scrollWidth === toolbar.clientWidth;
+  })()`)
+  await photo('tablet-local-split-dark')
+  await operation('document.querySelector(\'[aria-controls="mobile-session-drawer"]\').click()')
+  await operation('fixture.remote.setState({ phase: "idle", hostId: null, activeSessionId: null }); document.querySelector(\'#mobile-session-drawer button[aria-haspopup="dialog"]\').click()')
+  await check('one host picker includes the current local context and remote connection',
+    'document.querySelector("[role=dialog] h2")?.textContent === "Switch computer" && document.querySelector("[role=dialog] [aria-current=true]")?.textContent.includes("This device") && document.querySelector("[role=dialog]").textContent.includes("Remote connection")')
+  await photo('tablet-mobile-host-picker')
+  await operation(`[...document.querySelectorAll('[role=dialog] button')].find(x => x.textContent.includes('Disconnected')).click()`)
+  await check('unconnected remote mode exposes connection without opening Settings', 'document.querySelector("h1")?.textContent.includes("Not connected") && !document.querySelector("[role=dialog]")')
+  await openBy('Remote connection')
+  await check('the connection dialog exposes pairing and SSH before advanced settings',
+    'document.querySelector("[role=dialog]")?.innerText.includes("Connect SSH host") && document.querySelector("[role=dialog]")?.innerText.includes("Pair a host") && !document.querySelector("[role=tab][aria-selected=true][aria-controls]")')
+  await photo('tablet-remote-connection')
+  await send('Emulation.setDeviceMetricsOverride', { width: 460, height: 780, deviceScaleFactor: 1, mobile: false })
   await send('Page.navigate', { url: 'http://127.0.0.1:' + server.address().port + '/?management' })
-  for (let attempt = 0; attempt < 70 && !await js('Boolean(window.fixture)').catch(() => false); attempt++) await sleep(90)
-  await operation('fixture.openSettings("remote")')
+  for (let attempt = 0; attempt < 70 && !await js('location.search === "?management" && document.documentElement.dataset.dsBooted === "1"').catch(() => false); attempt++) await sleep(90)
+  await operation('document.querySelector(\'[aria-controls="mobile-session-drawer"]\')?.click()')
+  await operation(`(() => { const entry = document.querySelector('#mobile-session-drawer button[aria-label="Remote tools"]'); entry.focus(); entry.click(); })()`)
+  await check('remote tools group Host actions and conversation data outside Settings',
+    'document.querySelector("[role=dialog] h2")?.textContent === "Remote tools" && Boolean(document.querySelector("section[aria-label=Host] button") && document.querySelector(\'section[aria-label="Conversation data"] button\'))')
+  await operation('fixture.settings.setState({ locale: "zh-CN" })')
+  await photo('tablet-remote-tools')
+  await operation('fixture.settings.setState({ locale: "en-US" })')
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 })
+  await check('closing remote tools returns keyboard focus to its sidebar entry',
+    '!document.querySelector("[role=dialog]") && document.activeElement.getAttribute("aria-label") === "Remote tools"')
+  await openBy('Remote tools')
   await openBy('Host plugins')
   await sleep(350)
   await check('plugin inventory renders protected host entries', 'document.body.innerText.includes("protected-plugin") && document.body.innerText.includes("Managed on the Host")')
@@ -937,7 +993,9 @@ try {
   await operation(`fixture.newSession.getState().addDraftFiles([new File(['draft file for the new chat'], 'new-first-only.txt', {type:'text/plain'})]);
     fixture.newSession.getState().closePanel();`)
   await sleep(300)
-  await operation('fixture.remote.getState().switchHost("fixture-secondary")')
+  await operation('document.querySelector(\'[aria-controls="mobile-session-drawer"]\').click()')
+  await operation('document.querySelector(\'#mobile-session-drawer button[aria-haspopup="dialog"]\').click()')
+  await operation(`[...document.querySelectorAll('[role=dialog] button')].find(x => x.textContent.includes('Second Fixture Host')).click()`)
   await check('switches to another Host that contains the same session IDs',
     'fixture.remote.getState().phase==="ready" && fixture.remote.getState().hostId==="fixture-secondary" && fixture.remote.getState().sessions.some(x=>x.id==="qa-a")')
   await send('Page.reload')

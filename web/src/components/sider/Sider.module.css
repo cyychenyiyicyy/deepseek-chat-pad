@@ -4,142 +4,131 @@
   box-sizing: border-box;
   width: 100%;
   height: 100%;
-  /* 顶部不留内边距：安全区由 .top 自己的 --ds-top-offset 让，否则左栏比右栏多下移一截 */
-  padding: 0 12px;
-  border-right: 1px solid var(--dsw-alias-border-l1);
-  background-color: var(--dsw-specific-sidebar-fill);
+  padding: 0 clamp(12px, 1.3vw, 18px);
+  border-inline-end: 1px solid var(--pad-divider);
+  background: var(--pad-sidebar);
 }
 
 .top {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 2px;
   box-sizing: border-box;
-  /*
-   * 沉浸式状态栏：盒子 = 安全区 + 顶栏行高，padding-top 只让出安全区，
-   * 内容区正好剩 --ds-topbar-h，居中后 logo 中心与右栏会话标题在同一条线上。
-   * （旧写法在 >=768 把 height 写死 52px，安全区吃掉的其实是行高，logo 才会忽高忽低。）
-   */
   height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
-  margin-bottom: 8px;
-  padding: var(--ds-top-offset) 0 0 4px;
+  padding-top: var(--ds-top-offset);
+  margin-bottom: 12px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.brandIcon {
+  display: grid;
   flex-shrink: 0;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--pad-radius-control);
+  color: var(--pad-on-accent);
+  background: var(--pad-accent);
 }
 
 .appName {
-  min-width: 0;
-  padding-left: 4px;
   overflow: hidden;
-  font-size: clamp(17px, 1.65vw, 20px);
+  color: var(--pad-text);
+  font-size: 15px;
   line-height: 22px;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   white-space: nowrap;
   text-overflow: ellipsis;
-  color: var(--dsw-alias-brand-primary);
 }
 
-/* 会话搜索：与官方平板端的胶囊搜索框一致 */
 .search {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   gap: 8px;
+  min-height: var(--pad-touch);
   box-sizing: border-box;
-  height: 44px;
-  margin-bottom: 12px;
-  padding: 0 14px;
-  border-radius: 100px;
-  background-color: var(--dsw-alias-interactive-bg-hover);
+  padding: 0 10px;
+  border: 1px solid var(--pad-control-border);
+  border-radius: var(--pad-radius-control);
+  background: var(--pad-surface);
+}
+
+.search:focus-within {
+  border-color: var(--pad-focus);
+  box-shadow: 0 0 0 1px var(--pad-focus);
 }
 
 .searchIcon {
-  display: flex;
+  display: inline-flex;
   flex-shrink: 0;
-  color: var(--dsw-alias-label-tertiary);
+  color: var(--pad-muted);
 }
 
 .searchInput {
-  box-sizing: border-box;
   width: 100%;
   min-width: 0;
+  min-height: 40px;
+  padding: 0;
   border: none;
   background: transparent;
-  color: var(--dsw-alias-label-primary);
+  color: var(--pad-text);
   font: inherit;
-  font-size: 15px;
   outline: none;
-
-  &::placeholder {
-    color: var(--dsw-alias-label-tertiary);
-  }
 }
 
-/* 远程会话列表：跟本地列表占同一个位置，只是数据源不同 */
-.remoteList {
-  margin-top: 4px;
-}
-
-.mobile .remoteList {
-  margin-top: 4px;
+.searchInput::placeholder {
+  color: var(--pad-muted);
 }
 
 .newChat {
-  position: relative;
   display: flex;
-  align-items: center;
-  justify-content: center;
   flex-shrink: 0;
-  box-sizing: border-box;
+  align-items: center;
+  gap: 8px;
   width: 100%;
-  height: 40px;
-  padding: 0 16px;
-  border-radius: 100px;
-  border: 1px solid rgba(103, 158, 254, 0);
-  background: var(--dsw-alias-button-elevated-fill);
-  color: var(--dsw-alias-label-primary);
+  min-height: var(--pad-touch);
+  margin-bottom: 10px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: var(--pad-radius-control);
+  background: var(--pad-accent);
+  color: var(--pad-on-accent);
   font: inherit;
-  font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  user-select: none;
-  box-shadow:
-    0 -2px 2px rgba(72, 104, 178, 0.04),
-    0 2px 2px rgba(106, 111, 117, 0.09),
-    0 1px 2px rgba(72, 104, 178, 0.08);
-  transition: box-shadow 0.3s ease;
+}
 
-  &:hover {
-    box-shadow:
-      0 4px 4px 0 rgba(72, 104, 178, 0.04),
-      0 -3px 4px 0 rgba(72, 104, 178, 0.04),
-      0 6px 6px 0 rgba(106, 111, 117, 0.1);
-  }
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: default;
-    box-shadow: none;
-  }
-
-  [data-ds-dark-theme] & {
-    border: none;
-    box-shadow:
-      inset 0 1px 1px rgba(255, 255, 255, 0.1),
-      0 2px 4px rgba(106, 111, 117, 0.08);
-  }
+.newChat:hover {
+  background: var(--pad-accent-hover);
 }
 
 .newChatIcon {
-  display: flex;
-  margin-right: 6px;
+  display: inline-flex;
+}
+
+.newChatIcon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.remoteList {
+  margin-top: 2px;
 }
 
 .listWrap {
-  position: relative;
   flex: 1;
   min-height: 0;
-  margin-top: 12px;
+  margin-top: 8px;
 }
 
 .list {
@@ -150,103 +139,111 @@
   scrollbar-color: var(--scroll-color) transparent;
 }
 
-.section {
-  position: relative;
-  margin-top: 16px;
-  padding-top: 4px;
+.empty {
+  margin: 12px 0;
+  padding: 13px 10px;
+  border: 1px dashed var(--pad-divider);
+  border-radius: var(--pad-radius-control);
+  color: var(--pad-muted);
+  font-size: 13px;
+  line-height: 20px;
+  text-align: center;
+}
 
-  &:first-child {
-    margin-top: 0;
-  }
+.section + .section {
+  margin-top: 10px;
 }
 
 .sectionHeader {
   position: sticky;
   top: 0;
   z-index: 20;
-  padding: 2px 10px;
+  padding: 6px 10px;
+  color: var(--pad-muted);
+  background: var(--pad-sidebar);
   font-size: 12px;
+  font-weight: 600;
   line-height: 18px;
-  font-weight: 500;
-  color: var(--dsw-alias-label-tertiary);
-  background-color: var(--dsw-specific-sidebar-fill);
-  user-select: none;
 }
 
 .bottom {
   display: flex;
   flex-shrink: 0;
+  align-items: center;
   gap: 4px;
   padding: 8px 0 max(8px, env(safe-area-inset-bottom));
-  border-top: 1px solid var(--dsw-alias-border-l1);
+  border-top: 1px solid var(--pad-divider);
 }
 
-.settings {
-  display: flex;
-  align-items: center;
-  box-sizing: border-box;
-  flex: 1;
-  min-width: 0;
-  padding: 7px 2px 7px 6px;
-  border: none;
-  border-radius: 12px;
+.bottomAction {
+  flex-direction: column;
+  gap: 3px;
+  width: auto;
+  min-width: var(--pad-touch);
+  height: 48px;
+  padding-inline: 4px;
+}
+
+.bottomAction span {
+  font-size: 10px;
+  line-height: 13px;
+}
+
+.remoteTools {
+  color: var(--pad-accent-text);
+  background: var(--pad-accent-wash);
+}
+
+.remoteTools:hover {
+  background: var(--pad-accent-wash-hover);
+}
+
+@media (min-width: 768px) and (max-width: 950px) {
+  .brand {
+    gap: 6px;
+  }
+
+  .appName {
+    font-size: 13px;
+  }
+}
+
+.loadMore {
+  width: 100%;
+  min-height: var(--pad-touch);
+  margin: 6px 0;
+  padding: 7px 10px;
+  border: 1px solid var(--pad-divider);
+  border-radius: var(--pad-radius-control);
   background: none;
+  color: var(--pad-accent-text);
   font: inherit;
-  text-align: left;
   cursor: pointer;
-  user-select: none;
-  outline: none;
-
-  &:hover {
-    background-color: var(--dsw-specific-sidebar-nav-item-hover);
-  }
-
-  &:focus-visible {
-    box-shadow: inset 0 0 0 2px var(--dsw-alias-button-primary-fill);
-  }
 }
 
-.settingsIcon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  color: var(--dsw-alias-label-primary);
+.loadMore:hover {
+  background: var(--pad-accent-wash);
 }
-
-.settingsLabel {
-  min-width: 0;
-  margin-left: 4px;
-  overflow: hidden;
-  font-size: 14px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  color: var(--dsw-alias-label-primary);
-}
-
-/* ---------- 移动端抽屉 ---------- */
 
 .drawerLayer {
   position: absolute;
   inset: 0;
   z-index: 800;
   visibility: hidden;
-  transition: visibility 0s linear 0.3s;
+  transition: visibility 0s linear var(--ds-transition-duration-slow);
 }
 
 .drawerOpen {
   visibility: visible;
-  transition: visibility 0s;
+  transition-delay: 0s;
 }
 
 .drawerMask {
   position: absolute;
   inset: 0;
-  background-color: rgba(0, 0, 0, 0.36);
+  background: var(--pad-overlay);
   opacity: 0;
-  transition: opacity 0.3s var(--ds-ease-in-out);
+  transition: opacity var(--ds-transition-duration-slow) var(--ds-ease-in-out);
 }
 
 .drawerOpen .drawerMask {
@@ -255,145 +252,21 @@
 
 .drawer {
   position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
+  inset: 0 auto 0 0;
   width: min(344px, 92vw);
   transform: translateX(-100%);
-  will-change: transform;
-  transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
-  box-shadow: 0 0 32px rgba(0, 0, 0, 0.28);
+  transition: transform var(--ds-transition-duration-slow) cubic-bezier(0.32, 0.72, 0, 1);
+  box-shadow: var(--pad-dialog-shadow);
 }
 
 .drawerOpen .drawer {
   transform: translateX(0);
 }
 
-/* 移动端自身的排版 */
-.mobile {
-  .listWrap {
-    margin-top: 8px;
-  }
-
-  .sectionHeader {
-    padding: 4px 10px 3px;
-    font-size: 14px;
-    line-height: 22px;
-  }
-
-  .bottom {
-    padding: 12px 0;
-  }
-
-  .settings {
-    padding: 9px 10px;
-  }
-
-  .settingsIcon {
-    width: auto;
-    height: auto;
-
-    svg {
-      width: 20px;
-      height: 20px;
-    }
-  }
-
-  .settingsLabel {
-    margin-left: 10px;
-    font-size: 16px;
-    line-height: 22px;
-  }
-}
-
-/* ---------- 平板及以上：整体放大 ---------- */
-
-@media (min-width: 768px) {
-  .sider {
-    padding: 0 16px 0;
-  }
-
-  .top {
-    margin-bottom: 8px;
-  }
-
-  .search {
-    height: 48px;
-    padding: 0 16px;
-  }
-
-  .searchInput {
-    font-size: 16px;
-  }
-
-  .newChat {
-    height: 46px;
-    font-size: 15px;
-  }
-
-  .newChatIcon svg {
-    width: 20px;
-    height: 20px;
-  }
-
-  .sectionHeader {
-    padding: 8px 12px 6px;
-    font-size: 13px;
-    line-height: 20px;
-  }
-
-  .settingsIcon {
-    width: 34px;
-    height: 34px;
-  }
-
-  .settingsLabel {
-    margin-left: 8px;
-    font-size: 15px;
-  }
-}
-
-@media (min-width: 1024px) {
-  .search {
-    height: 50px;
-  }
-
-  .newChat {
-    height: 48px;
-  }
-
-  .sectionHeader {
-    font-size: 14px;
-  }
-
-  .settingsLabel {
-    font-size: 16px;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .drawerLayer,
   .drawerMask,
   .drawer {
-    transition-duration: 1ms;
-  }
-}
-
-/* 侧栏「显示更多」 */
-.loadMore {
-  display: block;
-  width: 100%;
-  margin: 8px 0 4px;
-  padding: 8px 10px;
-  border: 1px dashed var(--dsw-alias-border-l2);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--dsw-alias-label-tertiary);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-
-  &:hover {
-    background-color: var(--dsw-specific-sidebar-nav-item-hover);
+    transition: none;
   }
 }

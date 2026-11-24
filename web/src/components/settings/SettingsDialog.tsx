@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useRef, useState, type ReactNode } from 'react'
+import { useId, useRef, useState, type ReactNode } from 'react'
 import {
   IconBrowseOutline16,
   IconDarkOutline16,
@@ -75,6 +75,7 @@ const SettingsContent = () => {
   // 当前分组放在 store 里（不是组件 state）：别的面板要能把用户带过来，见 settingsDialogState
   const section = useSettingsDialog((state) => state.section)
   const setSection = setSettingsSection
+  const panelId = useId()
   // 切换分组不丢失正在输入的 API Key 与导入状态
   const apiKeyEditor = useApiKeyEditor()
   const historyImport = useHistoryImport()
@@ -94,13 +95,37 @@ const SettingsContent = () => {
           }
         }}
       >
-        <div role="tablist" className={styles.navigation}>
+        <div
+          role="tablist"
+          aria-label={t('settings')}
+          aria-orientation={isMobile ? 'horizontal' : 'vertical'}
+          className={styles.navigation}
+          onKeyDown={(event) => {
+            const forward = isMobile ? 'ArrowRight' : 'ArrowDown'
+            const backward = isMobile ? 'ArrowLeft' : 'ArrowUp'
+            const index = sections.findIndex((item) => item.value === section)
+            let next: number
+            switch (event.key) {
+              case forward: next = (index + 1) % sections.length; break
+              case backward: next = (index + sections.length - 1) % sections.length; break
+              case 'Home': next = 0; break
+              case 'End': next = sections.length - 1; break
+              default: return
+            }
+            event.preventDefault()
+            setSection(sections[next].value)
+            event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
+          }}
+        >
           {sections.map((item) => (
             <button
               key={item.value}
               type="button"
               role="tab"
+              id={`${panelId}-${item.value}`}
+              aria-controls={panelId}
               aria-selected={section === item.value}
+              tabIndex={section === item.value ? 0 : -1}
               className={clsx(styles.navItem, section === item.value && styles.navItemActive)}
               onClick={() => setSection(item.value)}
             >
@@ -109,7 +134,7 @@ const SettingsContent = () => {
             </button>
           ))}
         </div>
-        <div role="tabpanel" className={styles.content}>
+        <div role="tabpanel" id={panelId} aria-labelledby={`${panelId}-${section}`} className={styles.content}>
           {section === 'general' ? (
             <>
               <ThemeSetting />

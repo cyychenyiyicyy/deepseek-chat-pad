@@ -15,36 +15,29 @@
   scrollbar-color: var(--scroll-color) transparent;
 }
 
-/* ── 新建对话（R4 / R20 排版）：挪进标题行右侧，做成 28px 胶囊 ──
-   dsh-Go 把它放在品牌行里（`sessions_drawer.dart` 的 `NewChatButton`），
-   不占一整行 —— 原来这里是一条 36px 的通栏主按钮，加上标题 / 搜索 / 两排胶囊，
-   列表被顶掉 5 行。 */
 .newChat {
   display: flex;
   flex-shrink: 0;
   align-items: center;
-  justify-content: center;
-  gap: 5px;
+  gap: 8px;
   box-sizing: border-box;
-  min-height: 40px;
-  margin: 0;
-  padding: 0 10px;
-  border: 1px solid var(--dsw-alias-button-ghost-active-border);
-  border-radius: 100px;
-  background-color: var(--dsw-alias-button-ghost-active-fill);
-  color: var(--dsw-alias-brand-text);
+  min-height: var(--pad-touch);
+  margin: 0 0 10px;
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--pad-radius-control);
+  background-color: var(--pad-accent);
+  color: var(--pad-on-accent);
   font: inherit;
-  font-size: 12px;
   line-height: 18px;
-  font-weight: 500;
-  white-space: nowrap;
+  font-weight: 600;
   cursor: pointer;
   transition:
     background-color 0.15s ease,
     border-color 0.15s ease;
 
   &:hover {
-    background-color: var(--dsw-alias-interactive-bg-hover);
+    background-color: var(--pad-accent-hover);
   }
 
   &:active {
@@ -52,26 +45,9 @@
   }
 }
 
-/* 抽屉很窄时只留图标：标题行还要放「会话」与刷新键，文字可以被省略 */
-@media (max-width: 359px) {
-  .newChatText {
-    display: none;
-  }
-
-  .newChat {
-    padding: 0 8px;
-  }
-}
-
 .newChatIcon {
   display: inline-flex;
   flex-shrink: 0;
-}
-
-.newChatText {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* ── 搜索（W1）：列表顶部一行，不占额外留白 ── */
@@ -83,10 +59,15 @@
   box-sizing: border-box;
   margin: 0 0 6px;
   padding: 0 6px 0 8px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 100px;
-  background-color: transparent;
+  border: 1px solid var(--pad-control-border);
+  border-radius: var(--pad-radius-control);
+  background-color: var(--pad-surface);
   color: var(--dsw-alias-label-tertiary);
+}
+
+.searchRow:focus-within {
+  border-color: var(--pad-focus);
+  box-shadow: 0 0 0 1px var(--pad-focus);
 }
 
 .searchIcon {
@@ -98,7 +79,7 @@
 .searchInput {
   flex: 1;
   min-width: 0;
-  height: 38px;
+  height: 42px;
   border: none;
   background: none;
   font: inherit;
@@ -148,33 +129,6 @@
  * 尺寸在手机上也不再变（原 44→46/50 的响应式行高是为双行 meta 设的，
  * 单行布局不需要）；判定逻辑全在 drawerBlocks.ts。
  * ──────────────────────────────────────────────────────────────────────── */
-
-/* 标题行：`会话` 左、刷新图标右 */
-.listHeader {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 6px;
-  margin: 0 2px 2px 4px;
-}
-
-.listTitle {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 18px;
-  letter-spacing: 0.02em;
-  color: var(--dsw-alias-label-tertiary);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  user-select: none;
-}
-
-.refreshButton {
-  flex-shrink: 0;
-}
 
 /* 一行 = 主按钮 + 「⋯」 */
 .row {
@@ -260,9 +214,9 @@
   /* 行间距交给 .filterRow（R20：两排胶囊并成一行） */
   margin: 0;
   padding: 0 10px 0 8px;
-  height: 30px;
+  height: 32px;
   border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 100px;
+  border-radius: var(--pad-radius-control);
   background-color: transparent;
   color: var(--dsw-alias-label-secondary);
   font: inherit;
@@ -324,14 +278,20 @@
 .filterBar {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin: 0;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--pad-divider);
+  border-radius: var(--pad-radius-control);
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 /* 状态胶囊是纯文字（工作区那粒带 icon/chevron）：左右 padding 对称，间距交给容器 */
 .statusChip {
   margin: 0;
   padding: 0 8px;
+  height: 28px;
+  border-color: transparent;
+  border-radius: 7px;
 }
 
 /* ── [D] 一行（session_tile.dart:44-155） ──────────────────────────────────
@@ -344,7 +304,7 @@
   height: 44px;
   padding: 0 10px;
   border: none;
-  border-radius: 12px;
+  border-radius: var(--pad-radius-control);
   background: none;
   color: var(--dsw-alias-label-primary);
   font: inherit;
@@ -372,10 +332,11 @@
    selection 色的半透明 alpha，等价于这枚 hover 别名变量的淡底） */
 .itemActive {
   font-weight: 600;
-  background-color: var(--dsw-specific-sidebar-nav-item-hover);
+  color: var(--pad-accent-text);
+  background-color: var(--pad-accent-wash-hover);
 
   &:hover {
-    background-color: var(--dsw-specific-sidebar-nav-item-hover);
+    background-color: var(--pad-accent-wash-hover);
   }
 }
 

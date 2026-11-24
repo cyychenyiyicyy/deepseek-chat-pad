@@ -11,6 +11,7 @@
   gap: 20px;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
   color: var(--dsw-alias-label-primary);
 }
 
@@ -19,12 +20,13 @@
   flex-direction: column;
   min-height: 0;
   gap: 4px;
-  padding: 6px 8px;
+  padding: 6px;
   overflow-y: auto;
   align-self: start;
   max-height: 100%;
   box-sizing: border-box;
-  border-radius: 16px;
+  border: 1px solid var(--pad-divider);
+  border-radius: var(--pad-radius-card);
   background-color: var(--dsw-specific-sidebar-fill);
 }
 
@@ -37,7 +39,7 @@
   min-height: 44px;
   padding: 9px 10px 9px 8px;
   border: none;
-  border-radius: 12px;
+  border-radius: var(--pad-radius-control);
   background-color: transparent;
   color: var(--dsw-alias-label-primary);
   font: inherit;
@@ -53,18 +55,19 @@
     flex-shrink: 0;
   }
 
-  &:hover,
-  &.navItemActive {
+  &:hover {
     background-color: var(--dsw-alias-interactive-bg-hover);
   }
 
   &.navItemActive {
+    background-color: var(--pad-accent-wash-hover);
     color: var(--dsw-alias-brand-text);
     font-weight: 600;
   }
 
   &:focus-visible {
-    box-shadow: 0 0 0 2px var(--dsw-alias-button-primary-fill);
+    outline: 2px solid var(--pad-focus);
+    outline-offset: -2px;
   }
 }
 
@@ -74,8 +77,7 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  margin-right: -16px;
-  padding: 0 16px 0 0;
+  padding: 0 6px 0 2px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -112,6 +114,7 @@
 .label {
   font-size: 14px;
   line-height: 22px;
+  font-weight: 550;
 }
 
 .uploadButton {
@@ -192,9 +195,14 @@
   outline: none;
   transition: background-color var(--ds-transition-duration) var(--ds-ease-in-out);
 
-  &:hover,
-  &.themeOptionSelected {
+  &:hover {
     background-color: var(--dsw-specific-selector);
+  }
+
+  &.themeOptionSelected {
+    border-color: var(--pad-accent-border);
+    background: var(--pad-accent-wash);
+    color: var(--pad-accent-text);
   }
 
   &:focus-visible {
@@ -298,7 +306,7 @@
   }
 }
 
-@media not all and (min-width: 768px) {
+@media (max-width: 767px), (max-height: 500px) {
   .dialog {
     align-self: flex-end;
     width: 100%;
@@ -328,8 +336,7 @@
   }
 
   .content {
-    margin: 0 -8px 0 0;
-    padding: 4px 8px env(safe-area-inset-bottom) 0;
+    padding: 4px 4px env(safe-area-inset-bottom);
   }
 
   .text {
@@ -428,7 +435,7 @@
   width: 100%;
 }
 
-@media not all and (min-width: 768px) {
+@media (max-width: 767px), (max-height: 500px) {
   .deleteActions > button {
     min-height: 44px;
     height: auto;

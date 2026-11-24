@@ -1,5 +1,5 @@
 .frame {
-  --sider-w: clamp(236px, 25vw, 312px);
+  --sider-w: clamp(236px, 23vw, 292px);
   --chat-gutter: clamp(12px, 2.7vw, 32px);
   --chat-width: 760px;
 
@@ -96,7 +96,7 @@
   text-align: center;
 }
 
-@media not all and (min-width: 768px) {
+@media (max-width: 767px), (max-height: 500px) {
   .frame {
     --chat-gutter: clamp(12px, 4vw, 24px);
   }

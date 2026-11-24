@@ -47,6 +47,7 @@ import { IconButton } from '../base/IconButton.js'
 import { showToast } from '../base/toastState.js'
 import {
   IconDataOutline16,
+  IconLinkOutline16,
   IconCloseOutline16,
   IconMenuOutline20,
   IconNewChatOutline20,
@@ -55,8 +56,8 @@ import { Markdown } from '../markdown/Markdown.js'
 import { CopyButton } from '../messages/CopyButton.js'
 import { ReadAloudButton } from '../messages/ReadAloudButton.js'
 import { stopReadAloud, useReadAloud } from '../../services/speech/readAloud.js'
-import { openSettings } from '../settings/settingsDialogState.js'
-import { openMobileSider } from '../sider/mobileSiderState.js'
+import { openRemoteWorkspaceDialog } from './RemoteWorkspaceDialog.js'
+import { openMobileSider, useMobileSider } from '../sider/mobileSiderState.js'
 import { ApprovalCard } from './ApprovalCard.js'
 // 产物卡：官方 `present` 交付的文件，长在「这一轮最后一行」的下方（S5）。
 // 上一轮（R12）那套从写类工具参数里猜产物的组件（`./artifacts/**`）已按原生机制删除。
@@ -79,7 +80,6 @@ import {
 } from './composer/composerState.js'
 import { supportsPromptMode } from './composer/promptMode.js'
 // [R14 多 Host] 顶栏的「当前电脑 + 切换下拉」（组件内部自己判显隐，这里只挂一个点）
-import { HostSwitcher } from './HostSwitcher.js'
 import { NewSessionPage } from './new-session/NewSessionPage.js'
 import type { NewVoiceCall } from './RemoteVoiceCall.js'
 import { PlanProgressDock } from './plan/PlanProgressDock.js'
@@ -153,8 +153,12 @@ const fireAndForget = (action: () => unknown) => {
 export const RemoteChatView = () => {
   const t = useTranslate()
   const isMobile = useIsMobile()
+  const drawerOpen = useMobileSider((state) => state.open)
   const phase = useRemoteStore((state) => state.phase)
   const transport = useRemoteStore((state) => state.transport)
+  const connectedHost = useRemoteStore((state) =>
+    state.hosts.find((host) => host.deviceId === state.hostId)?.name || state.lastSession?.hostName
+  )
   const sessions = useRemoteStore((state) => state.sessions)
   const activeSessionId = useRemoteStore((state) => state.activeSessionId)
   const hasMoreHistory = useRemotePaging((state) => state.hasMore)
@@ -370,6 +374,9 @@ export const RemoteChatView = () => {
    * 不进这两支，继续走下面的红字分支。
    */
   const healing = reconnect.status === 'waiting' || reconnect.status === 'connecting'
+  const canReconnect = healing || reconnect.status === 'failed' ||
+    (autoConnect.state === 'failed' && autoConnect.code !== 'SESSION_EXPIRED' &&
+      reconnect.status !== 'blocked' && reconnect.status !== 'need-login')
   const healingTitle =
     reconnect.status === 'failed'
       ? t(reconnect.kind === 'offline' ? 'reconnectOffline' : 'reconnectFailed')
@@ -1068,9 +1075,10 @@ export const RemoteChatView = () => {
                 <textarea
                   ref={textareaRef}
                   className={styles.textarea}
-                  rows={2}
+                  rows={isMobile ? 1 : 2}
                   value={draft}
                   placeholder={t('newSessionComposerPlaceholder')}
+                  aria-label={t('newSessionComposerPlaceholder')}
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => {
                     // 新对话页没有斜杠命令（命令需要会话才存在），只有「回车发送」一条规则
@@ -1123,9 +1131,11 @@ export const RemoteChatView = () => {
             tone="primary"
             icon={<IconMenuOutline20 />}
             aria-label={t('remoteListButton')}
+            aria-expanded={drawerOpen}
+            aria-controls="mobile-session-drawer"
             onClick={openMobileSider}
           />
-        ) : (
+        ) : siderCollapsed ? (
           /*
            * [R16] 平板/桌面：与本机模式 `TabletHeader` 完全同一枚开关（图标/尺寸/文案），
            * 远程模式原来没有它 —— 侧栏收起后再也没有展开入口。
@@ -1134,18 +1144,19 @@ export const RemoteChatView = () => {
             size="xl"
             tone="primary"
             icon={<IconMenuOutline20 />}
-            tooltip={siderCollapsed ? t('expandSiderbarButton') : t('collapseSiderbarButton')}
-            aria-label={siderCollapsed ? t('expandSiderbarButton') : t('collapseSiderbarButton')}
-            onClick={() => setSiderCollapsed(!siderCollapsed)}
+            tooltip={t('expandSiderbarButton')}
+            aria-expanded={false}
+            aria-controls="desktop-session-sidebar"
+            onClick={() => setSiderCollapsed(false)}
           />
-        )}
+        ) : null}
         <div className={styles.heading}>
           <div className={styles.title} title={activeSessionId === null ? undefined : activeTitle}>
             {activeSessionId === null ? t('remoteModeRemote') : activeTitle}
           </div>
           <div className={styles.connectionStatus}>
             <span className={clsx(styles.connectionDot, ready && styles.connectionLive)} aria-hidden />
-            {transportLabel(t, transport, ready)}
+            <span>{ready && connectedHost ? `${connectedHost} · ` : ''}{transportLabel(t, transport, ready)}</span>
           </div>
         </div>
         {ready && subagentParentId !== null ? (
@@ -1211,19 +1222,24 @@ export const RemoteChatView = () => {
             ]}
           />
         ) : null}
-        {/*
-          [R14 多 Host] 当前电脑 + 切换下拉。放在 transport 徽标左边：徽标说「怎么连的」，
-          这里说「连的是哪台」，两件事挨着看最省事。没连过 / 没有任何 Host 时组件自己返回 null。
-        */}
-        <HostSwitcher />
+        {ready && canCreateSession && (isMobile || siderCollapsed) ? (
+          <IconButton
+            size="xl"
+            tone="primary"
+            icon={<IconNewChatOutline20 />}
+            tooltip={t('composerNewChat')}
+            onClick={() => useNewSessionStore.getState().openPanel()}
+          />
+        ) : null}
       </div>
 
       {!bridgeReady ? (
         // 浏览器预览 / 旧 APK：说明「只能在 App 内用」，并给一次重试（装完 APK 回来即生效）
         <div className={styles.centerState}>
-          <div className={styles.centerTitle}>
-            {t(availability === 'outdated' ? 'remoteBridgeOutdated' : 'remoteRequiresApp')}
-          </div>
+          <div className={styles.centerIcon} aria-hidden="true"><IconLinkOutline16 /></div>
+          <h1 className={styles.centerTitle}>
+            {t(availability === 'probing' ? 'remoteCheckingAvailability' : availability === 'outdated' ? 'remoteBridgeOutdated' : 'remoteRequiresApp')}
+          </h1>
           {availability === 'outdated' ? (
             <Button variant="outlined" size="m" onClick={retry}>
               {t('retry')}
@@ -1232,7 +1248,8 @@ export const RemoteChatView = () => {
         </div>
       ) : !ready ? (
         <div className={styles.centerState}>
-          <div className={styles.centerTitle}>
+          <div className={styles.centerIcon} aria-hidden="true"><IconLinkOutline16 /></div>
+          <h1 className={styles.centerTitle}>
             {/* 自动恢复（K4）优先：它说的是「刚才为什么没连上」，比通用的「未连接」有用得多。
                 掉线自愈（R10）再优先一层：那是**中性**的「正在重连」，不是失败。
                 等待授权（系统浏览器里）是「正在登录」而不是「失败了」，别让用户以为要重来。 */}
@@ -1251,7 +1268,7 @@ export const RemoteChatView = () => {
                           ? 'remotePhaseConnecting'
                           : 'remoteNotConnected',
                 )}
-          </div>
+          </h1>
           <div className={styles.centerHint}>
             {healing || reconnect.status === 'failed'
               ? healingHint
@@ -1261,28 +1278,30 @@ export const RemoteChatView = () => {
                   ? autoConnect.message
                   : t('remoteNotConnectedHint')}
           </div>
-          {/* 掉线自愈中 / 暂时连不上：给「立即重连」；真正的凭据问题不给重试按钮（重试没有意义） */}
-          {healing ||
-          reconnect.status === 'failed' ||
-          (autoConnect.state === 'failed' &&
-            reconnect.status !== 'blocked' &&
-            reconnect.status !== 'need-login' &&
-            autoConnect.code !== 'SESSION_EXPIRED') ? (
+          <div className={styles.centerActions}>
+            {canReconnect ? (
+              <Button
+                variant="primary"
+                size="l"
+                onClick={() => fireAndForget(() => useRemoteStore.getState().reconnectNow())}
+              >
+                {t(healing || reconnect.status === 'failed' ? 'reconnectNow' : 'remoteAutoConnectRetry')}
+              </Button>
+            ) : null}
             <Button
-              variant="primary"
-              size="m"
-              onClick={() => fireAndForget(() => useRemoteStore.getState().reconnectNow())}
+              variant={canReconnect ? 'outlined' : 'primary'}
+              size="l"
+              onClick={() => openRemoteWorkspaceDialog('connection')}
             >
-              {t(healing || reconnect.status === 'failed' ? 'reconnectNow' : 'remoteAutoConnectRetry')}
+              {t('remoteConnectionTitle')}
             </Button>
-          ) : null}
-          <Button variant="primary" size="m" onClick={() => openSettings('remote')}>
-            {t('remoteOpenSettings')}
-          </Button>
+          </div>
         </div>
       ) : activeSessionId === null ? (
         <div className={styles.centerState}>
-          <div className={styles.centerTitle}>{t('remotePickSession')}</div>
+          <div className={styles.centerIcon} aria-hidden="true"><IconNewChatOutline20 /></div>
+          <h1 className={styles.centerTitle}>{t('remotePickSession')}</h1>
+          <div className={styles.centerActions}>
           {/*
             「新建会话」入口（W1/W6）。为什么只挂在**空态**：顶栏与输入区归 W2（会话内控制），
             而空态正是「这台 Host 上一个会话都还没打开」的时候 —— 用户唯一的下一步就是新建一个。
@@ -1290,19 +1309,20 @@ export const RemoteChatView = () => {
             能力门禁：Host 不支持 `session/create` 时（`capabilities.create === false`）不渲染，
             不弹错误对话框。
           */}
-          {canCreateSession ? (
-            <Button variant="primary" size="m" onClick={() => useNewSessionStore.getState().openPanel()}>
-              <span className={styles.newSessionIcon} aria-hidden>
-                <IconNewChatOutline20 />
-              </span>
-              {t('newSessionEntry')}
-            </Button>
-          ) : null}
-          {isMobile ? (
-            <Button variant="outlined" size="m" onClick={openMobileSider}>
-              {t('remoteListButton')}
-            </Button>
-          ) : null}
+            {canCreateSession ? (
+              <Button variant="primary" size="l" onClick={() => useNewSessionStore.getState().openPanel()}>
+                <span className={styles.newSessionIcon} aria-hidden>
+                  <IconNewChatOutline20 />
+                </span>
+                {t('newSessionEntry')}
+              </Button>
+            ) : null}
+            {isMobile ? (
+              <Button variant="outlined" size="l" onClick={openMobileSider}>
+                {t('remoteListButton')}
+              </Button>
+            ) : null}
+          </div>
         </div>
       ) : (
         <>
@@ -1463,9 +1483,10 @@ export const RemoteChatView = () => {
               <textarea
                 ref={textareaRef}
                 className={styles.textarea}
-                rows={2}
+                rows={isMobile && !draft.includes('\n') ? 1 : 2}
                 value={draft}
                 placeholder={t('remoteInputPlaceholder')}
+                aria-label={t('remoteInputPlaceholder')}
                 aria-controls={completionOpen ? 'remote-slash-commands' : undefined}
                 aria-activedescendant={
                   completionOpen && slashMatches.length > 0

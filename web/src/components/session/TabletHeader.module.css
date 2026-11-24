@@ -11,7 +11,8 @@
    */
   height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
   padding: var(--ds-top-offset) var(--chat-gutter) 0;
-  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  border-bottom: 1px solid var(--pad-divider);
+  background: var(--pad-canvas);
 }
 
 .title {
@@ -31,4 +32,11 @@
   flex-shrink: 0;
   align-items: center;
   gap: 4px;
+}
+
+@media (max-width: 767px), (max-height: 500px) {
+  .header {
+    gap: 4px;
+    padding-inline: 6px;
+  }
 }

@@ -387,47 +387,18 @@ export const RemoteSessionList = ({
 
   return (
     <div className={clsx(styles.wrap, className)}>
-      {/*
-        —— S3 标题行 ——
-        原来这里是「刷新会话」一整行 36px 的大按钮（用户原话：「这个刷新会话按钮太大了」）。
-        现在它是标题行右侧的一枚 28px 图标钮：位置固定、一眼能找到，又不再占一整行。
-        刷新只做一件事：`refreshSessions()`（Host 的 `session/list` + `$events` 会顺便校正运行态）。
-      */}
-      {ready ? (
-        <div className={styles.listHeader}>
-          <span className={styles.listTitle}>{t('liveListTitle')}</span>
-          {/*
-            「新建对话」（R4）：真机反馈「新建对话没有按钮」。dsh-Go 把它放在**品牌行右侧**
-            （`sessions_drawer.dart` 的 `NewChatButton`），不占一整行 —— 原来这里是一整行
-            36px 的主按钮，加上标题行 / 搜索 / 两行胶囊，列表被顶掉 5 行。
-            [W6] 点它换的是**视图**（整页），手机上顺手把抽屉关掉。
-          */}
-          {capabilities.create ? (
-            <button
-              type="button"
-              className={styles.newChat}
-              aria-label={t('composerNewChat')}
-              onClick={() => {
-                closeMobileSider()
-                useNewSessionStore.getState().openPanel()
-              }}
-            >
-              <span className={styles.newChatIcon} aria-hidden>
-                <IconNewChatOutline20 />
-              </span>
-              <span className={styles.newChatText}>{t('composerNewChat')}</span>
-            </button>
-          ) : null}
-          <IconButton
-            size="xs"
-            tone="tertiary"
-            className={styles.refreshButton}
-            icon={<IconRefreshOutline16 />}
-            tooltip={t('liveRefresh')}
-            tooltipPlacement="bottom"
-            onClick={() => fireAndForget(() => useRemoteStore.getState().refreshSessions())}
-          />
-        </div>
+      {ready && capabilities.create ? (
+        <button
+          type="button"
+          className={styles.newChat}
+          onClick={() => {
+            closeMobileSider()
+            useNewSessionStore.getState().openPanel()
+          }}
+        >
+          <span className={styles.newChatIcon} aria-hidden><IconNewChatOutline20 /></span>
+          {t('composerNewChat')}
+        </button>
       ) : null}
 
       {ready ? (
@@ -445,7 +416,8 @@ export const RemoteSessionList = ({
             aria-label={t('newSessionSearchPlaceholder')}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key !== 'Escape') return
+              if (event.key !== 'Escape' || draft.length === 0) return
+              event.preventDefault()
               setDraft('')
               useNewSessionStore.getState().clearSearch()
             }}
@@ -461,7 +433,15 @@ export const RemoteSessionList = ({
                 useNewSessionStore.getState().clearSearch()
               }}
             />
-          ) : null}
+          ) : (
+            <IconButton
+              size="xs"
+              icon={<IconRefreshOutline16 />}
+              tooltip={t('liveRefresh')}
+              tooltipPlacement="bottom"
+              onClick={() => fireAndForget(() => useRemoteStore.getState().refreshSessions())}
+            />
+          )}
         </div>
       ) : null}
 
@@ -496,7 +476,7 @@ export const RemoteSessionList = ({
           ) : null}
 
           {showStatusBar ? (
-            <div className={styles.filterBar}>
+            <div className={styles.filterBar} role="group" aria-label={t('remoteSessionStatusFilter')}>
               {FILTER_OPTIONS.map(({ id, labelKey }) => {
                 const selected = statusFilter === id
                 const count = id === 'running' ? filterCounts.running : id === 'pending' ? filterCounts.pending : 0

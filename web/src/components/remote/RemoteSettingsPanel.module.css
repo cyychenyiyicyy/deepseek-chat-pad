@@ -121,6 +121,14 @@
   padding: 8px 0 2px;
 }
 
+.connectionActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 0 12px;
+  border-bottom: 1px solid var(--pad-divider);
+}
+
 /* ── 登录方式：分段标签行 ──────────────────────────────────────────────
  * 与 RemoteModeSwitch 的胶囊同一套语言（圆角 100px、ghost-active 配色），
  * 但它是「一组可换行的 tab」：provider 数量由服务器决定，可能三四个。 */

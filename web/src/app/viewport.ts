@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useSyncExternalStore } from 'react'
 
-/** 窄于 768px 按移动端布局 */
-const query = window.matchMedia('not all and (min-width: 768px)')
+/** 窄屏和低高度横屏共用可收起的导航。 */
+const query = window.matchMedia('(max-width: 767px), (max-height: 500px)')
 
 const subscribe = (onChange: () => void) => {
   query.addEventListener('change', onChange)

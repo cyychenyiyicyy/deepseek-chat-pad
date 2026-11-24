@@ -1,0 +1,114 @@
+.dialog {
+  width: 600px;
+}
+
+.hostDialog {
+  width: 440px;
+}
+
+@media (max-width: 767px), (max-height: 500px) {
+  .dialog,
+  .hostDialog {
+    align-self: flex-end;
+    width: min(100%, 620px);
+    max-width: none;
+    max-height: calc(100% - max(12px, var(--ds-top-offset)));
+    padding: 12px 16px max(18px, env(safe-area-inset-bottom));
+    border-radius: var(--pad-radius-compose) var(--pad-radius-compose) 0 0;
+  }
+}
+
+.tools {
+  display: grid;
+  gap: 16px;
+  padding: 4px 2px;
+}
+
+.group {
+  min-width: 0;
+}
+
+.groupHeading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin-bottom: 6px;
+  color: var(--pad-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.groupHeading h3 {
+  margin: 0;
+  color: var(--pad-text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.rows {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(195px, 100%), 1fr));
+  gap: 6px;
+}
+
+@media (max-width: 520px) {
+  .rows {
+    gap: 1px;
+    padding: 4px;
+    border: 1px solid var(--pad-divider);
+    border-radius: var(--pad-radius-card);
+    background: var(--pad-canvas);
+  }
+
+  .rows .row {
+    border-color: transparent;
+    background: transparent;
+  }
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: var(--pad-touch);
+  padding: 6px 10px;
+  border: 1px solid var(--pad-divider);
+  border-radius: var(--pad-radius-control);
+  background: var(--pad-canvas);
+  color: var(--pad-text);
+  font: inherit;
+  line-height: 20px;
+  text-align: start;
+  cursor: pointer;
+}
+
+.row:hover:not(:disabled) {
+  border-color: var(--pad-accent-border);
+  background: var(--pad-accent-wash);
+}
+
+.row:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.icon,
+.chevron {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--pad-accent-text);
+}
+
+.chevron {
+  margin-inline-start: auto;
+}
+
+.hint {
+  margin: 8px 0 0;
+  color: var(--pad-muted);
+  font-size: 13px;
+  line-height: 20px;
+}

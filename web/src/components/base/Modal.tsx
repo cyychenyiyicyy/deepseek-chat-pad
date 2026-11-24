@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useEffect, useId, useRef, type ReactNode } from 'react'
+import { useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslate } from '../../i18n/index.js'
 import { IconCloseOutline16 } from './icons.js'
@@ -7,7 +7,8 @@ import { IconButton } from './IconButton.js'
 import styles from './Modal.module.css'
 
 /** 当前打开的弹窗，后打开的在末尾；叠放时 Esc 只关闭最上层 */
-const openModals: object[] = []
+const openModals: HTMLElement[] = []
+const tabbableSelector = 'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"], summary'
 
 /** 遮罩 + 居中卡片，Esc / 点遮罩关闭 */
 export const Modal = ({
@@ -31,22 +32,56 @@ export const Modal = ({
 }) => {
   const t = useTranslate()
   const titleId = useId()
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const [trigger] = useState(() => document.activeElement)
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
-  useEffect(() => {
-    const token = {}
-    openModals.push(token)
+  useLayoutEffect(() => {
+    const dialog = dialogRef.current
+    if (!dialog) return
+    const root = document.getElementById('root')
+    openModals.push(dialog)
+    root?.setAttribute('inert', '')
+    if (!dialog.contains(document.activeElement)) dialog.focus({ preventScroll: true })
+
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && openModals.at(-1) === token) {
+      if (event.defaultPrevented || openModals.at(-1) !== dialog) return
+      if (event.key === 'Escape') {
+        event.preventDefault()
         onCloseRef.current()
+      }
+      if (event.key !== 'Tab') return
+      const elements = Array.from(dialog.querySelectorAll<HTMLElement>(tabbableSelector)).filter(
+        (element) => element.tabIndex >= 0 && !element.matches(':disabled') &&
+          !element.closest('[hidden], [inert], [aria-hidden="true"]') &&
+          element.getClientRects().length > 0 && getComputedStyle(element).visibility === 'visible'
+      )
+      const current = document.activeElement
+      const index = elements.findIndex((element) => element === current)
+      if (index < 0 || (event.shiftKey ? index === 0 : index === elements.length - 1)) {
+        event.preventDefault()
+        const next = (event.shiftKey ? elements.at(-1) : elements[0]) ?? dialog
+        next.focus()
       }
     }
     document.addEventListener('keydown', onKeyDown)
     return () => {
-      openModals.splice(openModals.indexOf(token), 1)
+      const wasTop = openModals.at(-1) === dialog
+      openModals.splice(openModals.indexOf(dialog), 1)
       document.removeEventListener('keydown', onKeyDown)
+      const nextDialog = openModals.at(-1)
+      if (!nextDialog) root?.removeAttribute('inert')
+      if (!wasTop) return
+      queueMicrotask(() => {
+        if (openModals.at(-1) !== nextDialog) return
+        if (trigger instanceof HTMLElement && trigger.isConnected && (!nextDialog || nextDialog.contains(trigger))) {
+          trigger.focus({ preventScroll: true })
+        } else {
+          nextDialog?.focus({ preventScroll: true })
+        }
+      })
     }
-  }, [])
+  }, [trigger])
 
   return createPortal(
     <div
@@ -54,18 +89,21 @@ export const Modal = ({
       onMouseDown={(event) => event.target === event.currentTarget && onClose()}
     >
       <div
+        ref={dialogRef}
         className={clsx(styles.content, className)}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        tabIndex={-1}
       >
         <div className={styles.header}>
-          <div id={titleId} className={styles.title}>
+          <h2 id={titleId} className={styles.title}>
             {title}
-          </div>
+          </h2>
           {closable ? (
             <IconButton
               className={styles.close}
+              size="xl"
               tone="primary"
               icon={<IconCloseOutline16 />}
               aria-label={t('close')}

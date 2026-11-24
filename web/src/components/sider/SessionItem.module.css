@@ -1,133 +1,82 @@
 .item {
-  position: relative;
   display: flex;
   align-items: center;
-  box-sizing: border-box;
-  height: 40px;
-  padding: 9px 6px 9px 10px;
-  border-radius: 12px;
-  font-size: 14px;
-  line-height: 22px;
-  color: var(--dsw-alias-label-primary);
+  border-radius: var(--pad-radius-control);
+}
+
+.item:hover,
+.item:focus-within {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.active,
+.active:hover,
+.active:focus-within {
+  background: var(--pad-accent-wash-hover);
+  color: var(--pad-accent-text);
+}
+
+.select {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  min-width: 0;
+  min-height: var(--pad-touch);
+  gap: 9px;
+  padding: 0 8px 0 10px;
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: start;
   cursor: pointer;
+}
 
-  &.active {
-    background-color: var(--dsw-specific-sidebar-nav-item-active-accent);
-    color: var(--dsw-alias-brand-primary-invert);
-  }
+.select:focus-visible {
+  outline-offset: -2px;
+}
 
-  @media (hover: hover) {
-    &:not(.active):hover {
-      background-color: var(--dsw-specific-sidebar-nav-item-hover);
-    }
+.active .select {
+  font-weight: 600;
+}
 
-    &:hover,
-    &.active {
-      .action {
-        display: flex;
-      }
-    }
-  }
+.itemIcon {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--pad-muted);
+}
+
+.itemIcon svg {
+  width: 15px;
+  height: 15px;
 }
 
 .title {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  flex: 1;
-  min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  line-height: 18px;
 }
 
 .action {
-  display: none;
   flex-shrink: 0;
-  margin-left: 4px;
+  margin-inline-end: 4px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .item:not(.active, :hover, :focus-within) .action {
+    opacity: 0;
+  }
 }
 
 .renameInput {
   box-sizing: border-box;
   width: 100%;
-  height: 40px;
+  min-height: var(--pad-touch);
   padding: 0 10px;
-  border-radius: 12px;
-  border: 1px solid var(--dsw-alias-brand-primary);
-  background-color: var(--dsw-specific-input-major);
-  color: var(--dsw-alias-label-primary);
+  border: 1px solid var(--pad-accent-border);
+  border-radius: var(--pad-radius-control);
+  background: var(--pad-surface);
+  color: var(--pad-text);
   font: inherit;
-  font-size: 14px;
-  outline: none;
-}
-
-@media (hover: none) {
-  .action {
-    display: flex;
-  }
-}
-
-/* 平板及以上：行高与字号向官方平板端看齐 */
-@media (min-width: 768px) {
-  .item {
-    height: 46px;
-    padding: 12px 6px 12px 12px;
-    border-radius: 14px;
-    font-size: 15px;
-  }
-
-  .title {
-    line-height: 22px;
-  }
-
-  .renameInput {
-    height: 46px;
-    padding: 0 12px;
-    border-radius: 14px;
-    font-size: 15px;
-  }
-}
-
-@media (min-width: 1024px) {
-  .item {
-    height: 50px;
-    font-size: 16px;
-  }
-}
-
-@media not all and (min-width: 768px) {
-  .item {
-    height: 44px;
-    padding: 11px 6px 11px 12px;
-    border-radius: 16px;
-    font-size: 16px;
-  }
-
-  .title {
-    line-height: 22px;
-  }
-
-  .renameInput {
-    height: 44px;
-    padding: 0 12px;
-    border-radius: 16px;
-    font-size: 16px;
-  }
-}
-
-
-/* 置顶标记：跟在标题前，不抢视线 */
-.pinMark {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  margin-right: 4px;
-  opacity: 0.55;
-  vertical-align: -2px;
-
-  svg {
-    width: 12px;
-    height: 12px;
-  }
 }

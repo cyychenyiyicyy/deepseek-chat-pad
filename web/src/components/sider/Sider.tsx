@@ -1,7 +1,10 @@
 import clsx from 'clsx'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import {
+  IconBrowseOutline16,
+  IconDataOutline16,
+  IconNewChatOutline20,
   IconPanelLeftOutline16,
   IconSearchOutline16,
   IconSettingsOutline16,
@@ -17,8 +20,10 @@ import { IconButton } from '../base/IconButton.js'
 import { Modal } from '../base/Modal.js'
 import { showToast } from '../base/toastState.js'
 import { openSettings } from '../settings/settingsDialogState.js'
-import { RemoteModeSwitch, useRemoteMode } from '../remote/RemoteModeSwitch.js'
+import { useRemoteMode } from '../remote/RemoteModeSwitch.js'
+import { HostSwitcher } from '../remote/HostSwitcher.js'
 import { RemoteSessionList } from '../remote/RemoteSessionList.js'
+import { openRemoteWorkspaceDialog } from '../remote/RemoteWorkspaceDialog.js'
 import { closeMobileSider, useMobileSider } from './mobileSiderState.js'
 import { SessionItem } from './SessionItem.js'
 import styles from './Sider.module.css'
@@ -36,6 +41,7 @@ const LIST_PAGE = 60
 export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   const t = useTranslate()
   const sessions = useChatStore((state) => state.sessions)
+  const ready = useChatStore((state) => state.ready)
   const activeId = useChatStore((state) => state.activeId)
   const [now, setNow] = useState(Date.now)
   const [keyword, setKeyword] = useState('')
@@ -54,7 +60,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
     return all
       .map((group) => ({
         ...group,
-        sessions: group.sessions.filter((session) => (session.title || '').toLowerCase().includes(query)),
+        sessions: group.sessions.filter((session) => (session.title || t('untitledChat')).toLowerCase().includes(query)),
       }))
       .filter((group) => group.sessions.length > 0)
   }, [sessions, now, t, keyword, pinnedIds])
@@ -99,47 +105,37 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   }, [])
 
   return (
-    <div className={clsx(styles.sider, mobile && styles.mobile)}>
+    <aside className={styles.sider} aria-label={t(remoteMode === 'remote' ? 'remoteListButton' : 'liveListTitle')}>
       <div className={styles.top}>
-        <div className={styles.appName}>{t('appName')}</div>
+        <div className={styles.brand}>
+          <span className={styles.brandIcon} aria-hidden="true"><IconNewChatOutline20 /></span>
+          <span className={styles.appName}>{t('appName')}</span>
+        </div>
         <IconButton
-          size="m"
+          size="xl"
           icon={<IconPanelLeftOutline16 />}
           tooltip={t('collapseSiderbarButton')}
           tooltipPlacement="bottom"
-          onClick={() => (mobile ? closeMobileSider() : setSiderCollapsed(true))}
+          onClick={() => {
+            if (mobile) {
+              closeMobileSider()
+              return
+            }
+            setSiderCollapsed(true)
+            requestAnimationFrame(() => document.querySelector<HTMLElement>(
+              'button[aria-controls="desktop-session-sidebar"]'
+            )?.focus({ preventScroll: true }))
+          }}
         />
       </div>
 
-      {/* 本机 / 远程：紧挨 logo 下方一行，两段等宽；胶囊自身不探测原生桥 */}
-      <RemoteModeSwitch />
-
       {remoteMode === 'remote' ? (
-        <>
-          {/*
-            [S5] 「连接设置」入口已经删掉（用户原话：不需要、单独占一行浪费空间）——
-            远程连接的设置仍在两处可达：底部的「设置」按钮（设置弹窗里的远程分区）、
-            以及未连接时空态里的「打开设置」按钮。这里不再留一整行。
-          */}
-          <RemoteSessionList
-            className={styles.remoteList}
-            onSelect={mobile ? closeMobileSider : undefined}
-          />
-        </>
+        <RemoteSessionList
+          className={styles.remoteList}
+          onSelect={mobile ? closeMobileSider : undefined}
+        />
       ) : (
         <>
-          <label className={styles.search}>
-            <span className={styles.searchIcon}>
-              <IconSearchOutline16 />
-            </span>
-            <input
-              className={styles.searchInput}
-              value={keyword}
-              placeholder={t('siderSearchPlaceholder')}
-              onChange={(event) => setKeyword(event.target.value)}
-            />
-          </label>
-
           <button
             type="button"
             className={styles.newChat}
@@ -154,8 +150,27 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
             {t('newChat')}
           </button>
 
+          <label className={styles.search}>
+            <span className={styles.searchIcon} aria-hidden="true">
+              <IconSearchOutline16 />
+            </span>
+            <input
+              type="search"
+              className={styles.searchInput}
+              aria-label={t('siderSearchPlaceholder')}
+              value={keyword}
+              placeholder={t('siderSearchPlaceholder')}
+              onChange={(event) => setKeyword(event.target.value)}
+            />
+          </label>
+
           <div className={styles.listWrap}>
             <div className={styles.list}>
+              {ready && totalSessions === 0 ? (
+                <p className={styles.empty} role="status">
+                  {t(keyword.trim() ? 'siderSearchEmpty' : 'siderHistoryEmpty')}
+                </p>
+              ) : null}
               {visibleGroups.map((group) => (
                 <div key={group.key} className={styles.section}>
                   <div className={styles.sectionHeader}>
@@ -189,18 +204,19 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
       )}
 
       <div className={styles.bottom}>
-        <button type="button" className={styles.settings} onClick={() => openSettings('models')}>
-          <span className={styles.settingsIcon}>
-            <IconSettingsOutline16 />
-          </span>
-          <span className={styles.settingsLabel}>{t('siderModelEntry')}</span>
-        </button>
-        <button type="button" className={styles.settings} onClick={() => openSettings('general')}>
-          <span className={styles.settingsIcon}>
-            <IconSettingsOutline16 />
-          </span>
-          <span className={styles.settingsLabel}>{t('settings')}</span>
-        </button>
+        <HostSwitcher onOpen={() => openRemoteWorkspaceDialog('host')} />
+        {remoteMode === 'remote' ? (
+          <IconButton size="xl" className={clsx(styles.bottomAction, styles.remoteTools)}
+            icon={<><IconDataOutline16 /><span aria-hidden="true">{t('remoteWorkspaceToolsShort')}</span></>}
+            tooltip={t('remoteWorkspaceTools')} onClick={() => openRemoteWorkspaceDialog('tools')} />
+        ) : (
+          <IconButton size="xl" className={styles.bottomAction}
+            icon={<><IconBrowseOutline16 /><span aria-hidden="true">{t('siderModelEntry')}</span></>}
+            tooltip={t('siderModelEntry')} onClick={() => openSettings('models')} />
+        )}
+        <IconButton size="xl" className={styles.bottomAction}
+          icon={<><IconSettingsOutline16 /><span aria-hidden="true">{t('settings')}</span></>}
+          tooltip={t('settings')} onClick={() => openSettings('general')} />
       </div>
 
 
@@ -242,7 +258,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
           {t('deleteSessionWithFilesDescription')}
         </Modal>
       ) : null}
-    </div>
+    </aside>
   )
 }
 
@@ -252,10 +268,35 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
  */
 export const MobileSider = () => {
   const open = useMobileSider((state) => state.open)
+  const drawer = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const trigger = document.activeElement
+    drawer.current?.querySelector<HTMLElement>('button')?.focus()
+    return () => {
+      if (document.activeElement?.closest('[aria-modal="true"]')) return
+      const target = trigger instanceof HTMLElement && trigger !== document.body && trigger.isConnected
+        ? trigger
+        : document.querySelector<HTMLElement>('button[aria-controls="mobile-session-drawer"]')
+      target?.focus({ preventScroll: true })
+    }
+  }, [open])
+
   return (
-    <div className={clsx(styles.drawerLayer, open && styles.drawerOpen)} aria-hidden={!open}>
+    <div
+      id="mobile-session-drawer"
+      className={clsx(styles.drawerLayer, open && styles.drawerOpen)}
+      aria-hidden={!open}
+      ref={(node) => node?.toggleAttribute('inert', !open)}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape' && !event.defaultPrevented) {
+          closeMobileSider()
+          event.preventDefault()
+        }
+      }}
+    >
       <div className={styles.drawerMask} onClick={closeMobileSider} />
-      <div className={styles.drawer}>
+      <div className={styles.drawer} ref={drawer}>
         <Sider mobile />
       </div>
     </div>

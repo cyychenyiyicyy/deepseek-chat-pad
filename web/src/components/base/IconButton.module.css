@@ -5,7 +5,7 @@
   flex-shrink: 0;
   padding: 0;
   border: none;
-  border-radius: 50%;
+  border-radius: var(--pad-radius-control);
   background-color: transparent;
   cursor: pointer;
   font-size: 16px;
@@ -23,7 +23,8 @@
   }
 
   &:focus-visible {
-    box-shadow: 0 0 0 2px var(--dsw-alias-button-primary-fill);
+    outline: 2px solid var(--pad-focus);
+    outline-offset: -2px;
   }
 
   &:disabled {

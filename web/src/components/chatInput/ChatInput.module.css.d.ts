@@ -1,7 +1,5 @@
 declare const styles: {
   readonly "wrapper": string;
-  readonly "session": string;
-  readonly "home": string;
   readonly "attachments": string;
   readonly "attachment": string;
   readonly "remove": string;

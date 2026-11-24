@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import {
   IconGlobeLanguageOutline14,
   IconPaperclipOutline16,
@@ -40,12 +40,14 @@ import type { ProviderMeta } from '../../services/models/catalog.js'
 import styles from './ChatInput.module.css'
 
 /** 输入框：自适应高度的文本框 + 文件 + 深度思考与智能搜索开关 + 语音输入 + 发送 / 停止 */
-export const ChatInput = memo(function ChatInput({ sessionId }: { sessionId: string | null }) {
+type ChatInputProps = { sessionId: string | null; inputRef?: RefObject<HTMLTextAreaElement> }
+
+export const ChatInput = memo(function ChatInput({ sessionId, inputRef }: ChatInputProps) {
   // 切换目标时释放录音、转写和 DOM 状态；文字与附件由草稿服务保留。
-  return <Input key={sessionId === null ? 'new' : `session:${sessionId}`} sessionId={sessionId} />
+  return <Input key={sessionId === null ? 'new' : `session:${sessionId}`} sessionId={sessionId} inputRef={inputRef} />
 })
 
-const Input = ({ sessionId }: { sessionId: string | null }) => {
+const Input = ({ sessionId, inputRef }: ChatInputProps) => {
   const t = useTranslate()
   const draft = useDrafts((state) => state.drafts.get(sessionId) ?? EMPTY_DRAFT)
   const { text, attachments } = draft
@@ -80,7 +82,8 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
   const activeInfo = resolveActiveModel(catalog)
   const acceptsImage = activeInfo.isDeepseek || Boolean(activeInfo.meta?.in?.includes('image'))
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const internalInputRef = useRef<HTMLTextAreaElement>(null)
+  const textareaRef = inputRef ?? internalInputRef
   const togglesRef = useRef<HTMLDivElement>(null)
 
   useLayoutEffect(() => {
@@ -192,7 +195,7 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
 
   return (
     <div
-      className={clsx(styles.wrapper, sessionId === null ? styles.home : styles.session)}
+      className={styles.wrapper}
       onClick={(event) => {
         if (event.target === event.currentTarget) {
           textareaRef.current?.focus({ preventScroll: true })
@@ -205,9 +208,10 @@ const Input = ({ sessionId }: { sessionId: string | null }) => {
           ref={textareaRef}
           className={clsx(styles.textarea, recording && isMobile && styles.textareaHidden)}
           placeholder={t('chatInputPlaceholderChat')}
+          aria-label={t('chatInputPlaceholderChat')}
           rows={2}
           // 移动端不自动聚焦，避免一打开就弹出键盘
-          autoFocus={!isMobile && !touchPrimary}
+          autoFocus={sessionId !== null && !isMobile && !touchPrimary}
           disabled={importingHistory}
           value={text}
           onChange={(event) => setText(event.target.value)}

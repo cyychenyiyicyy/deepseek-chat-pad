@@ -2,76 +2,178 @@
   position: absolute;
   inset: 0;
   display: flex;
-  /* 平板顶栏与内容上下排列；手机端原本也是这一方向 */
   flex-direction: column;
+  background: radial-gradient(ellipse at 50% 36%, var(--pad-accent-wash), transparent 70%);
+}
+
+.viewport {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .welcome {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
+  gap: 14px;
   box-sizing: border-box;
-  width: 100%;
-  max-width: var(--message-list-max-width);
+  width: min(704px, calc(100% - 2 * var(--chat-gutter)));
   margin: auto;
-  padding: 0 32px 64px;
+  padding: 26px 0 max(22px, env(safe-area-inset-bottom));
+}
+
+.intro {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.emblem {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  margin: 6px 0 14px;
+  border-radius: 18px;
+  background: var(--pad-accent);
+  box-shadow: 0 0 0 6px var(--pad-accent-wash), 0 0 0 7px var(--pad-accent-border);
+  color: var(--pad-on-accent);
+}
+
+.emblem svg {
+  width: 28px;
+  height: 28px;
 }
 
 .greeting {
+  margin: 0;
+  font-size: clamp(26px, 4.8vw, 46px);
+  line-height: 1.12;
+  letter-spacing: -0.04em;
+  font-weight: 650;
+}
+
+:lang(zh) .greeting {
+  letter-spacing: 0;
+}
+
+.description {
+  margin: 0;
+  color: var(--pad-muted);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.setup {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--pad-accent-border);
+  border-radius: var(--pad-radius-control);
+  background: var(--pad-surface);
+  color: var(--pad-accent-text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.setup:hover {
+  background: var(--pad-accent-wash);
+}
+
+.starters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.starter {
   display: flex;
   align-items: center;
-  justify-content: center;
-  margin-bottom: 21px;
-  font-size: 24px;
-  line-height: 32px;
-  font-weight: 600;
+  min-width: 0;
+  min-height: 48px;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--pad-divider);
+  border-radius: var(--pad-radius-control);
+  background: var(--pad-surface);
+  color: var(--pad-text);
+  font: inherit;
+  font-weight: 550;
+  text-align: start;
+  cursor: pointer;
+}
+
+.starter:hover:not(:disabled) {
+  border-color: var(--pad-accent-border);
+  background: var(--pad-accent-wash);
+}
+
+.starter:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.starterIcon,
+.arrow {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--pad-accent-text);
+}
+
+.arrow {
+  margin-inline-start: auto;
+}
+
+.caveat {
+  color: var(--pad-muted);
   text-align: center;
-  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  line-height: 18px;
 }
 
-/* DeepSeek 余额胶囊：放在问候语与输入框之间 */
-.balance {
-  display: flex;
-  justify-content: center;
-  margin-bottom: 18px;
-}
+@media (max-width: 560px) {
+  .starter {
+    flex-wrap: wrap;
+    align-content: center;
+    gap: 4px 6px;
+    font-size: 13px;
+  }
 
-@media (max-width: 439px) {
-  .greeting {
-    font-size: 20px;
-    line-height: 28px;
-    font-weight: 500;
+  .arrow {
+    display: none;
   }
 }
 
-@media not all and (min-width: 768px) {
-  .container {
-    flex-direction: column;
-  }
-
+@media (max-width: 767px), (max-height: 500px) {
   .welcome {
-    flex: 1;
-    min-height: 0;
-    justify-content: flex-end;
-    max-width: none;
-    margin: 0;
-    padding: 0 16px env(safe-area-inset-bottom);
+    min-height: 100%;
+    margin-block: 0;
+    margin-inline: auto;
   }
 
-  .greeting {
-    flex-shrink: 0;
-    margin: auto 0;
+  .intro {
+    margin-block: auto;
+  }
+}
+
+@media (max-height: 460px) {
+  .welcome {
+    padding-block: 12px;
   }
 
-  .caveat {
-    flex-shrink: 0;
-    width: 100%;
-    padding: 6px 0;
-    font-size: 11px;
-    line-height: 16px;
-    text-align: center;
-    color: var(--dsw-alias-label-tertiary);
-    user-select: none;
+  .intro {
+    margin-bottom: 0;
+  }
+
+  .emblem {
+    display: none;
   }
 }

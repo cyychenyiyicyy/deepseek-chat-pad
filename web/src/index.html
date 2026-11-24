@@ -6,11 +6,11 @@
       name="viewport"
       content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no"
     />
-    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#faf9f5" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#171e19" media="(prefers-color-scheme: dark)" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="format-detection" content="telephone=no" />
-    <title>DeepSeek 平板</title>
+    <title>DeepSeek Chat Pad</title>
     <script>
       // 首屏防闪：按已保存的主题偏好先把底色定下来（样式表里只有 :root 默认值）
       ;(function () {
@@ -21,7 +21,7 @@
             ((pref === null || pref === 'system') &&
               window.matchMedia('(prefers-color-scheme: dark)').matches)
           document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
-          document.documentElement.style.backgroundColor = dark ? '#0f1115' : '#ffffff'
+          document.documentElement.style.backgroundColor = dark ? '#171e19' : '#faf9f5'
         } catch (error) {
           /* 存储不可用时交给后续逻辑判断 */
         }

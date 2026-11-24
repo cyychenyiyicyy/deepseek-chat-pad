@@ -1,7 +1,15 @@
 import type { zh } from './zh.js'
 
 export const en = {
-  welcomeMessageChat250808: 'How can I help you?',
+  welcomeMessageChat250808: 'What are we working on?',
+  welcomeDescription: 'Start with a question, an idea, or a file.',
+  welcomeConfigureModel: 'Set up a model',
+  welcomeDraft: 'Draft a message',
+  welcomeDraftPrompt: 'Help me draft a message about ',
+  welcomeExplain: 'Explain a topic',
+  welcomeExplainPrompt: 'Explain this topic in plain language: ',
+  welcomePlan: 'Plan a project',
+  welcomePlanPrompt: 'Help me break this project into actionable steps: ',
   contentCaveat: 'AI-generated, for reference only',
   expandSiderbarButton: 'Open sidebar',
   collapseSiderbarButton: 'Close sidebar',
@@ -14,7 +22,7 @@ export const en = {
     'Chats or attachments have not been saved locally. Retry before closing this page.',
   sessionDeleteFailed: 'Unable to delete this chat. Please try again.',
   settings: 'Settings',
-  appName: 'DeepSeek',
+  appName: 'DeepSeek Chat Pad',
   deleteSessionModalContentTitle: 'Delete chat?',
   deleteSessionWithFilesDescription:
     'This chat and its uploaded files will be permanently deleted and cannot be recovered. Delete this chat?',
@@ -238,6 +246,8 @@ export const en = {
   balanceInsufficient: 'Insufficient balance',
   balanceRefresh: 'Refresh balance',
   siderSearchPlaceholder: 'Search chats',
+  siderSearchEmpty: 'No chats match your search.',
+  siderHistoryEmpty: 'Your conversations will appear here.',
   siderLoadMore: 'Show more ({count} left)',
   siderPinned: 'Pinned',
   siderModelEntry: 'Models',
@@ -461,9 +471,15 @@ export const en = {
   remoteTimeYesterday: 'yesterday',
   remoteTimeDays: '{count} days ago',
   remoteNotConnected: 'Not connected to a remote DSH',
-  remoteNotConnectedHint:
-    'Fill in the server URL and account under Settings → Remote DSH, then connect.',
-  remoteOpenSettings: 'Open settings',
+  remoteCheckingAvailability: 'Checking remote availability…',
+  remoteNotConnectedHint: 'Connect with a DSH account, pair a device, or use SSH.',
+  remoteConnectionTitle: 'Remote connection',
+  remoteWorkspaceTools: 'Remote tools',
+  remoteWorkspaceToolsShort: 'Tools',
+  remoteWorkspaceHost: 'Host',
+  remoteWorkspaceData: 'Conversation data',
+  remoteWorkspaceHostRequired: 'Connect to a host to manage its workspaces, tasks, and plugins.',
+  remoteSessionStatusFilter: 'Filter by chat status',
   remotePickSession: 'Pick a chat to open',
   remoteListButton: 'Remote chats',
   remoteTimelineEmpty: 'No messages in this chat yet',
@@ -1251,6 +1267,9 @@ export const en = {
 
   // ---- R14: switching between hosts (components/remote/HostSwitcher.tsx) ----
   hostSwitchLabel: 'Switch computer',
+  hostSwitchLocalHint: 'Direct model chat',
+  hostSwitchLocalShort: 'Model API',
+  hostSwitchDisconnected: 'Disconnected',
   hostSwitchCurrent: 'Current computer',
   hostSwitchConnecting: 'Connecting to {name}…',
   hostSwitchFailed: 'Could not switch to {name}: {reason}',

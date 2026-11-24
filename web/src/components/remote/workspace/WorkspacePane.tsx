@@ -29,7 +29,8 @@ export const WorkspacePane = () => {
   const t = useTranslate()
   const isMobile = useIsMobile()
   const scale = useSettings((state) => state.uiScale)
-  const docked = useSyncExternalStore(subscribeWidth, () => window.innerWidth / scale >= 1200)
+  const wide = useSyncExternalStore(subscribeWidth, () => window.innerWidth / scale >= 1200)
+  const docked = wide && !isMobile
   const newSessionOpen = useNewSessionStore((state) => state.open)
   const ready = useRemoteStore((state) => state.phase === 'ready')
   const open = useWorkspacePane((state) => state.open)

@@ -4,6 +4,7 @@ import { useTranslate } from '../../i18n/index.js'
 import {
   IconEditOutline16,
   IconEllipsisOutline16,
+  IconNewChatOutline20,
   IconPinOutline16,
   IconTrashOutline16,
 } from '../base/icons.js'
@@ -41,6 +42,7 @@ export const SessionItem = memo(function SessionItem({
     return (
       <input
         className={styles.renameInput}
+        aria-label={t('sessionItemMenuRenameOption')}
         defaultValue={displayTitle}
         autoFocus
         onFocus={(event) => event.target.select()}
@@ -57,22 +59,23 @@ export const SessionItem = memo(function SessionItem({
   }
 
   return (
-    <div
-      className={clsx(styles.item, active && styles.active)}
-      onClick={() => {
-        selectSession(session.id)
-        closeMobileSider()
-      }}
-    >
-      <div className={styles.title}>
-        {pinned ? (
-          <span className={styles.pinMark} aria-label={t('sessionItemMenuUnpinOption')}>
-            <IconPinOutline16 />
-          </span>
-        ) : null}
-        {displayTitle}
-      </div>
-      <div className={styles.action} onClick={(event) => event.stopPropagation()}>
+    <div className={clsx(styles.item, active && styles.active)}>
+      <button
+        type="button"
+        className={styles.select}
+        aria-current={active ? 'true' : undefined}
+        title={displayTitle}
+        onClick={() => {
+          selectSession(session.id)
+          closeMobileSider()
+        }}
+      >
+        <span className={styles.itemIcon} aria-hidden="true">
+          {pinned ? <IconPinOutline16 /> : <IconNewChatOutline20 />}
+        </span>
+        <span className={styles.title}>{displayTitle}</span>
+      </button>
+      <div className={styles.action}>
         <Menu
           options={[
             {
@@ -96,8 +99,14 @@ export const SessionItem = memo(function SessionItem({
             },
           ]}
         >
-          {({ toggle }) => (
-            <IconButton icon={<IconEllipsisOutline16 />} aria-label={t('more')} onClick={toggle} />
+          {({ open, toggle }) => (
+            <IconButton
+              icon={<IconEllipsisOutline16 />}
+              aria-label={t('more')}
+              aria-haspopup="menu"
+              aria-expanded={open}
+              onClick={toggle}
+            />
           )}
         </Menu>
       </div>

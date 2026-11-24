@@ -1,6 +1,5 @@
 import { ensureApiKey } from '../../components/settings/settingsDialogState.js'
 import { showToast } from '../../components/base/toastState.js'
-import { useSettings } from '../settings.js'
 import { useModelState } from './store.js'
 
 /**
@@ -26,12 +25,3 @@ export const ensureActiveModelReady = (): boolean => {
 /** 当前选择是否用了内置 DeepSeek（联网搜索、附件上传只支持它） */
 export const isDeepseekActive = (): boolean =>
   useModelState.getState().active.providerId === 'deepseek'
-
-/**
- * 是否已经有任一可用凭据：DeepSeek 的 Key，或某个填了 Key 的自定义端点。
- * 首次启动时用它决定要不要弹设置，避免只想用第三方模型的人被强行要求填 DeepSeek Key。
- */
-export const hasAnyCredential = (): boolean => {
-  const { providers } = useModelState.getState()
-  return Boolean(useSettings.getState().apiKey) || providers.some((p) => Boolean(p.apiKey))
-}

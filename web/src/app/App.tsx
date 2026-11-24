@@ -15,8 +15,6 @@ import { closeSearchPanel } from '../components/search/searchPanelState.js'
 import { SessionView } from '../components/session/SessionView.js'
 import { MobileHeader } from '../components/session/MobileHeader.js'
 import { Welcome } from '../components/session/Welcome.js'
-import { ensureApiKey } from '../components/settings/settingsDialogState.js'
-import { hasAnyCredential } from '../services/models/ready.js'
 import {
   clearUpdatePending,
   compareVersion,
@@ -35,10 +33,11 @@ import { showToast } from '../components/base/toastState.js'
 import { onUploadNotice } from '../services/attachments.js'
 import { Button } from '../components/base/Button.js'
 import { stopReadAloud } from '../services/speech/readAloud.js'
-import { closeMobileSider } from '../components/sider/mobileSiderState.js'
+import { closeMobileSider, useMobileSider } from '../components/sider/mobileSiderState.js'
 import { MobileSider, Sider } from '../components/sider/Sider.js'
 import { RemoteChatView } from '../components/remote/RemoteChatView.js'
 import { useRemoteMode } from '../components/remote/RemoteModeSwitch.js'
+import { RemoteWorkspaceDialog } from '../components/remote/RemoteWorkspaceDialog.js'
 import { WorkspacePane } from '../components/remote/workspace/WorkspacePane.js'
 import { TabletHeader } from '../components/session/TabletHeader.js'
 import styles from './App.module.css'
@@ -49,7 +48,12 @@ import styles from './App.module.css'
  * 两个属性用同一条缓动曲线，视觉上就是一次干净的滑出。
  */
 const SiderSlot = ({ collapsed }: { collapsed: boolean }) => (
-  <div className={clsx(styles.siderSlot, collapsed && styles.siderSlotCollapsed)} aria-hidden={collapsed}>
+  <div
+    id="desktop-session-sidebar"
+    className={clsx(styles.siderSlot, collapsed && styles.siderSlotCollapsed)}
+    aria-hidden={collapsed}
+    ref={(node) => node?.toggleAttribute('inert', collapsed)}
+  >
     <div className={styles.siderInner}>
       <Sider />
     </div>
@@ -66,6 +70,7 @@ export const App = () => {
 
   const t = useTranslate()
   const isMobile = useIsMobile()
+  const drawerOpen = useMobileSider((state) => state.open)
   const locale = useSettings((state) => state.locale)
   // 移动端侧边栏以独立抽屉管理开合状态
   const siderCollapsed = useSettings((state) => state.siderCollapsed) && !isMobile
@@ -158,17 +163,13 @@ export const App = () => {
 
   useEffect(() => {
     void initChat()
-    // 首次打开：完全没有凭据时才强制进设置，已配置自定义端点的人不必再填 DeepSeek Key
-    if (!hasAnyCredential()) {
-      ensureApiKey()
-    }
   }, [])
 
   return (
     <>
       <div className={styles.frame}>
         {isMobile ? <MobileSider /> : <SiderSlot collapsed={siderCollapsed} />}
-        <main className={styles.main}>
+        <main className={styles.main} ref={(node) => node?.toggleAttribute('inert', isMobile && drawerOpen)}>
           {chatMode === 'local' && saveError ? (
             <div className={styles.saveError} role="alert">
               <span>{t('sessionSaveFailed')}</span>
@@ -234,6 +235,7 @@ export const App = () => {
         <SearchPanel />
       </div>
       <SettingsDialog />
+      <RemoteWorkspaceDialog />
       <UpdateDialog />
       <MigrationOverlay />
       <Toast />

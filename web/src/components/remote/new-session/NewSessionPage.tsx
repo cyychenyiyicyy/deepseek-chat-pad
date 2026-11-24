@@ -48,7 +48,7 @@ export const NewSessionPage = ({ footer, modalOpen, onVoiceCall }: {
   useEffect(() => {
     if (modalOpen) return
     const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== 'Escape') return
+      if (event.key !== 'Escape' || event.defaultPrevented || document.getElementById('root')?.hasAttribute('inert')) return
       if (useNewSessionStore.getState().sheet !== null) {
         useNewSessionStore.getState().openSheet(null)
         return
@@ -98,9 +98,8 @@ export const NewSessionPage = ({ footer, modalOpen, onVoiceCall }: {
         ) : null}
       </div>
 
-      {/* ── 中间：居中一列 ── */}
-      <div className={styles.body}>
-        <div className={styles.column}>
+      <div className={styles.start}>
+        <div className={styles.body}>
           {capabilities.workspace ? (
             <div className={styles.workspaceSection}>
               <h1 className={styles.workspaceLabel}>{t('newSession.pageWhereToWork')}</h1>
@@ -154,10 +153,8 @@ export const NewSessionPage = ({ footer, modalOpen, onVoiceCall }: {
           {loading ? <div className={styles.hint}>{t('newSessionLoading')}</div> : null}
           {!capabilities.create ? <div className={styles.hint}>{t('newSessionCreateUnsupported')}</div> : null}
         </div>
+        {footer !== undefined ? <div className={styles.composerSlot}>{footer}</div> : null}
       </div>
-
-      {/* ── 底部：会话页同一个输入框（footer 由 RemoteChatView 传入） ── */}
-      {footer !== undefined ? <div className={styles.composerSlot}>{footer}</div> : null}
 
       {sheet !== null ? <NewSessionSheets /> : null}
     </section>

@@ -148,11 +148,11 @@
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: var(--pad-touch);
+  height: var(--pad-touch);
   padding: 0;
   border: none;
-  border-radius: 50%;
+  border-radius: var(--pad-radius-control);
   background: var(--dsw-alias-button-primary-fill);
   color: var(--dsw-static-neutral-bluish-00);
   cursor: pointer;
@@ -180,7 +180,7 @@
 
 /* ---------- 移动端 ---------- */
 
-@media not all and (min-width: 768px) {
+@media (max-width: 767px), (max-height: 500px) {
   .row {
     gap: 4px;
     padding: 2px 8px 8px;
@@ -189,11 +189,6 @@
   /* 手机上提示语没有位置；`hintBusy` 例外，靠 flex 自己收窄 */
   .hint {
     display: none;
-  }
-
-  .primary {
-    width: 38px;
-    height: 38px;
   }
 
   /* 第二颗钮：比主按钮小一号，别抢主位的重量 */
