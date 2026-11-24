@@ -242,35 +242,37 @@ jobs:
           v=${{ steps.ver.outputs.value }}
           apk=android/app/build/outputs/apk/debug/app-debug.apk
           web=web-v$v.zip
-          notes=$(jq -Rs . < release-notes.md)
           repo=https://github.com/${GITHUB_REPOSITORY}/releases/download/v$v
           if [ "${{ steps.native.outputs.required }}" = "true" ]; then
             # 本体更新：只给 APK 地址，网页地址留 null（客户端据此只提供安装包）
             apk_url="$repo/app-debug.apk"
             apk_size=$(stat -c%s "$apk")
-            web_url=null
+            web_url=
             web_size=0
             kind=native
           else
             # 网页更新：只给网页包地址，APK 地址留 null
-            apk_url=null
+            apk_url=
             apk_size=0
             web_url="$repo/web-v$v.zip"
             web_size=$(stat -c%s "$web")
             kind=web
           fi
-          cat > latest.json <<EOF
-          {
-            "version": "$v",
-            "tag": "v$v",
-            "kind": "$kind",
-            "apkUrl": $apk_url,
-            "apkSize": $apk_size,
-            "webUrl": $web_url,
-            "webSize": $web_size,
-            "notes": $notes
-          }
-          EOF
+          jq -n \
+            --arg version "$v" --arg tag "v$v" --arg kind "$kind" \
+            --arg apkUrl "$apk_url" --argjson apkSize "$apk_size" \
+            --arg webUrl "$web_url" --argjson webSize "$web_size" \
+            --rawfile notes release-notes.md \
+            '{
+              version: $version,
+              tag: $tag,
+              kind: $kind,
+              apkUrl: (if $apkUrl == "" then null else $apkUrl end),
+              apkSize: $apkSize,
+              webUrl: (if $webUrl == "" then null else $webUrl end),
+              webSize: $webSize,
+              notes: $notes
+            }' > latest.json
           cat latest.json
 
       - name: 发布本体更新
