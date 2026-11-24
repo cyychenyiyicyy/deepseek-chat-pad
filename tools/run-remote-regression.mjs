@@ -1,4 +1,5 @@
-// 远程 DSH 自测总入口：把 web/src 下所有 *.selftest.mts 逐个跑一遍，任何一套非零退出即整体失败。
+// 自测总入口：把 web/src/{services,components} 下所有 *.selftest.mts 逐个跑一遍，
+// 任何一套非零退出即整体失败（远程、更新判定等各套共用这一条流水线）。
 //
 // 用法：
 //   node tools/run-remote-regression.mjs           # 全部
@@ -31,8 +32,8 @@ const collect = (folder) => fs.readdirSync(folder, { withFileTypes: true }).flat
 })
 
 const tests = [
-  ...collect(path.join(root, 'services/remote')),
-  ...collect(path.join(root, 'components/remote')),
+  ...collect(path.join(root, 'services')),
+  ...collect(path.join(root, 'components')),
 ].sort()
 
 if (tests.length === 0) {

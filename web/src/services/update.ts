@@ -129,6 +129,59 @@ export const compareVersion = (a: string, b: string): number => {
   return 0
 }
 
+/* ---------------- 这次到底有没有东西可更 ----------------
+ * 自动检查与更新弹窗必须用同一份判定，否则两边会跑偏：
+ * 网页包单独更新后 APK 版本号永远落后于最新版，只比版本号会把「已经没东西可更」
+ * 当成「有更新」，于是每次启动都弹一个只有「稍后」的「已是最新版本」。 */
+
+export type UpdateAction = {
+  /** 网页包可以就地更新 */
+  hasWeb: boolean
+  /** 需要换 APK（没有安装包资产、或 CI 标明这次不用换包时都不算） */
+  hasApk: boolean
+  /** 有真正能执行的动作 —— 启动时的自动检查只在这种情况下弹窗 */
+  actionable: boolean
+}
+
+export type UpdateVersions = Pick<UpdateState, 'appVersion' | 'webVersion'>
+
+export const resolveUpdateAction = (
+  release: ReleaseInfo | null,
+  state: UpdateVersions | null,
+): UpdateAction => {
+  if (!release) {
+    return { hasWeb: false, hasApk: false, actionable: false }
+  }
+  const appVersion = state?.appVersion ?? ''
+  // 没装过下载包时，网页版本就是内置的那份，跟 APK 版本同源
+  const webVersion = state?.webVersion ?? appVersion
+  const hasWeb = Boolean(release.webUrl) && compareVersion(release.version, webVersion) > 0
+  const hasApk =
+    Boolean(release.apkUrl) &&
+    release.apkRequired !== false &&
+    compareVersion(release.version, appVersion) > 0
+  return { hasWeb, hasApk, actionable: hasWeb || hasApk }
+}
+
+/**
+ * 弹窗该用什么口径说话：
+ *   update    —— 这一版真的能装；
+ *   notice    —— 没有可装的，但有「上次没装完 / 网页包已换需重载」要告诉用户；
+ *   up-to-date —— 确实没事（只有手动检查才会看到）。
+ */
+export type UpdatePromptKind = 'update' | 'notice' | 'up-to-date'
+
+export const resolveUpdatePromptKind = (
+  release: ReleaseInfo | null,
+  state: UpdateVersions | null,
+  notice: string | null,
+): UpdatePromptKind => {
+  if (resolveUpdateAction(release, state).actionable) {
+    return 'update'
+  }
+  return notice ? 'notice' : 'up-to-date'
+}
+
 /* ---------------- 跳过某个版本 ----------------
  * 「跳过此版本」后，启动时的自动检查不再为它弹窗；手动点「检查更新」仍然会显示。 */
 

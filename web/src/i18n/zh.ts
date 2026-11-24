@@ -267,6 +267,7 @@ export const zh = {
   modelSearchKeyMissing: '当前搜索服务还没有配置 Key，请到设置里填写',
   updateTitle: '检查更新',
   updateDialogTitle: '发现新版本 {version}',
+  updateNoticeTitle: '更新提示',
   updateCheckFailed: '检查更新失败：{message}',
   updateNetProxy: '网络：系统代理 {proxy}',
   updateNetVpn: '网络：VPN（流量已由系统转发）',

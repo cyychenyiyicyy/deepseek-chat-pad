@@ -23,6 +23,7 @@ import {
   readSkippedVersion,
   readUpdatePending,
   readUpdateState,
+  resolveUpdateAction,
 } from '../services/update.js'
 import { openUpdateDialog } from '../components/settings/updateDialogState.js'
 import { UpdateDialog } from '../components/settings/UpdateDialog.js'
@@ -142,18 +143,18 @@ export const App = () => {
         notice = t('updateNeedsReload', { version: current.webVersion })
       }
 
-      const newer = latest
-        ? Math.max(
-            compareVersion(latest.version, current.appVersion),
-            compareVersion(latest.version, current.webVersion ?? current.appVersion)
-          )
-        : -1
+      // 只认「真的有东西可装」，不能只比版本号：网页包单独更新后 APK 版本号永远落后，
+      // 那种情况下 hasWeb / hasApk 都为 false，一弹窗就是一屏「已是最新版本」，每次启动都来一次。
+      const action = resolveUpdateAction(latest, current)
       // 用户点过「跳过此版本」就不再为这个版本自动弹窗（有其它提示时仍然弹）
       const skipped = readSkippedVersion()
-      const skipThis = Boolean(latest && skipped === latest.version && !notice && !result.error)
-      // 有新版本、有需要提示的状态、或者检查本身失败（网络问题）时才弹窗
-      if (!skipThis && (newer > 0 || notice || result.error)) {
+      const skipThis = Boolean(latest && skipped === latest.version && !notice)
+      // 有可执行更新、或有「上次没装完 / 网页包已换需重载」要告知时才弹窗；
+      // 检查本身失败（网络 / 限流）不打扰用户，设置页手动检查会如实显示原因。
+      if (!skipThis && (action.actionable || Boolean(notice))) {
         openUpdateDialog({ release: latest, state: current, notice, error: result.error })
+      } else if (result.error) {
+        console.warn('[update] 启动检查更新失败：', result.error)
       }
     })()
     return () => {

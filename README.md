@@ -89,7 +89,7 @@ APK 更新则下载后拉起系统安装器。
 cd web
 pnpm install
 pnpm run type                          # 类型检查
-pnpm run selftest                      # 远程自测（36 套，用已安装的 tsx 跑）
+pnpm run selftest                      # 自测（37 套，用已安装的 tsx 跑）
 NODE_ENV=production npx rspack build -c rspack.config.ts
 ```
 
@@ -184,7 +184,19 @@ v1.9–v1.15 的变更见 [Releases](https://github.com/cyychenyiyicyy/deepseek-
 - 分享与导出：长图、Markdown、网页、快照 ZIP，DSH Go 加密链接与回放
 - 语音：语音输入、语音通话
 - 平板布局重做：三档布局 + `visualViewport` 全局适配
-- 工具链：远程自测 36 套、浏览器回归 188 项、Android 静态检查 8 项全部接入 CI
+- 工具链：远程自测 37 套、浏览器回归 188 项、Android 静态检查 8 项全部接入 CI
+
+## v1.16.2 变更：修启动更新弹窗误报
+
+- **不再每次启动都弹「已是最新版本」**：启动自动检查改成只认「真的有东西可装」
+  （`resolveUpdateAction` 判断网页包 / APK 是否可更新），网页包单独更新后 APK 版本号
+  永远落后于最新版，那种情况不再被当成有更新
+- 自动检查与弹窗共用同一份判定：弹窗标题分三档 —— 能装的说「发现新版本」，
+  只有重载/未装完提示的说「更新提示」，「已是最新版本」只留一手动检查
+- 启动检查遇到网络或限流失败不再弹窗打扰（仍写 `console.warn`），
+  设置 → 通用 → 检查更新 里手动检查照旧如实显示原因
+- 回归：新增 `web/src/services/__selftest__/update-prompt.selftest.mts`（13 项），
+  自测脚本从 `services|components` 全树收集用例
 
 ## 已知限制
 

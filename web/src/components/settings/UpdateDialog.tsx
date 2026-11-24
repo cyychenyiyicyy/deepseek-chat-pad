@@ -6,13 +6,14 @@ import { showToast } from '../base/toastState.js'
 import { useTranslate } from '../../i18n/index.js'
 import {
   applyWebUpdate,
-  compareVersion,
   downloadApk,
   formatSize,
   installApk,
   markUpdatePending,
   readNetworkInfo,
   readUpdateState,
+  resolveUpdateAction,
+  resolveUpdatePromptKind,
   skipVersion,
   type NetworkInfo,
   type UpdateProgress,
@@ -48,14 +49,15 @@ export const UpdateDialog = () => {
 
   const appVersion = state?.appVersion ?? ''
   const webVersion = state?.webVersion ?? appVersion
-  const hasWeb =
-    Boolean(release?.webUrl) && Boolean(release) && compareVersion(release!.version, webVersion) > 0
-  // CI 判定这次没动原生代码时就不再催更 APK
-  const hasApk =
-    Boolean(release?.apkUrl) &&
-    release?.apkRequired !== false &&
-    Boolean(release) &&
-    compareVersion(release!.version, appVersion) > 0
+  // 与启动自动检查共用同一份判定：没有可装的东西时绝不会再说「发现新版本」
+  const { hasWeb, hasApk } = resolveUpdateAction(release, state)
+  const kind = resolveUpdatePromptKind(release, state, notice)
+  const title =
+    kind === 'update'
+      ? t('updateDialogTitle', { version: release?.version ?? '' })
+      : kind === 'notice'
+        ? t('updateNoticeTitle')
+        : t('updateUpToDate')
 
   const copyLink = async (url: string | null) => {
     if (!url) return
@@ -130,11 +132,7 @@ export const UpdateDialog = () => {
 
   return (
     <Modal
-      title={
-        release && (hasWeb || hasApk)
-          ? t('updateDialogTitle', { version: release.version })
-          : t('updateUpToDate')
-      }
+      title={title}
       closable
       className={styles.dialog}
       onClose={() => {

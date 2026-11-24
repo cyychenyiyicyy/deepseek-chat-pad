@@ -48,7 +48,7 @@ jobs:
         env:
           NODE_ENV: production
 
-      # 远程层的自测：36 套，任何一套非零退出就红（用 web 里装好的 tsx 跑，不挑 Node 版本）
+      # 自测：37 套，任何一套非零退出就红（用 web 里装好的 tsx 跑，不挑 Node 版本）
       - name: 远程自测
         working-directory: web
         run: pnpm run selftest
@@ -258,6 +258,7 @@ jobs:
             web_size=$(stat -c%s "$web")
             kind=web
           fi
+          # apkRequired 显式写出来（网页更新不需要换 APK）：客户端据此判断，不必靠「有没有 apkUrl」猜
           jq -n \
             --arg version "$v" --arg tag "v$v" --arg kind "$kind" \
             --arg apkUrl "$apk_url" --argjson apkSize "$apk_size" \
@@ -267,6 +268,7 @@ jobs:
               version: $version,
               tag: $tag,
               kind: $kind,
+              apkRequired: ($kind == "native"),
               apkUrl: (if $apkUrl == "" then null else $apkUrl end),
               apkSize: $apkSize,
               webUrl: (if $webUrl == "" then null else $webUrl end),

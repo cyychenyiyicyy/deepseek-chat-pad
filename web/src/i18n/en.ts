@@ -276,6 +276,7 @@ export const en = {
   modelSearchKeyMissing: 'No API key configured for the selected search service',
   updateTitle: 'Check for updates',
   updateDialogTitle: 'Version {version} available',
+  updateNoticeTitle: 'Update notice',
   updateCheckFailed: 'Could not check for updates: {message}',
   updateNetProxy: 'Network: system proxy {proxy}',
   updateNetVpn: 'Network: VPN (traffic forwarded by the system)',
