@@ -266,25 +266,36 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const profile = fs.mkdtempSync(path.join(out, 'chrome-'))
 const downloads = fs.mkdirSync(path.join(profile, 'downloads'), { recursive: true })
-const log = fs.openSync(path.join(out, 'chrome.log'), 'w')
-const child = spawn(browser, ['--headless=new', '--disable-gpu', '--no-sandbox', '--disable-background-networking',
+const logPath = path.join(out, 'chrome.log')
+const log = fs.openSync(logPath, 'w')
+const child = spawn(browser, ['--headless=new', '--disable-gpu', '--no-sandbox', '--disable-dev-shm-usage', '--disable-background-networking',
   '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--autoplay-policy=no-user-gesture-required',
   '--no-first-run', '--remote-debugging-port=0', '--user-data-dir=' + profile, 'about:blank'],
   { stdio: ['ignore', log, log], windowsHide: true })
+let launchError
+child.once('error', (error) => { launchError = error })
 let socket
 try {
   const portFile = path.join(profile, 'DevToolsActivePort')
+  const launchDeadline = Date.now() + 20_000
   let port
-  for (let index = 0; index < 100 && !port; index++) {
+  while (!port && Date.now() < launchDeadline && !launchError && child.exitCode === null && child.signalCode === null) {
     try {
       const candidate = fs.readFileSync(portFile, 'utf8').split('\n')[0].trim()
       if (/^\d+$/u.test(candidate)) port = candidate
     } catch (error) {
       if (error.code !== 'ENOENT' && error.code !== 'EBUSY') throw error
     }
+    // Some launches report the endpoint before writing DevToolsActivePort.
+    if (!port) {
+      port = fs.readFileSync(logPath, 'utf8').match(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)\/devtools\/browser\//u)?.[1]
+    }
     if (!port) await sleep(100)
   }
-  assert(port, 'Chromium did not start its debugging endpoint')
+  if (!port) {
+    const detail = launchError?.message ?? fs.readFileSync(logPath, 'utf8').trim().slice(-650)
+    throw new Error('Chromium did not start its debugging endpoint' + (detail ? ': ' + detail : ''))
+  }
   const pages = await (await fetch('http://127.0.0.1:' + port + '/json/list')).json()
   socket = new WebSocket(pages.find((page) => page.type === 'page' && page.url === 'about:blank').webSocketDebuggerUrl)
   await new Promise((resolve, reject) => {
