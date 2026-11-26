@@ -16,8 +16,8 @@
   align-items: center;
   flex-shrink: 0;
   box-sizing: border-box;
-  height: 60px;
-  padding: 0 14px 0 20px;
+  height: calc(var(--ds-topbar-h) + var(--ds-top-offset));
+  padding: var(--ds-top-offset) 14px 0 20px;
   border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 
@@ -54,9 +54,9 @@
   }
 }
 
-@media not all and (min-width: 768px) {
+@media (width < 840px), (height < 480px) {
   .panel {
-    position: fixed;
+    position: absolute;
     inset: 0;
     z-index: 700;
     width: auto;

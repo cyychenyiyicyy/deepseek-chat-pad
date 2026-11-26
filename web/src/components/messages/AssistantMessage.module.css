@@ -1,11 +1,6 @@
 .message {
   position: relative;
 
-  &:hover .actions,
-  &:focus-within .actions {
-    opacity: 1;
-  }
-
   :global(.ds-assistant-message-main-content) {
     padding-bottom: 6px;
   }
@@ -96,12 +91,7 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  opacity: 0;
-  transition: opacity var(--ds-transition-duration) var(--ds-ease-in-out);
-}
-
-.alwaysShow {
-  opacity: 1;
+  flex-wrap: wrap;
 }
 
 .continueButton {

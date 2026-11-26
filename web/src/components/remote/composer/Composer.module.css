@@ -152,9 +152,9 @@
   height: var(--pad-touch);
   padding: 0;
   border: none;
-  border-radius: var(--pad-radius-control);
+  border-radius: 100px;
   background: var(--dsw-alias-button-primary-fill);
-  color: var(--dsw-static-neutral-bluish-00);
+  color: var(--pad-on-accent);
   cursor: pointer;
   transition: background 0.2s ease;
 

@@ -6,18 +6,6 @@
   width: 440px;
 }
 
-@media (max-width: 767px), (max-height: 500px) {
-  .dialog,
-  .hostDialog {
-    align-self: flex-end;
-    width: min(100%, 620px);
-    max-width: none;
-    max-height: calc(100% - max(12px, var(--ds-top-offset)));
-    padding: 12px 16px max(18px, env(safe-area-inset-bottom));
-    border-radius: var(--pad-radius-compose) var(--pad-radius-compose) 0 0;
-  }
-}
-
 .tools {
   display: grid;
   gap: 16px;

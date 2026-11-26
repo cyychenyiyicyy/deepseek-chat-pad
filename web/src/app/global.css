@@ -23,7 +23,7 @@
    * 56px 会在上下各留 17px 死白；48px 留 13px，仍是 ≥48dp 的常规触控行高，
    * 不动任何一条公式 —— 四块顶栏都读这个 token，所以对齐关系天然保持。
    */
-  --ds-topbar-h: 48px;
+  --ds-topbar-h: 64px;
   --message-list-max-width: 840px;
   --message-list-padding-horizontal: 44px;
 }
@@ -73,12 +73,18 @@ body.change-theme *::after {
   transition: none !important;
 }
 
-@media (max-width: 767px), (max-height: 500px) {
+@media (width < 840px), (height < 480px) {
   html,
   body,
   #root {
     height: 100%;
     overflow: hidden;
     overscroll-behavior-y: none;
+  }
+}
+
+@media (height < 480px) {
+  :root {
+    --ds-topbar-h: 48px;
   }
 }

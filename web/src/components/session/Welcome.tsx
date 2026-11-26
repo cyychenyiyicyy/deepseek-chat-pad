@@ -7,7 +7,6 @@ import { useSettings } from '../../services/settings.js'
 import {
   IconDataOutline16,
   IconEditOutline16,
-  IconNewChatOutline20,
   IconRightUpOutline14,
   IconThinkOutline16,
 } from '../base/icons.js'
@@ -37,9 +36,6 @@ export const Welcome = () => {
       <div className={styles.viewport}>
         <div className={styles.welcome}>
           <div className={styles.intro}>
-            <div className={styles.emblem} aria-hidden="true">
-              <IconNewChatOutline20 />
-            </div>
             <h1 className={styles.greeting}>{t('welcomeMessageChat250808')}</h1>
             <p className={styles.description}>{t('welcomeDescription')}</p>
             <BalanceChip />

@@ -6,7 +6,6 @@ declare const styles: {
   readonly "filesWithDocuments": string;
   readonly "bubble": string;
   readonly "bottom": string;
-  readonly "alwaysShow": string;
   readonly "editor": string;
   readonly "textarea": string;
   readonly "editorActions": string;

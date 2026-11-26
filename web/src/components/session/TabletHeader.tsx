@@ -36,7 +36,7 @@ export const TabletHeader = ({ title }: { title?: string }) => {
           onClick={() => setSiderCollapsed(false)}
         />
       ) : null}
-      <div className={styles.title}>{title ?? t('newChat')}</div>
+      <div className={styles.title}>{title ?? t('appName')}</div>
       <div className={styles.actions}>
         <IconButton
           size="m"
@@ -46,7 +46,7 @@ export const TabletHeader = ({ title }: { title?: string }) => {
           aria-label={theme === 'dark' ? t('themeToLight') : t('themeToDark')}
           onClick={() => setThemePreference(theme === 'dark' ? 'light' : 'dark')}
         />
-        {collapsed ? (
+        {title !== undefined ? (
           <IconButton
             size="m"
             tone="primary"

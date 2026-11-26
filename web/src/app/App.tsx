@@ -1,8 +1,8 @@
-import { useEffect } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import clsx from 'clsx'
 import { useTranslate } from '../i18n/index.js'
-import { useSettings } from '../services/settings.js'
-import { useIsMobile, useMobileViewport, usePreventPageScroll } from './viewport.js'
+import { setSiderCollapsed, useSettings } from '../services/settings.js'
+import { useIsMobile, useMobileViewport } from './viewport.js'
 import {
   bindChatPersistence,
   initChat,
@@ -28,13 +28,15 @@ import {
 import { openUpdateDialog } from '../components/settings/updateDialogState.js'
 import { UpdateDialog } from '../components/settings/UpdateDialog.js'
 import { MigrationOverlay } from '../components/layout/MigrationOverlay.js'
-import { SettingsDialog } from '../components/settings/SettingsDialog.js'
+import { SettingsPage } from '../components/settings/SettingsDialog.js'
+import { closeSettings, openSettings, showSettingsList, useSettingsDialog } from '../components/settings/settingsDialogState.js'
+import { IconChat24, IconHistory24, IconSettingsOutline16 } from '../components/base/icons.js'
 import { Toast } from '../components/base/Toast.js'
 import { showToast } from '../components/base/toastState.js'
 import { onUploadNotice } from '../services/attachments.js'
 import { Button } from '../components/base/Button.js'
 import { stopReadAloud } from '../services/speech/readAloud.js'
-import { closeMobileSider, useMobileSider } from '../components/sider/mobileSiderState.js'
+import { closeMobileSider, openMobileSider, useMobileSider } from '../components/sider/mobileSiderState.js'
 import { MobileSider, Sider } from '../components/sider/Sider.js'
 import { RemoteChatView } from '../components/remote/RemoteChatView.js'
 import { useRemoteMode } from '../components/remote/RemoteModeSwitch.js'
@@ -71,6 +73,7 @@ export const App = () => {
 
   const t = useTranslate()
   const isMobile = useIsMobile()
+  const settingsOpen = useSettingsDialog((state) => state.open)
   const drawerOpen = useMobileSider((state) => state.open)
   const locale = useSettings((state) => state.locale)
   // 移动端侧边栏以独立抽屉管理开合状态
@@ -97,7 +100,26 @@ export const App = () => {
   // 本机 / 远程 双态：远程模式复用同一套壳，只是把内容区换成远端会话
   const chatMode = useRemoteMode((state) => state.mode)
 
-  usePreventPageScroll(isMobile)
+  const settingsButton = useRef<HTMLButtonElement>(null)
+  const previousSettingsOpen = useRef(false)
+  useLayoutEffect(() => {
+    if (previousSettingsOpen.current && !settingsOpen && document.activeElement === document.body) {
+      settingsButton.current?.focus({ preventScroll: true })
+    }
+    previousSettingsOpen.current = settingsOpen
+  }, [settingsOpen])
+
+  useEffect(() => {
+    if (!settingsOpen) return
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.key !== 'Escape') return
+      event.preventDefault()
+      if (isMobile && useSettingsDialog.getState().section) showSettingsList()
+      else closeSettings()
+    }
+    window.addEventListener('keydown', onEscape)
+    return () => window.removeEventListener('keydown', onEscape)
+  }, [isMobile, settingsOpen])
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -168,74 +190,112 @@ export const App = () => {
 
   return (
     <>
-      <div className={styles.frame}>
-        {isMobile ? <MobileSider /> : <SiderSlot collapsed={siderCollapsed} />}
-        <main className={styles.main} ref={(node) => node?.toggleAttribute('inert', isMobile && drawerOpen)}>
-          {chatMode === 'local' && saveError ? (
-            <div className={styles.saveError} role="alert">
-              <span>{t('sessionSaveFailed')}</span>
-              <Button
-                variant="outlined"
-                size="s"
-                disabled={importingHistory}
-                onClick={retrySaveSessions}
-              >
-                {t('retry')}
-              </Button>
-            </div>
-          ) : null}
-          <div className={styles.content}>
-            {chatMode === 'remote' ? (
-              // 远程模式不另开页面：左栏仍是侧栏（列表换成远程会话），右栏换成远程会话页
-              <div className={styles.remoteWorkspace}>
-                <div className={styles.remoteConversation}>
-                  <RemoteChatView />
+      <div className={styles.frame} data-app-frame>
+        <nav className={styles.navigation} aria-label={t('appName')}>
+          <button
+            type="button"
+            aria-current={!settingsOpen && !drawerOpen ? 'page' : undefined}
+            onClick={() => {
+              closeSettings()
+              closeMobileSider()
+            }}
+          >
+            <span className={styles.navIcon}><IconChat24 /></span>
+            {t('navChat')}
+          </button>
+          <button
+            type="button"
+            aria-current={drawerOpen && !settingsOpen ? 'page' : undefined}
+            aria-controls={isMobile ? 'mobile-session-drawer' : 'desktop-session-sidebar'}
+            aria-expanded={!settingsOpen && (isMobile ? drawerOpen : !siderCollapsed)}
+            onClick={() => {
+              closeSettings()
+              if (isMobile) openMobileSider()
+              else setSiderCollapsed(settingsOpen ? false : !siderCollapsed)
+            }}
+          >
+            <span className={styles.navIcon}><IconHistory24 /></span>
+            {t('navHistory')}
+          </button>
+          <button
+            type="button"
+            aria-current={settingsOpen ? 'page' : undefined}
+            ref={settingsButton}
+            onClick={() => openSettings()}
+          >
+            <span className={styles.navIcon}><IconSettingsOutline16 /></span>
+            {t('settings')}
+          </button>
+        </nav>
+        <div className={styles.chatSurface} hidden={settingsOpen}>
+          {isMobile ? <MobileSider /> : <SiderSlot collapsed={siderCollapsed} />}
+          <main className={styles.main} ref={(node) => node?.toggleAttribute('inert', isMobile && drawerOpen)}>
+            {chatMode === 'local' && saveError ? (
+              <div className={styles.saveError} role="alert">
+                <span>{t('sessionSaveFailed')}</span>
+                <Button
+                  variant="outlined"
+                  size="s"
+                  disabled={importingHistory}
+                  onClick={retrySaveSessions}
+                >
+                  {t('retry')}
+                </Button>
+              </div>
+            ) : null}
+            <div className={styles.content}>
+              {chatMode === 'remote' ? (
+                // 远程模式不另开页面：左栏仍是侧栏（列表换成远程会话），右栏换成远程会话页
+                <div className={styles.remoteWorkspace}>
+                  <div className={styles.remoteConversation}>
+                    <RemoteChatView />
+                  </div>
+                  <WorkspacePane />
                 </div>
-                <WorkspacePane />
-              </div>
-            ) : !ready || (activeId !== null && !session) ? (
-              <div className={styles.loadingView}>
-                {isMobile ? <MobileHeader /> : <TabletHeader />}
-                {(!ready ? initError : sessionLoadError) ? (
-                  <div className={styles.loadingState} role="status" aria-live="polite">
-                    <span>{t(!ready ? 'sessionListLoadFailed' : 'sessionLoadFailed')}</span>
-                    <Button
-                      variant="outlined"
-                      size="m"
-                      onClick={() => {
-                        if (!ready) {
-                          void initChat()
-                        } else if (activeId !== null) {
-                          selectSession(activeId)
-                        }
-                      }}
-                    >
-                      {t('retry')}
-                    </Button>
-                  </div>
-                ) : (
-                  // 懒加载骨架：不写「正在加载对话」，界面先出来，数据到了再把内容填进去
-                  <div className={styles.skeleton} aria-hidden="true">
-                    <div className={styles.skeletonRow} data-width="60" />
-                    <div className={styles.skeletonRow} data-width="88" />
-                    <div className={styles.skeletonRow} data-width="74" />
-                    <div className={styles.skeletonRow} data-width="92" />
-                  </div>
-                )}
-              </div>
-            ) : session ? (
-              <SessionView
-                session={session}
-                streaming={streaming}
-              />
-            ) : (
-              <Welcome />
-            )}
-          </div>
-        </main>
-        <SearchPanel />
+              ) : !ready || (activeId !== null && !session) ? (
+                <div className={styles.loadingView}>
+                  {isMobile ? <MobileHeader /> : <TabletHeader />}
+                  {(!ready ? initError : sessionLoadError) ? (
+                    <div className={styles.loadingState} role="status" aria-live="polite">
+                      <span>{t(!ready ? 'sessionListLoadFailed' : 'sessionLoadFailed')}</span>
+                      <Button
+                        variant="outlined"
+                        size="m"
+                        onClick={() => {
+                          if (!ready) {
+                            void initChat()
+                          } else if (activeId !== null) {
+                            selectSession(activeId)
+                          }
+                        }}
+                      >
+                        {t('retry')}
+                      </Button>
+                    </div>
+                  ) : (
+                    // 懒加载骨架：不写「正在加载对话」，界面先出来，数据到了再把内容填进去
+                    <div className={styles.skeleton} aria-hidden="true">
+                      <div className={styles.skeletonRow} data-width="60" />
+                      <div className={styles.skeletonRow} data-width="88" />
+                      <div className={styles.skeletonRow} data-width="74" />
+                      <div className={styles.skeletonRow} data-width="92" />
+                    </div>
+                  )}
+                </div>
+              ) : session ? (
+                <SessionView
+                  session={session}
+                  streaming={streaming}
+                />
+              ) : (
+                <Welcome />
+              )}
+            </div>
+          </main>
+          <SearchPanel />
+        </div>
+        <SettingsPage />
       </div>
-      <SettingsDialog />
       <RemoteWorkspaceDialog />
       <UpdateDialog />
       <MigrationOverlay />

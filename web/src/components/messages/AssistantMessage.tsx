@@ -141,7 +141,7 @@ export const AssistantMessage = memo(function AssistantMessage({
       {streaming ? null : (
         <div className={styles.bottom}>
           <BranchSwitcher versions={versions} disabled={busy} onSelect={onSelectVersion} />
-          <div className={clsx(styles.actions, isLast && styles.alwaysShow)}>
+          <div className={styles.actions}>
             {copyText ? <CopyButton text={copyText} /> : null}
             <IconButton
               icon={<IconRefreshOutline16 />}

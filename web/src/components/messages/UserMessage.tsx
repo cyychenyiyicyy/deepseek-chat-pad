@@ -23,7 +23,6 @@ export const UserMessage = memo(function UserMessage({
   message,
   retryUploadId,
   isFirst,
-  isLast,
   busy,
   versions,
   onSelectVersion,
@@ -33,7 +32,6 @@ export const UserMessage = memo(function UserMessage({
   /** 回答因补传附件失败可重试时为该回答 id */
   retryUploadId: string | null
   isFirst: boolean
-  isLast: boolean
   busy: boolean
   versions: MessageVersions
   onSelectVersion: SelectMessageVersion
@@ -114,7 +112,7 @@ export const UserMessage = memo(function UserMessage({
         <>
           {message.content ? <div className={styles.bubble}>{message.content}</div> : null}
           <div className={styles.bottom}>
-            <div className={clsx(styles.actions, isLast && styles.alwaysShow)}>
+            <div className={styles.actions}>
               {message.content ? <CopyButton text={message.content} /> : null}
               <IconButton
                 icon={<IconEditOutline16 />}

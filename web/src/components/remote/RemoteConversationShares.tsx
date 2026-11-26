@@ -49,7 +49,7 @@ export default function RemoteConversationShares({ onClose }: { onClose: () => v
     }
   }
 
-  return <Modal closable onClose={onClose} title={replay?.title || t('remoteHostedManage')} className={styles.modal} mainClassName={styles.body}>
+  return <Modal expanded closable onClose={onClose} title={replay?.title || t('remoteHostedManage')} className={styles.modal} mainClassName={styles.body}>
     {replay ? <ConversationReplay backLabel={t('remoteHostedBack')} messages={replay.messages.map((message, index) => ({
       ...message, id: 'shared-message-' + index, label: t(message.role === 'user' ? 'remoteExportPrompt' : 'remoteExportReply'),
     }))} onBack={() => setReplay(undefined)} /> : <div className={styles.layout} aria-busy={busy}>

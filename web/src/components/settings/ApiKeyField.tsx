@@ -1,13 +1,13 @@
 import { useState } from 'react'
 import { IconEditOutline16 } from '../base/icons.js'
 import { useSettings } from '../../services/settings.js'
-import { useIsMobile } from '../../app/viewport.js'
+import { Button } from '../base/Button.js'
 import { IconButton } from '../base/IconButton.js'
 import { useApiKeyForm } from './useApiKeyForm.js'
 import { useTranslate } from '../../i18n/index.js'
 import styles from './Settings.module.css'
 
-/** API Key 的编辑状态：输入框与移动端底部的「确定」按钮共用 */
+/** 切换设置分组时保留尚未保存的输入。 */
 export const useApiKeyEditor = () => {
   const apiKey = useSettings((state) => state.apiKey)
   const [editing, setEditing] = useState(false)
@@ -20,7 +20,6 @@ type ApiKeyEditor = ReturnType<typeof useApiKeyEditor>
 /** API Key：保存后只显示掩码，点编辑按钮才能重新输入 */
 export const ApiKeyField = ({ editor }: { editor: ApiKeyEditor }) => {
   const t = useTranslate()
-  const isMobile = useIsMobile()
   const { apiKey, editing, setEditing, form, showInput } = editor
 
   return (
@@ -41,11 +40,11 @@ export const ApiKeyField = ({ editor }: { editor: ApiKeyEditor }) => {
           <div className={styles.apiKeyInput}>
             <input
               type="password"
+              aria-label={t('apiKeyStart')}
               placeholder={t('apiKeyPlaceholder')}
               autoComplete="off"
               spellCheck={false}
-              // 移动端打开设置时不弹键盘，点编辑后才聚焦
-              autoFocus={!isMobile || editing}
+              autoFocus={editing}
               value={form.value}
               onChange={(event) => form.setValue(event.target.value)}
               onKeyDown={(event) => {
@@ -60,41 +59,17 @@ export const ApiKeyField = ({ editor }: { editor: ApiKeyEditor }) => {
                 }
               }}
             />
-            {!isMobile && form.value.trim() ? (
-              <>
-                <span className={styles.divider} />
-                <button
-                  type="button"
-                  className={styles.confirm}
-                  disabled={form.verifying}
-                  // 保持输入框焦点
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => void form.submit()}
-                >
-                  {form.verifying ? t('apiKeyVerifying') : t('confirm')}
-                </button>
-              </>
-            ) : null}
+            <Button
+              disabled={form.verifying || !form.value.trim()}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => void form.submit()}
+            >
+              {form.verifying ? t('apiKeyVerifying') : t('confirm')}
+            </Button>
           </div>
         )}
         {showInput && form.error ? <div className={styles.error}>{form.error}</div> : null}
       </div>
     </div>
   )
-}
-
-/** 移动端：输入 API Key 时在选项下方显示整行「确定」 */
-export const ApiKeyConfirm = ({ editor: { showInput, form } }: { editor: ApiKeyEditor }) => {
-  const t = useTranslate()
-  return showInput && form.value.trim() ? (
-    <button
-      type="button"
-      className={styles.mobileConfirm}
-      disabled={form.verifying}
-      onMouseDown={(event) => event.preventDefault()}
-      onClick={() => void form.submit()}
-    >
-      {form.verifying ? t('apiKeyVerifying') : t('confirm')}
-    </button>
-  ) : null
 }

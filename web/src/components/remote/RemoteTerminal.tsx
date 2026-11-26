@@ -69,7 +69,7 @@ export default function RemoteTerminal({ scope, onClose }: { scope: TerminalScop
   }
 
   return (
-    <Modal title={t('remoteTerminal')} onClose={onClose} closable className={terminalStyles.modal} mainClassName={styles.body}>
+    <Modal expanded title={t('remoteTerminal')} onClose={onClose} closable className={terminalStyles.modal} mainClassName={styles.body}>
       <div className={styles.layout} aria-busy={busy}>
         <div className={terminalStyles.toolbar}>
           <label className={styles.field}>

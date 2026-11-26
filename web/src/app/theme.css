@@ -1,12 +1,12 @@
 :root {
   --dsw-font-family:
-    system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell,
+    Roboto, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Oxygen, Ubuntu, Cantarell,
     'Open Sans', 'Helvetica Neue', sans-serif;
   font-variant-ligatures: no-contextual;
 }
 
 body {
-  --ds-control-height-xl: 44px;
+  --ds-control-height-xl: 48px;
   --ds-control-height-l: 40px;
   --ds-control-height-m: 36px;
   --ds-control-height-s: 32px;
@@ -166,51 +166,70 @@ body[data-ds-dark-theme] {
 }
 
 body {
-  --pad-surface: #fffefa;
-  --pad-canvas: #faf9f5;
-  --pad-sidebar: #f1f2eb;
-  --pad-text: #202a24;
-  --pad-muted: #526057;
-  --pad-accent: #21634e;
-  --pad-accent-hover: #194e3e;
-  --pad-accent-text: #1d5946;
-  --pad-accent-wash: #e3eee6;
-  --pad-accent-wash-hover: #d5e6da;
-  --pad-accent-border: #a8c6b5;
-  --pad-focus: #297859;
-  --pad-divider: #dce1d7;
-  --pad-control-border: #829184;
-  --pad-shadow: 0 2px 3px rgb(32 48 39 / 4%), 0 12px 32px rgb(32 48 39 / 7%);
-  --pad-dialog-shadow: 0 24px 80px rgb(21 38 29 / 23%);
-  --pad-overlay: rgb(23 34 28 / 38%);
-  --pad-on-accent: #fffefa;
-  --pad-on-danger: #fffefa;
-  --pad-danger-fill: #ad302c;
-  --pad-danger-hover: #922824;
-  --pad-radius-control: 10px;
+  --md-surface: #fbf8ff;
+  --md-surface-container-low: #f5f2fa;
+  --md-surface-container: #f0ecf4;
+  --md-surface-container-high: #eae7ef;
+  --md-on-surface: #1b1b21;
+  --md-on-surface-variant: #46464f;
+  --md-primary: #555a92;
+  --md-on-primary: #ffffff;
+  --md-primary-container: #e0e0ff;
+  --md-on-primary-container: #3d4278;
+  --md-secondary-container: #e1e0f9;
+  --md-on-secondary-container: #444559;
+  --md-outline: #777680;
+  --md-outline-variant: #c7c5d0;
+  --md-error: #ba1a1a;
+  --md-on-error: #ffffff;
+
+  --pad-surface: var(--md-surface-container-low);
+  --pad-canvas: var(--md-surface);
+  --pad-sidebar: var(--md-surface-container-low);
+  --pad-text: var(--md-on-surface);
+  --pad-muted: var(--md-on-surface-variant);
+  --pad-accent: var(--md-primary);
+  --pad-accent-hover: #5f639d;
+  --pad-accent-text: var(--md-primary);
+  --pad-accent-wash: var(--md-secondary-container);
+  --pad-accent-wash-hover: #d3d2eb;
+  --pad-accent-border: var(--md-outline-variant);
+  --pad-focus: var(--md-primary);
+  --pad-divider: var(--md-outline-variant);
+  --pad-control-border: var(--md-outline);
+  --pad-shadow: 0 1px 2px rgb(0 0 0 / 12%);
+  --pad-dialog-shadow: 0 4px 8px 3px rgb(0 0 0 / 15%), 0 1px 3px rgb(0 0 0 / 30%);
+  --pad-overlay: rgb(0 0 0 / 40%);
+  --pad-on-accent: var(--md-on-primary);
+  --pad-on-danger: var(--md-on-error);
+  --pad-danger-fill: var(--md-error);
+  --pad-danger-hover: #c02c2c;
+  --pad-radius-control: 12px;
   --pad-radius-card: 16px;
-  --pad-radius-compose: 20px;
-  --pad-touch: 44px;
+  --pad-radius-compose: 28px;
+  --pad-touch: 48px;
 }
 
 body[data-ds-dark-theme] {
-  --pad-surface: #202922;
-  --pad-canvas: #171e19;
-  --pad-sidebar: #1c251f;
-  --pad-text: #edf3eb;
-  --pad-muted: #b2c0b6;
-  --pad-accent: #2d7259;
-  --pad-accent-hover: #28674f;
-  --pad-accent-text: #a9d9be;
-  --pad-accent-wash: #294336;
-  --pad-accent-wash-hover: #335141;
-  --pad-accent-border: #597b68;
-  --pad-focus: #a9d9be;
-  --pad-divider: #36443a;
-  --pad-control-border: #687d70;
-  --pad-shadow: 0 2px 3px rgb(0 0 0 / 15%), 0 12px 32px rgb(0 0 0 / 20%);
-  --pad-dialog-shadow: 0 24px 80px rgb(0 0 0 / 48%);
-  --pad-overlay: rgb(8 14 10 / 67%);
+  --md-surface: #131318;
+  --md-surface-container-low: #1b1b21;
+  --md-surface-container: #1f1f25;
+  --md-surface-container-high: #2a292f;
+  --md-on-surface: #e4e1e9;
+  --md-on-surface-variant: #c7c5d0;
+  --md-primary: #bec2ff;
+  --md-on-primary: #272b60;
+  --md-primary-container: #3d4278;
+  --md-on-primary-container: #e0e0ff;
+  --md-secondary-container: #444559;
+  --md-on-secondary-container: #e1e0f9;
+  --md-outline: #91909a;
+  --md-outline-variant: #46464f;
+  --md-error: #ffb4ab;
+  --md-on-error: #690005;
+  --pad-accent-hover: #b0b4f3;
+  --pad-accent-wash-hover: #505165;
+  --pad-danger-hover: #f3a69e;
 }
 
 body {
@@ -233,6 +252,8 @@ body {
   --dsw-alias-label-secondary: var(--pad-muted);
   --dsw-alias-label-tertiary: var(--pad-muted);
   --dsw-alias-label-caption: var(--pad-muted);
+  --dsw-alias-state-error-primary: var(--md-error);
+  --dsw-alias-state-error-secondary: var(--md-error);
   --dsw-specific-bubble: var(--pad-accent-wash);
   --dsw-specific-input-major: var(--pad-surface);
   --dsw-specific-login-input: var(--pad-canvas);

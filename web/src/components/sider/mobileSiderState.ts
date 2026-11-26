@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 
-/** 移动端侧边栏抽屉：顶栏菜单按钮打开，点遮罩、切换会话或开启新对话后关闭 */
+/** 单栏窗口里的会话列表由主导航开启，选中或新建会话后返回聊天。 */
 export const useMobileSider = create(() => ({ open: false }))
 
 export const openMobileSider = () => useMobileSider.setState({ open: true })

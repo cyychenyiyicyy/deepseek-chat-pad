@@ -1,7 +1,9 @@
 import clsx from 'clsx'
-import { useId, useRef, useState, type ReactNode } from 'react'
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import {
   IconBrowseOutline16,
+  IconArrowBack24,
+  IconChevronRightOutline14,
   IconDarkOutline16,
   IconDataOutline16,
   IconDownloadOutline16,
@@ -23,6 +25,7 @@ import { useChatStore } from '../../services/chat/store.js'
 import { regionCodes, getRegionName, provinces } from '../../services/location.js'
 import {
   isChineseBrowser,
+  DEFAULT_THEME_COLOR,
   setLocale,
   setLocation,
   setSearchBackend,
@@ -30,18 +33,20 @@ import {
   SCALE_MAX,
   SCALE_MIN,
   setThemePreference,
+  setThemeColor,
   setUiScale,
   useSettings,
   type ThemePreference,
 } from '../../services/settings.js'
 import { translate, useTranslate, type TranslationKey, type TranslationMessage } from '../../i18n/index.js'
 import { Button } from '../base/Button.js'
+import { IconButton } from '../base/IconButton.js'
 import { Modal } from '../base/Modal.js'
 import { Select } from '../base/Select.js'
 import { showToast } from '../base/toastState.js'
-import { ApiKeyConfirm, ApiKeyField, useApiKeyEditor } from './ApiKeyField.js'
+import { ApiKeyField, useApiKeyEditor } from './ApiKeyField.js'
 import { BackgroundPermissions } from './BackgroundPermissions.js'
-import { closeSettings, setSettingsSection, useSettingsDialog, type SettingsSection } from './settingsDialogState.js'
+import { closeSettings, setSettingsSection, showSettingsList, useSettingsDialog, type SettingsSection } from './settingsDialogState.js'
 import type { ImportProgress } from '../../services/chat/history/importArchive.js'
 import { formatFileSize } from '../../utils/format.js'
 import { ModelPanel } from '../models/ModelPanel.js'
@@ -49,11 +54,7 @@ import { RemoteSettingsPanel } from '../remote/RemoteSettingsPanel.js'
 import { UpdatePanel } from './UpdatePanel.js'
 import styles from './Settings.module.css'
 
-/**
- * 设置弹窗：分「通用设置」（主题、语言、朗读音色、位置）与「数据管理」（API Key、导入、导出、删除）。
- * 桌面端为居中弹窗、左侧导航；移动端为底部弹层、导航横排在内容上方
- */
-export const SettingsDialog = () => {
+export const SettingsPage = () => {
   const open = useSettingsDialog((state) => state.open)
   return open ? <SettingsContent /> : null
 }
@@ -71,116 +72,118 @@ const sections: { value: SettingsSection; label: TranslationKey; icon: ReactNode
 
 const SettingsContent = () => {
   const t = useTranslate()
-  const isMobile = useIsMobile()
-  // 当前分组放在 store 里（不是组件 state）：别的面板要能把用户带过来，见 settingsDialogState
+  const singlePane = useIsMobile()
   const section = useSettingsDialog((state) => state.section)
-  const setSection = setSettingsSection
-  const panelId = useId()
-  // 切换分组不丢失正在输入的 API Key 与导入状态
+  const selected = section ?? 'general'
+  const detail = sections.find((item) => item.value === selected)!
+  const heading = useRef<HTMLHeadingElement>(null)
+  useLayoutEffect(() => {
+    heading.current?.focus({ preventScroll: true })
+  }, [singlePane ? section : null])
+
   const apiKeyEditor = useApiKeyEditor()
   const historyImport = useHistoryImport()
   const historyDelete = useHistoryDelete()
   const replacingHistory = useChatStore((state) => state.importingHistory)
   const historyBusy = historyImport.busy || historyDelete.busy || replacingHistory
+  const showList = !singlePane || section === null
   return (
     <>
-      <Modal
-        title={t('settings')}
-        closable
-        className={styles.dialog}
-        mainClassName={styles.dialogMain}
-        onClose={() => {
-          if (!historyDelete.busy) {
-            closeSettings()
-          }
-        }}
-      >
-        <div
-          role="tablist"
-          aria-label={t('settings')}
-          aria-orientation={isMobile ? 'horizontal' : 'vertical'}
-          className={styles.navigation}
-          onKeyDown={(event) => {
-            const forward = isMobile ? 'ArrowRight' : 'ArrowDown'
-            const backward = isMobile ? 'ArrowLeft' : 'ArrowUp'
-            const index = sections.findIndex((item) => item.value === section)
-            let next: number
-            switch (event.key) {
-              case forward: next = (index + 1) % sections.length; break
-              case backward: next = (index + sections.length - 1) % sections.length; break
-              case 'Home': next = 0; break
-              case 'End': next = sections.length - 1; break
-              default: return
-            }
-            event.preventDefault()
-            setSection(sections[next].value)
-            event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
-          }}
-        >
-          {sections.map((item) => (
-            <button
-              key={item.value}
-              type="button"
-              role="tab"
-              id={`${panelId}-${item.value}`}
-              aria-controls={panelId}
-              aria-selected={section === item.value}
-              tabIndex={section === item.value ? 0 : -1}
-              className={clsx(styles.navItem, section === item.value && styles.navItemActive)}
-              onClick={() => setSection(item.value)}
-            >
-              {item.icon}
-              {t(item.label)}
-            </button>
-          ))}
+      <main className={styles.page} aria-labelledby="settings-title" data-settings-page>
+        <header className={styles.appBar}>
+          <IconButton
+            size="xl"
+            tone="primary"
+            icon={<IconArrowBack24 />}
+            aria-label={t(singlePane && section ? 'settingsBackToList' : 'settingsBackToChat')}
+            onClick={singlePane && section ? showSettingsList : closeSettings}
+          />
+          <h1 id="settings-title" tabIndex={-1} ref={heading}>
+            {t(singlePane && section ? detail.label : 'settings')}
+          </h1>
+        </header>
+        <div className={clsx(styles.panes, singlePane && styles.singlePane)}>
+          {showList ? (
+            <nav aria-label={t('settings')} className={styles.navigation}>
+              {sections.map((item) => (
+                <button
+                  key={item.value}
+                  type="button"
+                  aria-current={!singlePane && selected === item.value ? 'page' : undefined}
+                  className={styles.navItem}
+                  onClick={() => setSettingsSection(item.value)}
+                >
+                  <span className={styles.navIcon} aria-hidden="true">{item.icon}</span>
+                  <span>{t(item.label)}</span>
+                  <span className={styles.navChevron} aria-hidden="true"><IconChevronRightOutline14 /></span>
+                </button>
+              ))}
+            </nav>
+          ) : null}
+          {!singlePane || section ? (
+            <div key={selected} className={styles.content} data-settings-content>
+              {!singlePane ? <h2 className={styles.paneTitle}>{t(detail.label)}</h2> : null}
+              {selected === 'general' ? (
+                <>
+                  <SettingsGroup label={t('settingsAppearanceGroup')}>
+                    <ThemeSetting />
+                    <ThemeColorSetting />
+                    <ScaleSetting />
+                    <LocaleSetting />
+                  </SettingsGroup>
+                  <SettingsGroup label={t('settingsSearchGroup')}>
+                    <SearchSetting />
+                    <LocationSetting />
+                  </SettingsGroup>
+                  <SettingsGroup label={t('settingsAppGroup')}>
+                    <UpdatePanel />
+                    <BackgroundPermissions />
+                    <VersionSetting />
+                  </SettingsGroup>
+                </>
+              ) : selected === 'models' ? (
+                <ModelPanel onOpenSection={setSettingsSection} />
+              ) : selected === 'remote' ? (
+                <RemoteSettingsPanel />
+              ) : (
+                <SettingsGroup label={t('settingDialogAsideDataOptionLabel')} hideLabel>
+                  <StorageSetting />
+                  <ApiKeyField editor={apiKeyEditor} />
+                  <ImportHistory historyImport={historyImport} disabled={historyBusy} />
+                  <ExportHistory disabled={historyBusy} />
+                  <SettingCell
+                    label={t('deleteAllSessions')}
+                    status={null}
+                    action={
+                      <Button
+                        variant="dangerOutlined"
+                        size="m"
+                        className={styles.cellButton}
+                        disabled={historyBusy}
+                        onClick={historyDelete.open}
+                      >
+                        {t('delete')}
+                      </Button>
+                    }
+                  />
+                </SettingsGroup>
+              )}
+            </div>
+          ) : null}
         </div>
-        <div role="tabpanel" id={panelId} aria-labelledby={`${panelId}-${section}`} className={styles.content}>
-          {section === 'general' ? (
-            <>
-              <ThemeSetting />
-              <ScaleSetting />
-              <LocaleSetting />
-              <SearchSetting />
-              <LocationSetting />
-              <UpdatePanel />
-              <BackgroundPermissions />
-              <VersionSetting />
-            </>
-          ) : section === 'models' ? (
-            <ModelPanel onOpenSection={(next) => setSection(next)} />
-          ) : section === 'remote' ? (
-            <RemoteSettingsPanel />
-          ) : (
-            <>
-              <StorageSetting />
-              <ApiKeyField editor={apiKeyEditor} />
-              <ImportHistory historyImport={historyImport} disabled={historyBusy} />
-              <ExportHistory disabled={historyBusy} />
-              <SettingCell
-                label={t('deleteAllSessions')}
-                status={null}
-                action={
-                  <Button
-                    variant="dangerOutlined"
-                    size="m"
-                    className={styles.cellButton}
-                    disabled={historyBusy}
-                    onClick={historyDelete.open}
-                  >
-                    {t('delete')}
-                  </Button>
-                }
-              />
-              {isMobile ? <ApiKeyConfirm editor={apiKeyEditor} /> : null}
-            </>
-          )}
-        </div>
-      </Modal>
+      </main>
       {historyImport.file ? <ImportConfirm historyImport={historyImport} /> : null}
       {historyDelete.opened ? <DeleteAllConfirm historyDelete={historyDelete} /> : null}
     </>
   )
 }
+
+const SettingsGroup = ({ label, hideLabel, children }: { label: string; hideLabel?: boolean; children: ReactNode }) => (
+  <section className={styles.group} aria-label={label}>
+    {hideLabel ? null : <div className={styles.groupLabel}>{label}</div>}
+    <div className={styles.groupItems}>{children}</div>
+  </section>
+)
 
 /** 删除确认保留在设置之上；失败可重试，成功只关闭确认弹窗。 */
 const DeleteAllConfirm = ({
@@ -192,7 +195,6 @@ const DeleteAllConfirm = ({
   return (
     <Modal
       title={t('deleteAllSessionsModalTitle')}
-      className={styles.deleteConfirm}
       onClose={historyDelete.cancel}
       footer={
         <div className={styles.deleteActions} aria-busy={historyDelete.busy}>
@@ -536,6 +538,46 @@ const ThemeSetting = () => {
           </button>
         ))}
       </div>
+    </div>
+  )
+}
+
+const themeColors = [
+  { value: DEFAULT_THEME_COLOR, label: 'settingsColorIndigo' },
+  { value: '#1663ad', label: 'settingsColorBlue' },
+  { value: '#a94264', label: 'settingsColorRose' },
+  { value: '#925000', label: 'settingsColorAmber' },
+] as const
+
+const ThemeColorSetting = () => {
+  const t = useTranslate()
+  const color = useSettings((state) => state.themeColor)
+  return (
+    <div className={styles.cell}>
+      <div className={styles.label}>{t('settingsThemeColor')}</div>
+      <div className={styles.colorOptions} role="group" aria-label={t('settingsThemeColor')}>
+        {themeColors.map(({ value, label }) => (
+          <button
+            key={value}
+            type="button"
+            className={styles.colorOption}
+            aria-pressed={color === value}
+            onClick={() => setThemeColor(value)}
+          >
+            <span className={styles.colorSwatch} style={{ backgroundColor: value }} aria-hidden="true" />
+            {t(label)}
+          </button>
+        ))}
+      </div>
+      <label className={styles.customColor}>
+        <span>{t('settingsCustomColor')}</span>
+        <input
+          type="color"
+          value={color}
+          onChange={(event) => setThemeColor(event.currentTarget.value)}
+        />
+        <span className={styles.colorValue} aria-hidden="true">{color.toUpperCase()}</span>
+      </label>
     </div>
   )
 }

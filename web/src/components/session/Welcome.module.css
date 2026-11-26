@@ -3,7 +3,7 @@
   inset: 0;
   display: flex;
   flex-direction: column;
-  background: radial-gradient(ellipse at 50% 36%, var(--pad-accent-wash), transparent 70%);
+  background: var(--md-surface);
 }
 
 .viewport {
@@ -17,7 +17,7 @@
 .welcome {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   box-sizing: border-box;
   width: min(704px, calc(100% - 2 * var(--chat-gutter)));
   margin: auto;
@@ -29,33 +29,16 @@
   flex-direction: column;
   align-items: center;
   text-align: center;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.emblem {
-  display: grid;
-  place-items: center;
-  width: 58px;
-  height: 58px;
-  margin: 6px 0 14px;
-  border-radius: 18px;
-  background: var(--pad-accent);
-  box-shadow: 0 0 0 6px var(--pad-accent-wash), 0 0 0 7px var(--pad-accent-border);
-  color: var(--pad-on-accent);
-}
-
-.emblem svg {
-  width: 28px;
-  height: 28px;
+  gap: 6px;
+  margin-bottom: 4px;
 }
 
 .greeting {
   margin: 0;
-  font-size: clamp(26px, 4.8vw, 46px);
-  line-height: 1.12;
-  letter-spacing: -0.04em;
-  font-weight: 650;
+  font-size: clamp(28px, 5vw, 45px);
+  line-height: 1.18;
+  letter-spacing: -0.02em;
+  font-weight: 400;
 }
 
 :lang(zh) .greeting {
@@ -73,19 +56,19 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 38px;
+  min-height: var(--pad-touch);
   padding: 0 12px;
   border: 1px solid var(--pad-accent-border);
-  border-radius: var(--pad-radius-control);
-  background: var(--pad-surface);
-  color: var(--pad-accent-text);
+  border-radius: 100px;
+  background: var(--md-secondary-container);
+  color: var(--md-on-secondary-container);
   font: inherit;
   font-weight: 600;
   cursor: pointer;
 }
 
 .setup:hover {
-  background: var(--pad-accent-wash);
+  background: var(--pad-accent-wash-hover);
 }
 
 .starters {
@@ -98,12 +81,12 @@
   display: flex;
   align-items: center;
   min-width: 0;
-  min-height: 48px;
+  min-height: 56px;
   gap: 8px;
   padding: 7px 10px;
   border: 1px solid var(--pad-divider);
   border-radius: var(--pad-radius-control);
-  background: var(--pad-surface);
+  background: transparent;
   color: var(--pad-text);
   font: inherit;
   font-weight: 550;
@@ -152,18 +135,6 @@
   }
 }
 
-@media (max-width: 767px), (max-height: 500px) {
-  .welcome {
-    min-height: 100%;
-    margin-block: 0;
-    margin-inline: auto;
-  }
-
-  .intro {
-    margin-block: auto;
-  }
-}
-
 @media (max-height: 460px) {
   .welcome {
     padding-block: 12px;
@@ -172,8 +143,9 @@
   .intro {
     margin-bottom: 0;
   }
+}
 
-  .emblem {
-    display: none;
-  }
+:global(html[data-keyboard-open]) .welcome {
+  margin-block: 0 auto;
+  padding-block: 12px;
 }

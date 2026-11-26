@@ -74,7 +74,7 @@ export default function HostPlugins({ target, onClose }: Props) {
   }
 
   return (
-    <Modal title={t('remoteHostPlugins')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
+    <Modal expanded title={t('remoteHostPlugins')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
       <div className={styles.layout} aria-busy={busy}>
         <div className={styles.actions}>
           {!marketOpen && <Button variant="outlined" size="m" disabled={busy} onClick={() => {

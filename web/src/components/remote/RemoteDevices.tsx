@@ -56,7 +56,7 @@ export default function RemoteDevices({ target, onClose }: { target: RemoteCallT
   }
 
   return (
-    <Modal title={t('remoteManageDevices')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
+    <Modal expanded title={t('remoteManageDevices')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
       <div className={styles.layout} aria-busy={busy}>
         <label className={styles.field}>
           {t('remoteDeviceHost')}

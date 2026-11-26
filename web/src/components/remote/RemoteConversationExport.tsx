@@ -177,7 +177,7 @@ export default function RemoteConversationExport({ scope, title, items, capabili
   }
 
   const content = '# ' + title.replaceAll(/[\r\n]+/gu, ' ') + '\n\n' + text + '\n'
-  return <Modal title={t(replay ? 'remoteReplay' : sharing ? 'remoteHostedShare' : 'remoteExportConversation')} closable onClose={onClose} className={styles.modal} mainClassName={styles.body}>
+  return <Modal expanded title={t(replay ? 'remoteReplay' : sharing ? 'remoteHostedShare' : 'remoteExportConversation')} closable onClose={onClose} className={styles.modal} mainClassName={styles.body}>
     {replay !== null ? <ConversationReplay messages={replay} onBack={() => setReplay(null)} /> : sharing ? (
       <div className={styles.layout} aria-busy={busy}>
         <div className={styles.actions}>

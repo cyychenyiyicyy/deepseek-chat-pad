@@ -2,7 +2,7 @@ import clsx from 'clsx'
 import { Fragment, lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useIsMobile } from '../../app/viewport.js'
 import { useTranslate } from '../../i18n/index.js'
-import { setSiderCollapsed, useSettings } from '../../services/settings.js'
+import { useSettings } from '../../services/settings.js'
 import { stripDsml } from '../../services/api/dsml.js'
 import type {
   ApprovalActivity,
@@ -49,7 +49,6 @@ import {
   IconDataOutline16,
   IconLinkOutline16,
   IconCloseOutline16,
-  IconMenuOutline20,
   IconNewChatOutline20,
 } from '../base/icons.js'
 import { Markdown } from '../markdown/Markdown.js'
@@ -57,7 +56,7 @@ import { CopyButton } from '../messages/CopyButton.js'
 import { ReadAloudButton } from '../messages/ReadAloudButton.js'
 import { stopReadAloud, useReadAloud } from '../../services/speech/readAloud.js'
 import { openRemoteWorkspaceDialog } from './RemoteWorkspaceDialog.js'
-import { openMobileSider, useMobileSider } from '../sider/mobileSiderState.js'
+import { openMobileSider } from '../sider/mobileSiderState.js'
 import { ApprovalCard } from './ApprovalCard.js'
 // 产物卡：官方 `present` 交付的文件，长在「这一轮最后一行」的下方（S5）。
 // 上一轮（R12）那套从写类工具参数里猜产物的组件（`./artifacts/**`）已按原生机制删除。
@@ -153,7 +152,6 @@ const fireAndForget = (action: () => unknown) => {
 export const RemoteChatView = () => {
   const t = useTranslate()
   const isMobile = useIsMobile()
-  const drawerOpen = useMobileSider((state) => state.open)
   const phase = useRemoteStore((state) => state.phase)
   const transport = useRemoteStore((state) => state.transport)
   const connectedHost = useRemoteStore((state) =>
@@ -398,7 +396,6 @@ export const RemoteChatView = () => {
    * 「‹ 上级对话」回去的路 —— dsh-Go `header_agents.dart:92` 的做法。rows 是快照，
    * 列表刷新时会更新；查不到就当普通会话，不画。
    */
-  const siderCollapsed = useSettings((state) => state.siderCollapsed)
   const sessionRows = useNewSessionStore((state) => state.rows)
   const subagentParentId = activeSessionId === null
     ? null
@@ -1125,31 +1122,14 @@ export const RemoteChatView = () => {
         左侧标题 = 当前会话，右侧 = 数据面通道徽标。模式下不再额外套一层页面。
       */}
       <div className={styles.header}>
-        {isMobile ? (
-          <IconButton
-            size="xl"
-            tone="primary"
-            icon={<IconMenuOutline20 />}
-            aria-label={t('remoteListButton')}
-            aria-expanded={drawerOpen}
-            aria-controls="mobile-session-drawer"
-            onClick={openMobileSider}
-          />
-        ) : siderCollapsed ? (
-          /*
-           * [R16] 平板/桌面：与本机模式 `TabletHeader` 完全同一枚开关（图标/尺寸/文案），
-           * 远程模式原来没有它 —— 侧栏收起后再也没有展开入口。
-           */
-          <IconButton
-            size="xl"
-            tone="primary"
-            icon={<IconMenuOutline20 />}
-            tooltip={t('expandSiderbarButton')}
-            aria-expanded={false}
-            aria-controls="desktop-session-sidebar"
-            onClick={() => setSiderCollapsed(false)}
-          />
-        ) : null}
+        <IconButton
+          size="xl"
+          tone="primary"
+          icon={<IconLinkOutline16 />}
+          tooltip={t('hostSwitchLabel')}
+          aria-haspopup="dialog"
+          onClick={() => openRemoteWorkspaceDialog('host')}
+        />
         <div className={styles.heading}>
           <div className={styles.title} title={activeSessionId === null ? undefined : activeTitle}>
             {activeSessionId === null ? t('remoteModeRemote') : activeTitle}
@@ -1216,13 +1196,14 @@ export const RemoteChatView = () => {
               { label: t('remoteSkills'), open: () => openSessionTool('skills') },
               { label: t('remoteReferences'), open: () => openSessionTool('references') },
               { label: t('remoteJobs'), open: () => openSessionTool('jobs') },
+              { label: t('remoteWorkspaceTools'), open: () => openRemoteWorkspaceDialog('tools') },
               ...(canReadAloud && window.isSecureContext && typeof navigator.mediaDevices?.getUserMedia === 'function'
                 ? [{ label: t('remoteVoiceCall'), open: () => openSessionTool('voice') }] : []),
               ...(allowsTerminal ? [{ label: t('remoteTerminal'), open: () => openSessionTool('terminal') }] : []),
             ]}
           />
         ) : null}
-        {ready && canCreateSession && (isMobile || siderCollapsed) ? (
+        {ready && canCreateSession && activeSessionId !== null ? (
           <IconButton
             size="xl"
             tone="primary"

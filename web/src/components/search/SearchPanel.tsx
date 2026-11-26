@@ -20,6 +20,7 @@ export const SearchPanel = () => {
           {t('searchResult')}
         </div>
         <IconButton
+          size="xl"
           icon={<IconCloseOutline16 />}
           aria-label={t('close')}
           onClick={closeSearchPanel}

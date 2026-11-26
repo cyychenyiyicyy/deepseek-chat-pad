@@ -144,19 +144,6 @@
 
 .moreButton {
   flex-shrink: 0;
-  opacity: 0;
-}
-
-.row:hover .moreButton,
-.row:focus-within .moreButton {
-  opacity: 1;
-}
-
-/* 触摸设备没有 hover：常驻显示，否则根本发现不了 */
-@media (pointer: coarse) {
-  .moreButton {
-    opacity: 1;
-  }
 }
 
 /* ── 下拉菜单（长按 / 右键 / ⋯） ── */

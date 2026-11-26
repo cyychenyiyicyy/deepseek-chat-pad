@@ -199,7 +199,7 @@ export default function RemoteSchedules({ target, onClose }: { target: RemoteCal
   }
 
   return (
-    <Modal title={t('remoteSchedules')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
+    <Modal expanded title={t('remoteSchedules')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
       <div className={styles.layout} aria-busy={busy}>
         {!task && editor === null && <div className={styles.actions}>
           <Button variant="primary" size="m" disabled={busy || rows === null || pendingCreate.current !== null}

@@ -84,7 +84,7 @@ const loginMethodLabel = (method: LoginMethod | undefined): TranslationKey => {
   return 'remoteLoginMethodPassword'
 }
 
-export const RemoteSettingsPanel = ({ connectionOnly = false }: { connectionOnly?: boolean }) => {
+export const RemoteSettingsPanel = () => {
   const [showPairing, setShowPairing] = useState(false)
   const [showSsh, setShowSsh] = useState(false)
   const [sshAvailable, setSshAvailable] = useState(false)
@@ -337,7 +337,7 @@ export const RemoteSettingsPanel = ({ connectionOnly = false }: { connectionOnly
       ) : null}
 
       <div className={styles.intro}>
-        {!connectionOnly ? <div className={styles.introTitle}>{t('remoteSettingsTitle')}</div> : null}
+        <div className={styles.introTitle}>{t('remoteSettingsTitle')}</div>
         <div className={styles.description}>{t('remoteSettingsDesc')}</div>
       </div>
       {availability === 'ready' && (sshAvailable || !connected) ? (
@@ -619,7 +619,7 @@ export const RemoteSettingsPanel = ({ connectionOnly = false }: { connectionOnly
         </div>
       ) : null}
 
-      {!connectionOnly && availability === 'ready' && transport !== 'ssh' && typeof RTCPeerConnection === 'function' && (
+      {availability === 'ready' && transport !== 'ssh' && typeof RTCPeerConnection === 'function' && (
         <Field label={t('remoteTransportPreference')} description={t('remoteTransportPreferenceHint')}>
           <select className={styles.input} aria-label={t('remoteTransportPreference')} disabled={busy}
             value={adaptiveTransport ? 'automatic' : 'relay'} onChange={(event) => {
@@ -631,7 +631,7 @@ export const RemoteSettingsPanel = ({ connectionOnly = false }: { connectionOnly
           </select>
         </Field>
       )}
-      {!connectionOnly && availability === 'ready' && transport !== 'ssh' && (
+      {availability === 'ready' && transport !== 'ssh' && (
         <Field label={t('remoteCompactHistory')} description={t('remoteCompactHistoryHint')}>
           <input type="checkbox" aria-label={t('remoteCompactHistory')} checked={compactHistory} disabled={busy} onChange={(event) => {
             const enabled = event.currentTarget.checked
@@ -640,7 +640,7 @@ export const RemoteSettingsPanel = ({ connectionOnly = false }: { connectionOnly
         </Field>
       )}
       {connected && <ConnectionDetails key={JSON.stringify([lastSession?.serverUrl, lastSession?.hostDeviceId])} />}
-      {!connectionOnly && <RemoteWorkspaceTools />}
+      <RemoteWorkspaceTools />
       {showPairing && <Suspense fallback={null}><PairDevice onClose={() => setShowPairing(false)} /></Suspense>}
       {showSsh && <Suspense fallback={null}><SshHostDialog onClose={() => setShowSsh(false)} /></Suspense>}
 
@@ -649,7 +649,7 @@ export const RemoteSettingsPanel = ({ connectionOnly = false }: { connectionOnly
        * 不只服务远程连接 —— 放在这里等于暗示「不连远程就不需要」。
        * 只在原生真的支持 `/__ds_keepalive/*` 时出现（浏览器 / 旧 APK 那边整节也不显示，
        * 指过去只会落空）。 */}
-      {!connectionOnly && keepAlive !== null && keepAlive.supported ? (
+      {keepAlive !== null && keepAlive.supported ? (
         <>
           <div className={styles.actions}>
             <Button variant="outlined" size="s" onClick={() => openSettings('general')}>

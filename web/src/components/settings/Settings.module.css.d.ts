@@ -1,9 +1,21 @@
 declare const styles: {
-  readonly "dialog": string;
-  readonly "dialogMain": string;
+  readonly "page": string;
+  readonly "appBar": string;
+  readonly "panes": string;
+  readonly "singlePane": string;
   readonly "navigation": string;
   readonly "navItem": string;
-  readonly "navItemActive": string;
+  readonly "navIcon": string;
+  readonly "navChevron": string;
+  readonly "paneTitle": string;
+  readonly "group": string;
+  readonly "groupLabel": string;
+  readonly "groupItems": string;
+  readonly "colorOptions": string;
+  readonly "colorOption": string;
+  readonly "colorSwatch": string;
+  readonly "customColor": string;
+  readonly "colorValue": string;
   readonly "content": string;
   readonly "cell": string;
   readonly "row": string;
@@ -25,13 +37,9 @@ declare const styles: {
   readonly "apiKeySaved": string;
   readonly "apiKeyInput": string;
   readonly "apiKeyMask": string;
-  readonly "divider": string;
-  readonly "confirm": string;
   readonly "cellButton": string;
-  readonly "mobileConfirm": string;
   readonly "importConfirm": string;
   readonly "importConfirmText": string;
-  readonly "deleteConfirm": string;
   readonly "deleteActions": string;
 };
 export = styles;

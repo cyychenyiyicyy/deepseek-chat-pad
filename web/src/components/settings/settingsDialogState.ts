@@ -1,29 +1,68 @@
 import { create } from 'zustand'
 import { useSettings } from '../../services/settings.js'
 
-/** 设置弹窗的分组：通用设置 / 模型服务 / 远程 DSH / 数据管理 */
 export type SettingsSection = 'general' | 'models' | 'remote' | 'data'
 
-/**
- * 设置弹窗：侧边栏底部、没有 API Key 时的操作与 401 提示都可以打开；section 为当前分组。
- *
- * `section` 故意放在 store 里（而不是组件内的 useState）：别的面板要能**把用户带到另一个分组**
- * —— 例如「远程 DSH」面板只留一句「后台与权限在通用设置里」，点一下就得真的切过去
- * （挂载时读一次的写法在这里会失效：弹窗已经开着，重新 open 不会重建组件）。
- */
-export const useSettingsDialog = create(() => ({
-  open: false,
-  section: 'general' as SettingsSection,
-}))
+const settingsHash = '#settings'
+const readLocation = () => {
+  const { hash } = window.location
+  const value = hash.startsWith(settingsHash + '/') ? hash.slice(settingsHash.length + 1) : ''
+  const section = value === 'general' || value === 'models' || value === 'remote' || value === 'data'
+    ? value : null
+  return { open: hash === settingsHash || section !== null, section }
+}
 
-export const openSettings = (section: SettingsSection) =>
-  useSettingsDialog.setState({ open: true, section })
+export const useSettingsDialog = create(readLocation)
 
-/** 切换分组（弹窗内的导航与「跳到别处」的入口共用同一条写入路径） */
-export const setSettingsSection = (section: SettingsSection) =>
-  useSettingsDialog.setState({ section })
+let dismissing = false
+window.addEventListener('popstate', () => {
+  dismissing = false
+  useSettingsDialog.setState(readLocation())
+})
 
-export const closeSettings = () => useSettingsDialog.setState({ open: false })
+export const openSettings = (section?: SettingsSection) => {
+  if (dismissing) return
+  if (!useSettingsDialog.getState().open) {
+    window.history.pushState({ settingsDepth: 1 }, '', settingsHash)
+    useSettingsDialog.setState(readLocation())
+  }
+  if (section) setSettingsSection(section)
+}
+
+export const setSettingsSection = (section: SettingsSection) => {
+  const current = useSettingsDialog.getState()
+  if (dismissing || !current.open || current.section === section) return
+  const url = settingsHash + '/' + section
+  const depth = window.history.state?.settingsDepth ?? 0
+  if (depth === 1) window.history.pushState({ settingsDepth: 2 }, '', url)
+  else window.history.replaceState(window.history.state, '', url)
+  useSettingsDialog.setState(readLocation())
+}
+
+export const showSettingsList = () => {
+  if (dismissing || !useSettingsDialog.getState().section) return
+  if (window.history.state?.settingsDepth === 2) {
+    dismissing = true
+    window.history.back()
+  } else {
+    window.history.replaceState(window.history.state, '', settingsHash)
+    useSettingsDialog.setState(readLocation())
+  }
+}
+
+export const closeSettings = () => {
+  if (dismissing || !useSettingsDialog.getState().open) return
+  const depth = window.history.state?.settingsDepth ?? 0
+  if (depth > 0) {
+    dismissing = true
+    window.history.go(-depth)
+  } else {
+    const url = new URL(window.location.href)
+    url.hash = ''
+    window.history.replaceState(window.history.state, '', url)
+    useSettingsDialog.setState(readLocation())
+  }
+}
 
 /** 没有 API Key 时打开设置并选中 API Key 所在的「数据管理」，返回是否已有 Key */
 export const ensureApiKey = () => {

@@ -12,19 +12,19 @@
 .intro {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 4px 0 8px;
+  gap: 4px;
+  padding: 12px 0;
 }
 
 .introTitle {
-  font-size: 14px;
-  line-height: 20px;
+  font-size: 16px;
+  line-height: 24px;
   font-weight: 500;
 }
 
 .description {
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 14px;
+  line-height: 20px;
   color: var(--dsw-alias-label-tertiary);
 }
 

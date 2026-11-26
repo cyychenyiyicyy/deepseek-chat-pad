@@ -128,7 +128,7 @@ export default function RemoteHostSettings({ target, mode, onClose }: {
   })
 
   return (
-    <Modal title={t(mode === 'configuration' ? 'remoteHostConfiguration' : 'remoteHostModels')}
+    <Modal expanded title={t(mode === 'configuration' ? 'remoteHostConfiguration' : 'remoteHostModels')}
       onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
       <div className={styles.layout} aria-busy={busy}>
         {error && <div role="alert">{error}</div>}

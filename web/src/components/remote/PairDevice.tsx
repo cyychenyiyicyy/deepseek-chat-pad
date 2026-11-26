@@ -123,7 +123,7 @@ export default function PairDevice({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <Modal title={t('remotePairDevice')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
+    <Modal expanded title={t('remotePairDevice')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
       <div className={styles.layout} aria-busy={busy}>
         {scan === null ? (
           <form className={styles.layout} onSubmit={(event) => { event.preventDefault(); parse(input) }}>

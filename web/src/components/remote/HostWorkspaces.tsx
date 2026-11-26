@@ -57,7 +57,7 @@ export default function HostWorkspaces({ target, onClose }: { target: RemoteCall
   }
 
   return (
-    <Modal title={t('remoteManageWorkspaces')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
+    <Modal expanded title={t('remoteManageWorkspaces')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
       <div className={styles.layout} aria-busy={busy}>
         {workspaces.length === 0 ? <p>{t('remoteHostWorkspacesEmpty')}</p> : (
           <label className={styles.field}>

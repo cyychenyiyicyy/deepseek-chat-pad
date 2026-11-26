@@ -1,14 +1,87 @@
 .frame {
-  --sider-w: clamp(236px, 23vw, 292px);
+  --sider-w: clamp(224px, 24vw, 304px);
   --chat-gutter: clamp(12px, 2.7vw, 32px);
   --chat-width: 760px;
 
   position: fixed;
   inset: var(--app-viewport-top, 0px) 0 0;
   height: var(--app-viewport-height, 100dvh);
-  display: flex;
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   overflow: hidden;
   background-color: var(--dsw-alias-bg-base);
+}
+
+.navigation {
+  grid-area: 1 / 1;
+  z-index: 810;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: calc(var(--ds-top-offset) + 12px) 8px 8px;
+  background: var(--md-surface-container);
+  scrollbar-width: none;
+}
+
+.navigation button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  min-height: 56px;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--md-on-surface-variant);
+  font: 500 12px/16px var(--dsw-font-family);
+  cursor: pointer;
+}
+
+.navigation button:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.navigation button[aria-current="page"] {
+  color: var(--md-on-surface);
+  font-weight: 700;
+}
+
+.navIcon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 32px;
+  border-radius: 100px;
+}
+
+.navIcon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.navigation button[aria-current="page"] .navIcon {
+  color: var(--md-on-secondary-container);
+  background: var(--md-secondary-container);
+}
+
+.chatSurface {
+  position: relative;
+  grid-area: 1 / 2;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chatSurface[hidden] {
+  display: none;
 }
 
 .siderSlot {
@@ -17,7 +90,6 @@
   box-sizing: border-box;
   width: var(--sider-w);
   overflow: hidden;
-  will-change: width;
   transition: width 0.3s cubic-bezier(0.32, 0.72, 0, 1);
 }
 
@@ -28,7 +100,6 @@
 .siderInner {
   width: var(--sider-w);
   height: 100%;
-  will-change: transform;
   transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1), visibility 0s;
 }
 
@@ -96,9 +167,36 @@
   text-align: center;
 }
 
-@media (max-width: 767px), (max-height: 500px) {
+@media (width < 840px), (height < 480px) {
   .frame {
     --chat-gutter: clamp(12px, 4vw, 24px);
+  }
+}
+
+@media (width < 600px) and (height >= 480px) {
+  .frame {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .navigation {
+    grid-area: 2 / 1;
+    flex-direction: row;
+    justify-content: space-evenly;
+    overflow: visible;
+    padding: 6px max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+  }
+
+  .navigation button {
+    flex: 1 1 0;
+  }
+
+  .chatSurface {
+    grid-area: 1 / 1;
+  }
+
+  :global(html[data-keyboard-open]) .navigation {
+    display: none;
   }
 }
 

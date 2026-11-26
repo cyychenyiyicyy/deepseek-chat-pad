@@ -1,19 +1,27 @@
 import { create } from 'zustand'
 import { useTranslate } from '../../i18n/index.js'
 import { Modal } from '../base/Modal.js'
+import { openSettings } from '../settings/settingsDialogState.js'
 import { HostPicker } from './HostSwitcher.js'
 import { enterRemoteMode } from './RemoteModeSwitch.js'
-import { RemoteSettingsPanel } from './RemoteSettingsPanel.js'
 import { RemoteWorkspaceTools } from './RemoteWorkspaceTools.js'
 import styles from './RemoteWorkspaceTools.module.css'
 
-type WorkspaceDialog = 'host' | 'connection' | 'tools'
+type WorkspaceDialog = 'host' | 'tools'
 
 const useWorkspaceDialog = create<{ dialog: WorkspaceDialog | null }>(() => ({ dialog: null }))
 
-export const openRemoteWorkspaceDialog = (dialog: WorkspaceDialog) => useWorkspaceDialog.setState({ dialog })
-
 const close = () => useWorkspaceDialog.setState({ dialog: null })
+
+const openConnection = () => {
+  close()
+  openSettings('remote')
+}
+
+export const openRemoteWorkspaceDialog = (dialog: WorkspaceDialog | 'connection') => {
+  if (dialog === 'connection') openConnection()
+  else useWorkspaceDialog.setState({ dialog })
+}
 
 export const RemoteWorkspaceDialog = () => {
   const t = useTranslate()
@@ -22,7 +30,7 @@ export const RemoteWorkspaceDialog = () => {
 
   return (
     <Modal
-      title={t(dialog === 'host' ? 'hostSwitchLabel' : dialog === 'connection' ? 'remoteConnectionTitle' : 'remoteWorkspaceTools')}
+      title={t(dialog === 'host' ? 'hostSwitchLabel' : 'remoteWorkspaceTools')}
       className={dialog === 'host' ? styles.hostDialog : styles.dialog}
       closable
       onClose={close}
@@ -30,11 +38,9 @@ export const RemoteWorkspaceDialog = () => {
       {dialog === 'host'
         ? <HostPicker onClose={close} onManage={() => {
             enterRemoteMode()
-            openRemoteWorkspaceDialog('connection')
+            openConnection()
           }} />
-        : dialog === 'connection'
-        ? <RemoteSettingsPanel connectionOnly />
-        : <RemoteWorkspaceTools onOpenConnection={() => openRemoteWorkspaceDialog('connection')} />}
+        : <RemoteWorkspaceTools onOpenConnection={openConnection} />}
     </Modal>
   )
 }

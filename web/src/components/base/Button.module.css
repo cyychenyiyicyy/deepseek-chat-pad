@@ -5,7 +5,7 @@
   box-sizing: border-box;
   min-width: 72px;
   padding: 0 14px;
-  border-radius: var(--pad-radius-control);
+  border-radius: 100px;
   border: 1px solid transparent;
   font: inherit;
   font-size: 14px;
@@ -35,7 +35,7 @@
 }
 
 .m {
-  height: var(--ds-control-height-m);
+  min-height: 40px;
   gap: 4px;
 
   svg {
@@ -45,7 +45,7 @@
 }
 
 .s {
-  height: var(--ds-control-height-s);
+  min-height: var(--ds-control-height-s);
   min-width: 58px;
 }
 
@@ -63,13 +63,18 @@
 }
 
 .outlined {
-  color: var(--dsw-alias-label-primary);
+  color: var(--md-primary);
   background-color: transparent;
-  border-color: var(--dsw-alias-border-l2);
-  font-weight: 400;
+  border-color: var(--md-outline);
 
   &:hover:not(:disabled) {
     background-color: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+@media (pointer: coarse) {
+  .m, .s {
+    min-height: var(--pad-touch);
   }
 }
 

@@ -148,7 +148,7 @@ export default function SessionBackups({ onClose }: { onClose: () => void }) {
 
   const pending = data.restores.filter((record) => record.result === undefined)
   return (
-    <Modal title={t('remoteSessionBackups')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
+    <Modal expanded title={t('remoteSessionBackups')} onClose={onClose} closable className={styles.modal} mainClassName={styles.body}>
       <div className={styles.layout}>
         <p>{t('remoteBackupDescription')}</p>
         <label className={styles.field}>

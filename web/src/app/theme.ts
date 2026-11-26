@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react'
 import { useSettings, type ThemePreference } from '../services/settings.js'
+import { applyMaterialPalette } from './materialPalette.js'
 
 export type Theme = 'light' | 'dark'
 
@@ -32,10 +33,11 @@ const syncPageBackground = () => {
 }
 
 /** 同步页面主题、根画布背景和支持 theme-color 的浏览器栏。 */
-const applyTheme = (theme: Theme) => {
+const applyTheme = (theme: Theme, seed: string) => {
   const body = document.body
   // 主题切换帧禁用过渡，使页面颜色同步更新
   body.classList.add('change-theme')
+  applyMaterialPalette(body.style, seed, theme === 'dark')
   body.classList.toggle('dark', theme === 'dark')
   body.classList.toggle('light', theme === 'light')
   if (theme === 'dark') {
@@ -61,12 +63,15 @@ const applyTheme = (theme: Theme) => {
 }
 
 let appliedTheme: Theme | null = null
+let appliedSeed = ''
 
 const syncTheme = () => {
-  const theme = resolveTheme(useSettings.getState().themePreference, getOsTheme())
-  if (theme !== appliedTheme) {
+  const { themePreference, themeColor } = useSettings.getState()
+  const theme = resolveTheme(themePreference, getOsTheme())
+  if (theme !== appliedTheme || themeColor !== appliedSeed) {
     appliedTheme = theme
-    applyTheme(theme)
+    appliedSeed = themeColor
+    applyTheme(theme, themeColor)
   }
 }
 

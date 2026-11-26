@@ -532,3 +532,20 @@ export const IconPinOutline16 = () => (
     />
   </svg>
 )
+export const IconArrowBack24 = () => (
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.42-1.41L7.83 13H20v-2Z" />
+  </svg>
+)
+
+export const IconChat24 = () => (
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2Zm0 14H5.17L4 17.17V4h16v12ZM7 7h10v2H7V7Zm0 4h7v2H7v-2Z" />
+  </svg>
+)
+
+export const IconHistory24 = () => (
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M13 3a9 9 0 0 0-7.4 3.9L3 4.3V11h6.7L7 8.3A7 7 0 1 1 6.4 15H4.3A9 9 0 1 0 13 3Zm-1 5v5l4.3 2.5 1-1.7-3.3-1.9V8h-2Z" />
+  </svg>
+)

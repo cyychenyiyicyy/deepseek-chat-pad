@@ -3,11 +3,11 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslate } from '../../i18n/index.js'
 import {
   IconBrowseOutline16,
+  IconArrowBack24,
   IconDataOutline16,
   IconNewChatOutline20,
   IconPanelLeftOutline16,
   IconSearchOutline16,
-  IconSettingsOutline16,
   NewChatIcon,
 } from '../base/icons.js'
 import { setSiderCollapsed } from '../../services/settings.js'
@@ -30,7 +30,7 @@ import styles from './Sider.module.css'
 
 /**
  * 展开的侧边栏：顶部「本机 / 远程」胶囊、搜索框、新建对话（远程模式换成远程会话列表）、
- * 按时间分组的会话列表、底部模型与设置入口。移动端放在抽屉里，收起按钮关闭抽屉。
+ * 按时间分组的会话列表与底部快捷入口。窄窗中整页显示历史。
  *
  * 两种模式共用这一份骨架：胶囊只决定列表读哪一份数据，右栏详情由 `App` 决定。
  */
@@ -109,12 +109,12 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
       <div className={styles.top}>
         <div className={styles.brand}>
           <span className={styles.brandIcon} aria-hidden="true"><IconNewChatOutline20 /></span>
-          <span className={styles.appName}>{t('appName')}</span>
+          <span className={styles.appName}>{t('navHistory')}</span>
         </div>
         <IconButton
           size="xl"
-          icon={<IconPanelLeftOutline16 />}
-          tooltip={t('collapseSiderbarButton')}
+          icon={mobile ? <IconArrowBack24 /> : <IconPanelLeftOutline16 />}
+          tooltip={t(mobile ? 'settingsBackToChat' : 'collapseSiderbarButton')}
           tooltipPlacement="bottom"
           onClick={() => {
             if (mobile) {
@@ -214,9 +214,6 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
             icon={<><IconBrowseOutline16 /><span aria-hidden="true">{t('siderModelEntry')}</span></>}
             tooltip={t('siderModelEntry')} onClick={() => openSettings('models')} />
         )}
-        <IconButton size="xl" className={styles.bottomAction}
-          icon={<><IconSettingsOutline16 /><span aria-hidden="true">{t('settings')}</span></>}
-          tooltip={t('settings')} onClick={() => openSettings('general')} />
       </div>
 
 
@@ -262,10 +259,7 @@ export const Sider = ({ mobile = false }: { mobile?: boolean }) => {
   )
 }
 
-/**
- * 移动端抽屉：常驻挂载，靠 transform 与遮罩透明度做进出场动画，
- * 关闭时延后隐藏，保证滑出动画能播完。
- */
+/** 单栏窗口中的会话列表。常驻挂载以保留搜索词和列表位置。 */
 export const MobileSider = () => {
   const open = useMobileSider((state) => state.open)
   const drawer = useRef<HTMLDivElement>(null)
@@ -295,7 +289,6 @@ export const MobileSider = () => {
         }
       }}
     >
-      <div className={styles.drawerMask} onClick={closeMobileSider} />
       <div className={styles.drawer} ref={drawer}>
         <Sider mobile />
       </div>

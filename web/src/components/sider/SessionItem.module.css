@@ -63,12 +63,6 @@
   margin-inline-end: 4px;
 }
 
-@media (hover: hover) and (pointer: fine) {
-  .item:not(.active, :hover, :focus-within) .action {
-    opacity: 0;
-  }
-}
-
 .renameInput {
   box-sizing: border-box;
   width: 100%;

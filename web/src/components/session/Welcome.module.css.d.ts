@@ -3,7 +3,6 @@ declare const styles: {
   readonly "viewport": string;
   readonly "welcome": string;
   readonly "intro": string;
-  readonly "emblem": string;
   readonly "greeting": string;
   readonly "description": string;
   readonly "setup": string;

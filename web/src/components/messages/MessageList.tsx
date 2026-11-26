@@ -201,7 +201,6 @@ export const MessageList = ({
                   message={message}
                   retryUploadId={uploadRetryId}
                   isFirst={startIndex === 0 && index === 0}
-                  isLast={index === lastIndex || index === lastIndex - 1}
                   busy={streaming}
                   versions={versions.get(message.id) ?? EMPTY_VERSIONS}
                   onSelectVersion={selectVersion}

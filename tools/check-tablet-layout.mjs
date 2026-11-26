@@ -431,7 +431,12 @@ try {
     }
     throw new Error('Button did not appear: ' + text)
   }
+  const leaveSettings = async () => {
+    await openBy('Chat')
+    await check('returns to chat from settings', '!document.querySelector("[data-settings-page]")')
+  }
   const frame = 'document.querySelector("[class^=frame-]")'
+  const themeColor = (role) => `getComputedStyle(document.body).getPropertyValue('--md-${role}').trim()`
   const textarea = 'document.querySelector("textarea")'
   const photo = async (name) => {
     const { data } = await send('Page.captureScreenshot', { format: 'png' })
@@ -472,7 +477,7 @@ try {
   }
   if (!process.argv.includes('--integration-only')) {
   for (const [name, width, height] of [['landscape', 1366, 900], ['portrait', 800, 1120], ['phone-landscape', 844, 390], ['split', 460, 780]]) {
-    const drawerLayout = width < 768 || height <= 500
+    const singlePane = width < 840 || height < 480
     await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
     await send('Page.navigate', { url: 'http://127.0.0.1:' + server.address().port + '/' })
     for (let attempt = 0; attempt < 70; attempt++) {
@@ -487,10 +492,9 @@ try {
         'document.querySelector("[data-composer-primary]").parentElement.getBoundingClientRect().height <= 64')
     }
     await photo('tablet-' + name)
-    if (drawerLayout) {
-      await operation('document.querySelector("[class^=header-] button[aria-label]")?.click()')
-      await sleep(330)
-      await check(name + ' drawer opens', 'document.querySelector("[class^=drawerLayer-]").getAttribute("aria-hidden") === "false"')
+    if (singlePane) {
+      await openBy('History')
+      await check(name + ' opens the conversation list', 'document.querySelector("#mobile-session-drawer").getAttribute("aria-hidden") === "false"')
     }
     await openBy('Tablet workspace beta')
     await check(name + ' select beta', 'fixture.remote.getState().activeSessionId === "qa-b" && document.body.textContent.includes("A distinct response for qa-b")')
@@ -511,13 +515,29 @@ try {
       'document.querySelector("textarea").getBoundingClientRect().top - document.querySelector("[data-testid=new-session-page] h1").getBoundingClientRect().bottom < 125')
     await photo('tablet-' + name + '-new')
     await operation('fixture.newSession.getState().closePanel()')
-    if (drawerLayout) {
-      await operation('document.querySelector("[class^=header-] button[aria-label]")?.click()')
-      await sleep(330)
-    }
     await openBy('Settings')
-    await check(name + ' shows all settings tabs', '[...document.querySelectorAll("[role=tab]")].length === 4')
+    await check(name + ' settings list has four sections in a main page',
+      'document.querySelectorAll("[data-settings-page] nav button").length === 4 && !document.querySelector("[role=dialog]")')
+    await check(name + ' places primary navigation for this window size', `(() => {
+      const nav = document.querySelector('[data-app-frame] > nav').getBoundingClientRect()
+      return ${width < 600 && height >= 480} ? nav.bottom === innerHeight && nav.width === innerWidth : nav.left === 0 && nav.width === 88
+    })()`)
+    await openBy('General')
+    await check(name + ' settings adapts its list and detail',
+      'Boolean(document.querySelector("[data-settings-content]")) && Boolean(document.querySelector("[data-settings-page] nav")) === ' + !singlePane)
+    await check(name + ' group controls fit on screen', `(() => {
+      const panel = document.querySelector('[data-settings-content]')
+      return panel.scrollWidth <= panel.clientWidth + 1 && panel.getBoundingClientRect().bottom <= innerHeight
+    })()`)
     await photo('tablet-' + name + '-settings')
+    if (singlePane) {
+      await operation('history.back()')
+      await check(name + ' browser Back returns from settings detail to the list',
+        'Boolean(document.querySelector("[data-settings-page] nav")) && !document.querySelector("[data-settings-content]")')
+    }
+    await openBy('Back to chat')
+    await check(name + ' returning from settings preserves the conversation',
+      '!document.querySelector("[data-settings-page]") && document.body.innerText.includes("A distinct response for qa-b")')
   }
   await send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 900, deviceScaleFactor: 1, mobile: false })
   await send('Page.navigate', { url: 'http://127.0.0.1:' + server.address().port + '/?local' })
@@ -538,7 +558,45 @@ try {
       rect?.height >= 44 && rect.bottom <= innerHeight &&
       toolbar && toolbar.scrollWidth === toolbar.clientWidth;
   })()`)
+  await check('the compact welcome keeps its title close to the composer and uses the indigo scheme',
+    `${themeColor('primary')} === "#bec2ff" &&
+      ${textarea}.getBoundingClientRect().top - document.querySelector('h1').getBoundingClientRect().bottom < 100`)
   await photo('tablet-local-split-dark')
+  await openBy('Settings')
+  await openBy('General')
+  await openBy('Rose')
+  await check('a color preset updates Material roles without changing dark mode', `
+    ${themeColor('primary')} !== "#bec2ff" && document.body.dataset.dsDarkTheme === "dark" &&
+    localStorage.getItem("chat-demo:theme-color") === "#a94264" &&
+    [...document.querySelectorAll('button[aria-pressed=true]')].some(button => button.textContent === 'Rose')
+  `)
+  await operation(`(() => {
+    const picker = document.querySelector('input[type=color]')
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(picker, '#d66931')
+    picker.dispatchEvent(new Event('input', { bubbles: true }))
+    picker.dispatchEvent(new Event('change', { bubbles: true }))
+  })()`)
+  await check('a custom seed updates the stored color', 'localStorage.getItem("chat-demo:theme-color") === "#d66931"')
+  await send('Page.reload')
+  await check('the custom color persists and the light palette maintains contrast', `(() => {
+    const picker = document.querySelector('input[type=color]')
+    const luminance = (role) => {
+      const color = getComputedStyle(document.body).getPropertyValue('--md-' + role).trim()
+      const [r, g, b] = [...color.slice(1).matchAll(/../g)].map(match => {
+        const c = parseInt(match[0], 16) / 255
+        return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+      })
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+    return picker?.value === '#d66931' && ${themeColor('primary')} !== '#555a92' &&
+      (luminance('on-primary') + 0.05) / (luminance('primary') + 0.05) >= 4.5 &&
+      (luminance('surface') + 0.05) / (luminance('on-surface') + 0.05) >= 4.5
+  })()`)
+  await photo('tablet-custom-theme')
+  await openBy('Indigo (default)')
+  await check('restoring indigo clears the custom seed and reapplies the default roles',
+    `localStorage.getItem("chat-demo:theme-color") === null && ${themeColor('primary')} === "#555a92"`)
+  await leaveSettings()
   await operation('document.querySelector(\'[aria-controls="mobile-session-drawer"]\').click()')
   await operation('fixture.remote.setState({ phase: "idle", hostId: null, activeSessionId: null }); document.querySelector(\'#mobile-session-drawer button[aria-haspopup="dialog"]\').click()')
   await check('one host picker includes the current local context and remote connection',
@@ -547,9 +605,27 @@ try {
   await operation(`[...document.querySelectorAll('[role=dialog] button')].find(x => x.textContent.includes('Disconnected')).click()`)
   await check('unconnected remote mode exposes connection without opening Settings', 'document.querySelector("h1")?.textContent.includes("Not connected") && !document.querySelector("[role=dialog]")')
   await openBy('Remote connection')
-  await check('the connection dialog exposes pairing and SSH before advanced settings',
-    'document.querySelector("[role=dialog]")?.innerText.includes("Connect SSH host") && document.querySelector("[role=dialog]")?.innerText.includes("Pair a host") && !document.querySelector("[role=tab][aria-selected=true][aria-controls]")')
+  await check('the remote settings page exposes pairing and SSH',
+    'document.querySelector("[data-settings-page]")?.innerText.includes("Connect SSH host") && document.querySelector("[data-settings-page]")?.innerText.includes("Pair a host") && !document.querySelector("[role=dialog]")')
   await photo('tablet-remote-connection')
+  await openBy('Connect SSH host')
+  await check('a complex form fills the compact window', `(() => {
+    const dialog = document.querySelector('[role=dialog][data-expanded]')
+    return dialog?.getBoundingClientRect().width === innerWidth && Boolean(dialog.querySelector('input[name=host]'))
+  })()`)
+  await operation(`document.querySelector('input[name=host]').focus()
+    Object.defineProperty(visualViewport, 'height', { configurable: true, value: 280 })
+    visualViewport.dispatchEvent(new Event('resize'))`)
+  await check('a full-screen form follows the keyboard and retains its close control', `(() => {
+    const dialog = document.querySelector('[role=dialog]')
+    const body = dialog.querySelector('[class^="main-"]')
+    const close = dialog.querySelector('button[aria-label="Close"]').getBoundingClientRect()
+    return dialog.getBoundingClientRect().height === 280 && body.scrollHeight > body.clientHeight &&
+      close.top >= 0 && close.bottom <= 280
+  })()`)
+  await photo('tablet-ssh-keyboard')
+  await openBy('Close')
+  await operation('delete visualViewport.height; visualViewport.dispatchEvent(new Event("resize"))')
   await send('Emulation.setDeviceMetricsOverride', { width: 460, height: 780, deviceScaleFactor: 1, mobile: false })
   await send('Page.navigate', { url: 'http://127.0.0.1:' + server.address().port + '/?management' })
   for (let attempt = 0; attempt < 70 && !await js('location.search === "?management" && document.documentElement.dataset.dsBooted === "1"').catch(() => false); attempt++) await sleep(90)
@@ -557,6 +633,18 @@ try {
   await operation(`(() => { const entry = document.querySelector('#mobile-session-drawer button[aria-label="Remote tools"]'); entry.focus(); entry.click(); })()`)
   await check('remote tools group Host actions and conversation data outside Settings',
     'document.querySelector("[role=dialog] h2")?.textContent === "Remote tools" && Boolean(document.querySelector("section[aria-label=Host] button") && document.querySelector(\'section[aria-label="Conversation data"] button\'))')
+  await send('Emulation.setDeviceMetricsOverride', { width: 320, height: 390, deviceScaleFactor: 1, mobile: false })
+  await check('a long dialog scrolls independently and its close control stays reachable', `(() => {
+    const dialog = document.querySelector('[role=dialog]')
+    const body = dialog.querySelector('[class^="main-"]')
+    const close = dialog.querySelector('button[aria-label="Close"]')
+    const before = close.getBoundingClientRect()
+    body.scrollTop = body.scrollHeight
+    const after = close.getBoundingClientRect()
+    return body.scrollTop > 0 && before.top === after.top && after.top >= 0 &&
+      after.bottom <= innerHeight && document.elementFromPoint(after.x + after.width / 2, after.y + after.height / 2)?.closest('button') === close
+  })()`)
+  await send('Emulation.setDeviceMetricsOverride', { width: 460, height: 780, deviceScaleFactor: 1, mobile: false })
   await operation('fixture.settings.setState({ locale: "zh-CN" })')
   await photo('tablet-remote-tools')
   await operation('fixture.settings.setState({ locale: "en-US" })')
@@ -701,7 +789,7 @@ try {
   await check('clear uses the current provider credential reference',
     'fixture.telemetry.calls.some(x=>x.endpoint==="credentials/unset" && x.args.ref==="FIXTURE_API_KEY") && document.body.textContent.includes("Not configured")')
   await closeManagement()
-  await closeManagement()
+  await leaveSettings()
   const enter = () => operation('document.querySelector("textarea")?.dispatchEvent(new KeyboardEvent("keydown", {key:"Enter", bubbles:true}))')
   await operation('fixture.newSession.getState().openPanel(); fixture.telemetry.createDelay=450; fixture.telemetry.sendOutcome="success"')
   await changeInput('textarea', 'Keep draft when leaving new session')
@@ -941,7 +1029,7 @@ try {
   await check('legacy hosts get one queue request addressed to the selected session',
     'fixture.telemetry.calls.filter(x=>x.endpoint==="session/prompt" && x.args.request.sessionId==="qa-a" && JSON.stringify(x.args.request.content).includes("Legacy fixture task")).length===1')
   await closeManagement()
-  await closeManagement()
+  await leaveSettings()
   await operation(`fixture.newSession.getState().openPanel()
     fixture.newSession.getState().addDraftFiles([
       new File(["first"], "first.txt", {type:"text/plain"}),
@@ -991,7 +1079,7 @@ try {
     return pinned[0] === 'folder' && groups['other-folder'] === 'My project group';
   })()`)
   await closeManagement()
-  await closeManagement()
+  await leaveSettings()
   await operation(`fixture.newSession.getState().openPanel();
     fixture.newSession.getState().openSheet('workspace');`)
   await check('new conversation chooser shows the pinned and grouped workspaces',
@@ -1192,6 +1280,7 @@ try {
     'fixture.telemetry.linkAttempts.join(",")==="direct" && fixture.remote.getState().phase!=="ready"')
   await operation('fixture.remote.getState().retryAutoConnect()')
   await operation('fixture.refreshInventory()')
+  await leaveSettings()
   await operation(`fixture.newSession.getState().openPanel(); fixture.newSession.getState().selectWorkspace(null);
     fixture.newSession.getState().addDraftFiles([
       new File(['done'], 'before-reload.txt', {type:'text/plain'}),
@@ -1284,6 +1373,7 @@ try {
   await operation('document.querySelector(\'form:has(input[name="host"]) button[type=submit]\').click()')
   await check('SSH uses the HTTP Host inventory and separates a duplicate session ID from previous relay Hosts',
     'fixture.remote.getState().transport==="ssh" && fixture.remote.getState().phase==="ready" && fixture.remote.getState().sessions[0]?.title==="SSH-only conversation"', 6000)
+  await leaveSettings()
   await operation('fixture.remote.getState().openSession("qa-a")')
   await check('SSH stream renders the selected conversation and clears the previous Host draft',
     'fixture.remote.getState().items.some(x=>x.text==="SSH-only response") && document.querySelector("textarea").value===""', 5000)

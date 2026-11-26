@@ -6,7 +6,7 @@
   height: 100%;
   padding: 0 clamp(12px, 1.3vw, 18px);
   border-inline-end: 1px solid var(--pad-divider);
-  background: var(--pad-sidebar);
+  background: var(--md-surface-container-low);
 }
 
 .top {
@@ -58,9 +58,9 @@
   min-height: var(--pad-touch);
   box-sizing: border-box;
   padding: 0 10px;
-  border: 1px solid var(--pad-control-border);
-  border-radius: var(--pad-radius-control);
-  background: var(--pad-surface);
+  border: 1px solid transparent;
+  border-radius: 100px;
+  background: var(--md-surface-container-high);
 }
 
 .search:focus-within {
@@ -96,20 +96,20 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: var(--pad-touch);
+  min-height: 56px;
   margin-bottom: 10px;
   padding: 6px 12px;
   border: 0;
-  border-radius: var(--pad-radius-control);
-  background: var(--pad-accent);
-  color: var(--pad-on-accent);
+  border-radius: 16px;
+  background: var(--md-primary-container);
+  color: var(--md-on-primary-container);
   font: inherit;
   font-weight: 600;
   cursor: pointer;
 }
 
 .newChat:hover {
-  background: var(--pad-accent-hover);
+  filter: brightness(0.95);
 }
 
 .newChatIcon {
@@ -230,43 +230,20 @@
   inset: 0;
   z-index: 800;
   visibility: hidden;
-  transition: visibility 0s linear var(--ds-transition-duration-slow);
+  background: var(--md-surface-container-low);
 }
 
 .drawerOpen {
   visibility: visible;
-  transition-delay: 0s;
-}
-
-.drawerMask {
-  position: absolute;
-  inset: 0;
-  background: var(--pad-overlay);
-  opacity: 0;
-  transition: opacity var(--ds-transition-duration-slow) var(--ds-ease-in-out);
-}
-
-.drawerOpen .drawerMask {
-  opacity: 1;
 }
 
 .drawer {
   position: absolute;
-  inset: 0 auto 0 0;
-  width: min(344px, 92vw);
-  transform: translateX(-100%);
-  transition: transform var(--ds-transition-duration-slow) cubic-bezier(0.32, 0.72, 0, 1);
-  box-shadow: var(--pad-dialog-shadow);
+  inset: 0;
 }
 
-.drawerOpen .drawer {
-  transform: translateX(0);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .drawerLayer,
-  .drawerMask,
-  .drawer {
-    transition: none;
-  }
+.drawer .sider {
+  max-width: 720px;
+  margin-inline: auto;
+  border: 0;
 }

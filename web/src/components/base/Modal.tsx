@@ -15,7 +15,8 @@ export const Modal = ({
   title,
   children,
   footer,
-  closable = false,
+  closable = footer == null,
+  expanded = false,
   className,
   mainClassName,
   onClose,
@@ -25,6 +26,8 @@ export const Modal = ({
   footer?: ReactNode
   /** 标题栏右侧显示关闭按钮 */
   closable?: boolean
+  /** Multi-step tasks get a full-screen dialog on handheld windows. */
+  expanded?: boolean
   className?: string
   /** 内容区的 class */
   mainClassName?: string
@@ -41,6 +44,8 @@ export const Modal = ({
     if (!dialog) return
     const root = document.getElementById('root')
     openModals.push(dialog)
+    const previous = openModals.at(-2)
+    previous?.toggleAttribute('inert', true)
     root?.setAttribute('inert', '')
     if (!dialog.contains(document.activeElement)) dialog.focus({ preventScroll: true })
 
@@ -72,6 +77,7 @@ export const Modal = ({
       const nextDialog = openModals.at(-1)
       if (!nextDialog) root?.removeAttribute('inert')
       if (!wasTop) return
+      nextDialog?.removeAttribute('inert')
       queueMicrotask(() => {
         if (openModals.at(-1) !== nextDialog) return
         if (trigger instanceof HTMLElement && trigger.isConnected && (!nextDialog || nextDialog.contains(trigger))) {
@@ -91,6 +97,7 @@ export const Modal = ({
       <div
         ref={dialogRef}
         className={clsx(styles.content, className)}
+        data-expanded={expanded || undefined}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

@@ -76,7 +76,7 @@ export default function SshHostDialog({ onClose }: { onClose(): void }) {
   }
 
   return (
-    <Modal title={t('remoteSshHost')} onClose={close} className={styles.modal} mainClassName={styles.body}>
+    <Modal expanded title={t('remoteSshHost')} onClose={close} className={styles.modal} mainClassName={styles.body}>
       <div className={styles.layout}>
       {profiles.length > 0 && <label className={styles.field}>{t('remoteSshSavedHosts')}
         <select value={profileKey} disabled={busy} onChange={(event) => select(event.target.value)}>
